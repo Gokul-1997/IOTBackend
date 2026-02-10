@@ -8,16 +8,11 @@ module.exports = app => {
   app.use('/api/shifts', require('./shifts/shift.routes'));
   app.use('/api/assignments', require('./assignments/assignment.routes'));
 
-  app.use('/api/telemetry', require('./telemetry/telemetry.routes'));
-
   app.use('/api/dashboard', require('./dashboard/dashboard.routes'));
-
   app.use('/api/reports', require('./reports/report.routes'));
-
   app.use('/api/oee', require('./oee/oee.routes'));
 
-  app.use('/api/ai', require('./ai/ai.routes'));
   app.use('/api/plants', require('./plants/plant.routes'));
-
-
+  app.use('/api/upload', require('./upload/upload.routes'));
+  app.use('/api/ai', require('./ai/ai.routes'));
 };

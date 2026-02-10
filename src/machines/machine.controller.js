@@ -1,7 +1,6 @@
 const service = require('./machine.service');
 
 exports.createMachine = async (req, res) => {
-  console.log('In controller:', req.user.plant_id);
   try {
     const data = await service.createMachine(req);
     res.json({ status: 'success', data });
@@ -19,11 +18,9 @@ exports.getMachines = async (req, res) => {
       total: result.total
     });
   } catch (e) {
-    console.error(e);
     res.status(500).json({ status: 'error', message: e.message });
   }
 };
-
 
 exports.toggleMachineStatus = async (req, res) => {
   try {
@@ -40,15 +37,5 @@ exports.regenerateApiKey = async (req, res) => {
     res.json({ status: 'success', api_key: apiKey });
   } catch (e) {
     res.status(400).json({ status: 'error', message: e.message });
-  }
-};
-
-
-exports.machineAuth = async (req, res) => {
-  try {
-    const data = await service.machineAuth(req);
-    res.json({ status: 'success', data });
-  } catch (e) {
-    res.status(401).json({ status: 'error', message: e.message });
   }
 };

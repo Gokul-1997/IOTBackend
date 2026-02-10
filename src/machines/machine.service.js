@@ -1,29 +1,28 @@
-const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const crypto = require('crypto');
 
+/* CREATE MACHINE (ADMIN) */
 exports.createMachine = async (req) => {
   const {
-    machine_code,
     machine_name,
     axis_model,
     controller_model,
     machine_year
   } = req.body;
 
-  if (!machine_code || !machine_name) {
-    throw new Error('Machine code and name required');
+  if (!machine_name) {
+    throw new Error('Machine name required');
   }
-  const apiKey = crypto.randomUUID();
+
+  const apiKey = crypto.randomBytes(16).toString('hex');
 
   const result = await pool.query(
     `INSERT INTO machines
-     (plant_id, machine_code, machine_name, axis_model, controller_model, machine_year, api_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
-     RETURNING *`,
+     (plant_id, machine_name, axis_model, controller_model, machine_year, api_key)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     RETURNING id, machine_name, api_key`,
     [
       req.user.plant_id,
-      machine_code,
       machine_name,
       axis_model,
       controller_model,
@@ -32,9 +31,10 @@ exports.createMachine = async (req) => {
     ]
   );
 
-  return result.rows[0];
+  return result.rows[0]; // api_key shown ONCE
 };
 
+/* LIST MACHINES */
 exports.getMachines = async (req) => {
   const {
     search = '',
@@ -47,7 +47,6 @@ exports.getMachines = async (req) => {
   const plantId = req.user.plant_id;
   const offset = (page - 1) * limit;
 
-  // ✅ Allowed columns (prevent SQL injection)
   const sortableColumns = [
     'id',
     'machine_name',
@@ -60,7 +59,6 @@ exports.getMachines = async (req) => {
   const orderColumn = sortableColumns.includes(sortBy) ? sortBy : 'id';
   const orderDirection = sortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
-  // 🔍 Search condition
   let whereSQL = `WHERE plant_id = $1`;
   const values = [plantId];
 
@@ -68,24 +66,16 @@ exports.getMachines = async (req) => {
     values.push(`%${search}%`);
     whereSQL += `
       AND (
-        machine_code ILIKE $${values.length}
-        OR machine_name ILIKE $${values.length}
+        machine_name ILIKE $${values.length}
         OR axis_model ILIKE $${values.length}
         OR controller_model ILIKE $${values.length}
       )
     `;
   }
 
-  // 📄 Data query
   const dataQuery = `
-    SELECT
-      id,
-      machine_code,
-      machine_name,
-      axis_model,
-      controller_model,
-      machine_year,
-      is_active
+    SELECT id, machine_name, axis_model, controller_model,
+           machine_year, is_active
     FROM machines
     ${whereSQL}
     ORDER BY ${orderColumn} ${orderDirection}
@@ -93,9 +83,6 @@ exports.getMachines = async (req) => {
     OFFSET $${values.length + 2}
   `;
 
-  const dataValues = [...values, limit, offset];
-
-  // 🔢 Count query
   const countQuery = `
     SELECT COUNT(*)::int AS total
     FROM machines
@@ -103,7 +90,7 @@ exports.getMachines = async (req) => {
   `;
 
   const [dataRes, countRes] = await Promise.all([
-    pool.query(dataQuery, dataValues),
+    pool.query(dataQuery, [...values, limit, offset]),
     pool.query(countQuery, values)
   ]);
 
@@ -113,7 +100,7 @@ exports.getMachines = async (req) => {
   };
 };
 
-
+/* ENABLE / DISABLE MACHINE */
 exports.toggleMachineStatus = async (req) => {
   const { id } = req.params;
 
@@ -125,60 +112,17 @@ exports.toggleMachineStatus = async (req) => {
   );
 };
 
+/* REGENERATE API KEY */
 exports.regenerateApiKey = async (req) => {
   const { id } = req.params;
-  const newKey = crypto.randomUUID();
+  const newKey = crypto.randomBytes(16).toString('hex');
 
   await pool.query(
     `UPDATE machines
-     SET api_key = $1,
-         tokens = '{}'
+     SET api_key = $1
      WHERE id = $2 AND plant_id = $3`,
     [newKey, id, req.user.plant_id]
   );
 
   return newKey;
-};
-
-
-exports.machineAuth = async (req) => {
-  const machineCode = req.headers['x-machine-code'];
-  const apiKey = req.headers['x-api-key'];
-
-  if (!machineCode || !apiKey) {
-    throw new Error('Machine credentials missing');
-  }
-
-  const result = await pool.query(
-    `SELECT * FROM machines WHERE machine_code = $1 AND is_active = true`,
-    [machineCode]
-  );
-
-  if (!result.rowCount) {
-    throw new Error('Invalid machine');
-  }
-
-  const machine = result.rows[0];
-
-  if (machine.api_key !== apiKey) {
-    throw new Error('Invalid API key');
-  }
-
-  const payload = {
-    type: 'MACHINE',
-    machine_id: machine.id,
-    plant_id: machine.plant_id,
-    permissions: ['PUSH_TELEMETRY']
-  };
-
-  const token = jwt.sign(payload, process.env.SECRET_CODE, {
-    expiresIn: '24h'
-  });
-
-  await pool.query(
-    `UPDATE machines SET tokens = array_append(tokens, $1) WHERE id = $2`,
-    [token, machine.id]
-  );
-
-  return { accessToken: token };
 };

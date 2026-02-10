@@ -9,29 +9,22 @@ module.exports = async (req, res, next) => {
       return res.status(401).json({ message: 'Authorization token missing' });
     }
 
-    // 1️⃣ Extract & normalize token
-    let token = auth.replace('Bearer', '').trim();
+    // 1️⃣ Extract token
+    const token = auth.split(' ')[1];
 
-    if (token.startsWith('"') && token.endsWith('"')) {
-      token = token.slice(1, -1);
-    }
-
-    // 2️⃣ Basic JWT format check
-    if (token.split('.').length !== 3) {
-      return res.status(401).json({ message: 'Invalid token format' });
-    }
-
-    // 3️⃣ Verify JWT
+    // 2️⃣ Verify JWT
     let decoded;
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
-      return res.status(401).json({ message: 'Token expired or invalid' });
+      return res.status(401).json({
+        message: 'Access token expired or invalid'
+      });
     }
 
-    // 4️⃣ Load user + active tokens
+    // 3️⃣ Load user (basic validation)
     const { rows } = await db.query(
-      `SELECT id, username, plant_id, tokens
+      `SELECT id, username, plant_id, is_active
        FROM users
        WHERE id = $1`,
       [decoded.user_id]
@@ -43,20 +36,24 @@ module.exports = async (req, res, next) => {
 
     const user = rows[0];
 
-    // 5️⃣ Enforce max-2-session rule
-    if (!Array.isArray(user.tokens) || !user.tokens.includes(token)) {
-      return res.status(401).json({
-        message: 'Session expired. Please login again.'
-      });
+    if (!user.is_active) {
+      return res.status(403).json({ message: 'Account inactive' });
     }
 
-    // 6️⃣ Attach user to request
+    // 🔥 NORMALIZE USER CONTEXT (THIS FIXES EVERYTHING)
+    const roles = decoded.roles || [];
+
     req.user = {
       id: user.id,
       username: user.username,
       plant_id: user.plant_id,
-      roles: decoded.roles,
-      permissions: decoded.permissions
+
+      // ✅ ADD THIS
+      role: roles[0] || 'USER',
+
+      // keep existing
+      roles,
+      permissions: decoded.permissions || []
     };
 
     next();

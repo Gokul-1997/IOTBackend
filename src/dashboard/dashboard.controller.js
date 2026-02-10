@@ -1,8 +1,15 @@
 const svc = require('./dashboard.service');
 
 exports.live = async (req, res) => {
-  res.json(await svc.liveMachines(req.user.plant_id));
+  res.json(
+    await svc.liveMachines({
+      user_id: req.user.id,
+      plant_id: req.user.plant_id,
+      role: req.user.role
+    })
+  );
 };
+
 
 exports.hourlyOee = async (req, res) => {
   const { machine_id, date } = req.query;

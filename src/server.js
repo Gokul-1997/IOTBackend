@@ -1,3 +1,8 @@
 require('dotenv').config();
 const app = require('./app');
-app.listen(8000, () => console.log('Server running'));
+
+const PORT = process.env.PORT || 8000;
+
+app.listen(PORT, () => {
+  console.log(`Server-2 running on port ${PORT}`);
+});

@@ -1,58 +1,77 @@
 const db = require('../db');
+const redis = require('../redis'); 
 
-exports.liveMachines = async plant_id => {
-  const { rows } = await db.query(
-    `
-    SELECT
-      m.id AS machine_id,
-      m.machine_name,
-      t.status,
-      t.received_at,
+exports.liveMachines = async ({ user_id, plant_id, role }) => {
+  let machinesQuery;
+  let params;
 
-      o.operator_name,
-      s.shift_name,
+  // 1️⃣ Decide machine scope
+  if (role === 'ADMIN') {
+    machinesQuery = `
+      SELECT id, machine_name
+      FROM machines
+      WHERE plant_id = $1
+        AND is_active = TRUE
+      ORDER BY machine_name
+    `;
+    params = [plant_id];
+  } else {
+    machinesQuery = `
+      SELECT m.id, m.machine_name
+      FROM machines m
+      JOIN operator_machine_assignments oma
+        ON oma.machine_id = m.id
+       AND oma.operator_id = $1
+       AND oma.is_active = TRUE
+      WHERE m.plant_id = $2
+        AND m.is_active = TRUE
+      ORDER BY m.machine_name
+    `;
+    params = [user_id, plant_id];
+  }
 
-      oh.oee
+  const { rows: machines } = await db.query(machinesQuery, params);
 
-    FROM machines m
+  // 2️⃣ Fetch OEE in one shot
+  const machineIds = machines.map(m => m.id);
+  let oeeMap = {};
 
-    LEFT JOIN LATERAL (
-      SELECT status, received_at
-      FROM telemetry_raw
-      WHERE machine_id = m.id
-      ORDER BY received_at DESC
-      LIMIT 1
-    ) t ON TRUE
-
-    LEFT JOIN operator_machine_assignments oma
-      ON oma.machine_id = m.id AND oma.is_active = TRUE
-
-    LEFT JOIN operators o
-      ON o.id = oma.operator_id
-
-    LEFT JOIN operator_shift_assignments osa
-      ON osa.operator_id = o.id AND osa.is_active = TRUE
-
-    LEFT JOIN shifts s
-      ON s.id = osa.shift_id
-
-    LEFT JOIN LATERAL (
-      SELECT oee
+  if (machineIds.length) {
+    const { rows: oees } = await db.query(
+      `
+      SELECT DISTINCT ON (machine_id)
+        machine_id,
+        oee
       FROM oee_hourly
-      WHERE machine_id = m.id
-      ORDER BY hour_start DESC
-      LIMIT 1
-    ) oh ON TRUE
+      WHERE machine_id = ANY($1)
+      ORDER BY machine_id, hour_start DESC
+      `,
+      [machineIds]
+    );
 
-    WHERE m.plant_id = $1
-      AND m.is_active = TRUE
-    ORDER BY m.machine_name
-    `,
-    [plant_id]
-  );
+    oees.forEach(o => {
+      oeeMap[o.machine_id] = o.oee;
+    });
+  }
 
-  return rows;
+  // 3️⃣ Merge Redis live data
+  const result = [];
+
+  for (const m of machines) {
+    const liveRaw = await redis.get(`machine:${m.id}:live`);
+    const live = liveRaw ? JSON.parse(liveRaw) : null;
+
+    result.push({
+      machine_id: m.id,
+      machine_name: m.machine_name,
+      oee: oeeMap[m.id] ?? null,
+      live
+    });
+  }
+
+  return result;
 };
+
 
 
 exports.hourlyOee = async (plant_id, machine_id, date) => {
