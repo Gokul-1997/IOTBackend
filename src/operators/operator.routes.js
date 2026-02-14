@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('./operator.controller');
 const auth = require('../middleware/auth.middleware');
-const role = require('../middleware/role.middleware');
+const permit = require('../middleware/permission.middleware');
 
-router.post('/', auth, role(['ADMIN','SUPERVISOR']), ctrl.create);
-router.get('/', auth, ctrl.list);
+router.post('/', auth,  permit('operator.create'), ctrl.create);
+router.get('/', auth, permit('operator.view'), ctrl.list);
 
 module.exports = router;

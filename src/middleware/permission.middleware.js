@@ -5,7 +5,7 @@ module.exports = function checkPermission(requiredPermission) {
       return res.status(401).json({ message: 'User context missing' });
     }
     const permissions = req.user.permissions || [];
-
+    // console.log('User permissions:', permissions);
     if (!Array.isArray(permissions)) {
       return res.status(403).json({ message: 'Invalid permissions format' });
     }

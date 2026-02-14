@@ -5,6 +5,7 @@ const crypto = require('crypto');
 exports.createMachine = async (req) => {
   const {
     machine_name,
+    image_url,
     axis_model,
     controller_model,
     machine_year
@@ -18,12 +19,13 @@ exports.createMachine = async (req) => {
 
   const result = await pool.query(
     `INSERT INTO machines
-     (plant_id, machine_name, axis_model, controller_model, machine_year, api_key)
-     VALUES ($1,$2,$3,$4,$5,$6)
+     (plant_id, machine_name, image_url, axis_model, controller_model, machine_year, api_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
      RETURNING id, machine_name, api_key`,
     [
       req.user.plant_id,
       machine_name,
+      image_url,
       axis_model,
       controller_model,
       machine_year,
@@ -31,7 +33,7 @@ exports.createMachine = async (req) => {
     ]
   );
 
-  return result.rows[0]; // api_key shown ONCE
+  return result.rows[0];
 };
 
 /* LIST MACHINES */
@@ -74,7 +76,7 @@ exports.getMachines = async (req) => {
   }
 
   const dataQuery = `
-    SELECT id, machine_name, axis_model, controller_model,
+    SELECT id, machine_name,image_url,axis_model, controller_model,
            machine_year, is_active
     FROM machines
     ${whereSQL}
@@ -125,4 +127,21 @@ exports.regenerateApiKey = async (req) => {
   );
 
   return newKey;
+};
+
+
+/* DELETE MACHINE */
+exports.deleteMachine = async (req) => {
+  const { id } = req.params;
+
+  const result = await pool.query(
+    `DELETE FROM machines
+     WHERE id = $1 AND plant_id = $2
+     RETURNING id`,
+    [id, req.user.plant_id]
+  );
+
+  if (result.rowCount === 0) {
+    throw new Error('Machine not found or access denied');
+  }
 };

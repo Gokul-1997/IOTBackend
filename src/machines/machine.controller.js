@@ -39,3 +39,12 @@ exports.regenerateApiKey = async (req, res) => {
     res.status(400).json({ status: 'error', message: e.message });
   }
 };
+
+exports.deleteMachine = async (req, res) => {
+  try {
+    await service.deleteMachine(req);
+    res.json({ status: 'success', message: 'Machine deleted successfully' });
+  } catch (e) {
+    res.status(400).json({ status: 'error', message: e.message });
+  }
+};

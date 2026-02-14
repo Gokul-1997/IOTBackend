@@ -13,7 +13,6 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Test connection (only once at boot)
 (async () => {
   try {
     const client = await pool.connect();

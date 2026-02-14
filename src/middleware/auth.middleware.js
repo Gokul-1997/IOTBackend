@@ -42,7 +42,6 @@ module.exports = async (req, res, next) => {
 
     // 🔥 NORMALIZE USER CONTEXT (THIS FIXES EVERYTHING)
     const roles = decoded.roles || [];
-
     req.user = {
       id: user.id,
       username: user.username,

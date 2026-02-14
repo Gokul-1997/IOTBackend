@@ -1,6 +1,7 @@
 const pool = require('../db');
 
 exports.getShifts = async (req) => {
+  console.log('Fetching shifts for plant_id:', req.user);
   const result = await pool.query(
     `
     SELECT
