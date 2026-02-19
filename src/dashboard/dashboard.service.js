@@ -1,140 +1,162 @@
 const db = require('../db');
-const redis = require('../redis'); 
+const redis = require('../redis');
 
-exports.liveMachines = async ({ user_id, plant_id, role }) => {
-  let machinesQuery;
-  let params;
 
-  // 1️⃣ Decide machine scope
-  if (role === 'ADMIN') {
-    machinesQuery = `
-      SELECT id, machine_name
-      FROM machines
-      WHERE plant_id = $1
-        AND is_active = TRUE
-      ORDER BY machine_name
-    `;
-    params = [plant_id];
-  } else {
-    machinesQuery = `
-      SELECT m.id, m.machine_name
-      FROM machines m
-      JOIN operator_machine_assignments oma
-        ON oma.machine_id = m.id
-       AND oma.operator_id = $1
-       AND oma.is_active = TRUE
-      WHERE m.plant_id = $2
-        AND m.is_active = TRUE
-      ORDER BY m.machine_name
-    `;
-    params = [user_id, plant_id];
-  }
+// =====================================================
+// 1️⃣ PAGINATED DASHBOARD (PLANT ONLY)
+// =====================================================
 
-  const { rows: machines } = await db.query(machinesQuery, params);
+exports.dashboardPaged = async ({
+  plant_id,
+  page = 1,
+  limit = 6
+}) => {
 
-  // 2️⃣ Fetch OEE in one shot
+  const offset = (page - 1) * limit;
+
+  // Total count
+  const totalResult = await db.query(`
+    SELECT COUNT(*)
+    FROM machines
+    WHERE plant_id = $1
+      AND is_active = TRUE
+  `, [plant_id]);
+
+  const total = Number(totalResult.rows[0].count);
+
+  // Paginated machines
+  const { rows: machines } = await db.query(`
+    SELECT id, machine_name
+    FROM machines
+    WHERE plant_id = $1
+      AND is_active = TRUE
+    ORDER BY machine_name
+    LIMIT $2 OFFSET $3
+  `, [plant_id, limit, offset]);
+
   const machineIds = machines.map(m => m.id);
-  let oeeMap = {};
 
-  if (machineIds.length) {
-    const { rows: oees } = await db.query(
-      `
-      SELECT DISTINCT ON (machine_id)
-        machine_id,
-        oee
-      FROM oee_hourly
-      WHERE machine_id = ANY($1)
-      ORDER BY machine_id, hour_start DESC
-      `,
-      [machineIds]
-    );
-
-    oees.forEach(o => {
-      oeeMap[o.machine_id] = o.oee;
-    });
+  if (!machineIds.length) {
+    return {
+      total,
+      page,
+      per_page: limit,
+      machines: []
+    };
   }
 
-  // 3️⃣ Merge Redis live data
-  const result = [];
+  // Latest OEE
+  const { rows: oees } = await db.query(`
+    SELECT DISTINCT ON (machine_id)
+      machine_id,
+      oee
+    FROM oee_hourly
+    WHERE machine_id = ANY($1)
+    ORDER BY machine_id, hour_start DESC
+  `, [machineIds]);
 
-  for (const m of machines) {
-    const liveRaw = await redis.get(`machine:${m.id}:live`);
-    const live = liveRaw ? JSON.parse(liveRaw) : null;
+  const oeeMap = {};
+  oees.forEach(o => oeeMap[o.machine_id] = o.oee);
 
-    result.push({
+  // Latest Production
+  const { rows: production } = await db.query(`
+    SELECT DISTINCT ON (machine_id)
+      machine_id,
+      run_minutes,
+      idle_minutes,
+      off_minutes,
+      produced_qty
+    FROM production_hourly
+    WHERE machine_id = ANY($1)
+    ORDER BY machine_id, hour_start DESC
+  `, [machineIds]);
+
+  const prodMap = {};
+  production.forEach(p => prodMap[p.machine_id] = p);
+
+  return {
+    total,
+    page,
+    per_page: limit,
+    machines: machines.map(m => ({
       machine_id: m.id,
       machine_name: m.machine_name,
-      oee: oeeMap[m.id] ?? null,
-      live
-    });
+      oee: oeeMap[m.id] ?? 0,
+      production: prodMap[m.id] ?? null
+    }))
+  };
+};
+
+
+
+// =====================================================
+// 2️⃣ MACHINE DETAIL (PLANT SAFE)
+// =====================================================
+
+exports.machineDetail = async (plant_id, machine_id) => {
+
+  const { rows: machine } = await db.query(`
+    SELECT id, machine_name, mage_url
+    FROM machines
+    WHERE id = $1
+      AND plant_id = $2
+  `, [machine_id, plant_id]);
+
+  if (!machine.length) {
+    throw new Error('Machine not found');
   }
 
-  return result;
+  const { rows: prod } = await db.query(`
+    SELECT run_minutes,
+           idle_minutes,
+           off_minutes,
+           produced_qty
+    FROM production_hourly
+    WHERE machine_id = $1
+    ORDER BY hour_start DESC
+    LIMIT 1
+  `, [machine_id]);
+
+  const { rows: oee } = await db.query(`
+    SELECT oee
+    FROM oee_hourly
+    WHERE machine_id = $1
+    ORDER BY hour_start DESC
+    LIMIT 1
+  `, [machine_id]);
+
+  const liveRaw = await redis.get(`machine:${machine_id}:live`);
+
+  return {
+    machine: machine[0],
+    production: prod[0] ?? null,
+    oee: oee[0]?.oee ?? 0,
+    live: liveRaw ? JSON.parse(liveRaw) : null
+  };
 };
 
 
 
-exports.hourlyOee = async (plant_id, machine_id, date) => {
-  const { rows } = await db.query(
-    `
-    SELECT
-      hour_start,
-      availability,
-      performance,
-      quality,
-      oee
-    FROM oee_hourly oh
-    JOIN machines m ON m.id = oh.machine_id
-    WHERE m.plant_id = $1
-      AND oh.machine_id = $2
-      AND DATE(hour_start) = $3
-    ORDER BY hour_start
-    `,
-    [plant_id, machine_id, date]
-  );
-  return rows;
-};
+// =====================================================
+// 3️⃣ MACHINE LIVE (1 SECOND SAFE CACHE)
+// =====================================================
 
-exports.shiftOee = async (plant_id, date) => {
-  const { rows } = await db.query(
-    `
-    SELECT
-      s.shift_name,
-      m.machine_name,
-      o.oee,
-      o.availability,
-      o.performance,
-      o.quality
-    FROM oee_shift_summary o
-    JOIN machines m ON m.id = o.machine_id
-    JOIN shifts s ON s.id = o.shift_id
-    WHERE m.plant_id = $1
-      AND o.shift_date = $2
-    ORDER BY s.shift_name, m.machine_name
-    `,
-    [plant_id, date]
-  );
-  return rows;
-};
+exports.machineLive = async (machine_id) => {
 
-exports.operatorLive = async plant_id => {
-  const { rows } = await db.query(
-    `
-    SELECT
-      o.operator_name,
-      m.machine_name,
-      s.shift_name
-    FROM operators o
-    JOIN operator_machine_assignments oma
-      ON oma.operator_id = o.id AND oma.is_active = TRUE
-    JOIN machines m ON m.id = oma.machine_id
-    JOIN operator_shift_assignments osa
-      ON osa.operator_id = o.id AND osa.is_active = TRUE
-    JOIN shifts s ON s.id = osa.shift_id
-    WHERE o.plant_id = $1
-    ORDER BY o.operator_name
-    `,
-    [plant_id]
-  );
-  return rows;
+  const cacheKey = `machine:${machine_id}:live_cache`;
+
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    return JSON.parse(cached);
+  }
+
+  const liveRaw = await redis.get(`machine:${machine_id}:live`);
+
+  const live = liveRaw
+    ? JSON.parse(liveRaw)
+    : { machine_status: 'OFFLINE' };
+
+  await redis.set(cacheKey, JSON.stringify(live), { EX: 1 });
+
+  return live;
 };
