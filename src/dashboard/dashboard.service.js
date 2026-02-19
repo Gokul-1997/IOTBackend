@@ -1,89 +1,72 @@
 const db = require('../db');
 const redis = require('../redis');
 
-
-// =====================================================
-// 1️⃣ PAGINATED DASHBOARD (PLANT ONLY)
-// =====================================================
-
-exports.dashboardPaged = async ({
-  plant_id,
-  page = 1,
-  limit = 6
-}) => {
-
+exports.dashboardPaged = async ({ plant_id, page = 1, limit = 6 }) => {
   const offset = (page - 1) * limit;
 
-  // Total count
-  const totalResult = await db.query(`
-    SELECT COUNT(*)
-    FROM machines
-    WHERE plant_id = $1
-      AND is_active = TRUE
-  `, [plant_id]);
-
-  const total = Number(totalResult.rows[0].count);
-
-  // Paginated machines
+  // 🔥 Single optimized DB query
   const { rows: machines } = await db.query(`
-    SELECT id, machine_name
-    FROM machines
-    WHERE plant_id = $1
-      AND is_active = TRUE
-    ORDER BY machine_name
+    SELECT
+      m.id,
+      m.machine_name,
+      COALESCE(o.oee,0) as oee,
+      p.run_minutes,
+      p.idle_minutes,
+      p.off_minutes,
+      p.produced_qty
+    FROM machines m
+    LEFT JOIN LATERAL (
+       SELECT oee
+       FROM oee_hourly
+       WHERE machine_id = m.id
+       ORDER BY hour_start DESC
+       LIMIT 1
+    ) o ON TRUE
+    LEFT JOIN LATERAL (
+       SELECT run_minutes, idle_minutes, off_minutes, produced_qty
+       FROM production_hourly
+       WHERE machine_id = m.id
+       ORDER BY hour_start DESC
+       LIMIT 1
+    ) p ON TRUE
+    WHERE m.plant_id = $1
+      AND m.is_active = TRUE
+    ORDER BY m.machine_name
     LIMIT $2 OFFSET $3
   `, [plant_id, limit, offset]);
 
-  const machineIds = machines.map(m => m.id);
-
-  if (!machineIds.length) {
+  if (!machines.length) {
     return {
-      total,
+      success: true,
+      total: 0,
       page,
       per_page: limit,
       machines: []
     };
   }
 
-  // Latest OEE
-  const { rows: oees } = await db.query(`
-    SELECT DISTINCT ON (machine_id)
-      machine_id,
-      oee
-    FROM oee_hourly
-    WHERE machine_id = ANY($1)
-    ORDER BY machine_id, hour_start DESC
-  `, [machineIds]);
+  // 🔥 Bulk Redis fetch
+  const redisKeys = machines.map(m => `machine:${m.id}:live`);
+  const liveData = await redis.mGet(redisKeys);
 
-  const oeeMap = {};
-  oees.forEach(o => oeeMap[o.machine_id] = o.oee);
-
-  // Latest Production
-  const { rows: production } = await db.query(`
-    SELECT DISTINCT ON (machine_id)
-      machine_id,
-      run_minutes,
-      idle_minutes,
-      off_minutes,
-      produced_qty
-    FROM production_hourly
-    WHERE machine_id = ANY($1)
-    ORDER BY machine_id, hour_start DESC
-  `, [machineIds]);
-
-  const prodMap = {};
-  production.forEach(p => prodMap[p.machine_id] = p);
+  const final = machines.map((m, index) => ({
+    machine_id: m.id,
+    machine_name: m.machine_name,
+    oee: m.oee,
+    production: {
+      run_minutes: m.run_minutes ?? 0,
+      idle_minutes: m.idle_minutes ?? 0,
+      off_minutes: m.off_minutes ?? 0,
+      produced_qty: m.produced_qty ?? 0
+    },
+    live: liveData[index] ? JSON.parse(liveData[index]) : null
+  }));
 
   return {
-    total,
+    success: true,
     page,
     per_page: limit,
-    machines: machines.map(m => ({
-      machine_id: m.id,
-      machine_name: m.machine_name,
-      oee: oeeMap[m.id] ?? 0,
-      production: prodMap[m.id] ?? null
-    }))
+    machines: final
   };
 };
 
@@ -93,47 +76,43 @@ exports.dashboardPaged = async ({
 // 2️⃣ MACHINE DETAIL (PLANT SAFE)
 // =====================================================
 
-exports.machineDetail = async (plant_id, machine_id) => {
+exports.machineDetail = async (machine_id) => {
 
-  const { rows: machine } = await db.query(`
-    SELECT id, machine_name, mage_url
-    FROM machines
-    WHERE id = $1
-      AND plant_id = $2
-  `, [machine_id, plant_id]);
-
-  if (!machine.length) {
-    throw new Error('Machine not found');
-  }
-
-  const { rows: prod } = await db.query(`
-    SELECT run_minutes,
-           idle_minutes,
-           off_minutes,
-           produced_qty
-    FROM production_hourly
-    WHERE machine_id = $1
-    ORDER BY hour_start DESC
-    LIMIT 1
-  `, [machine_id]);
-
-  const { rows: oee } = await db.query(`
-    SELECT oee
-    FROM oee_hourly
-    WHERE machine_id = $1
-    ORDER BY hour_start DESC
-    LIMIT 1
+  const { rows } = await db.query(`
+    SELECT
+      m.machine_name,
+      m.mage_url,
+      COALESCE(o.oee,0) as oee,
+      p.run_minutes,
+      p.idle_minutes,
+      p.off_minutes,
+      p.produced_qty
+    FROM machines m
+    LEFT JOIN LATERAL (
+       SELECT oee
+       FROM oee_hourly
+       WHERE machine_id = m.id
+       ORDER BY hour_start DESC
+       LIMIT 1
+    ) o ON TRUE
+    LEFT JOIN LATERAL (
+       SELECT run_minutes, idle_minutes, off_minutes, produced_qty
+       FROM production_hourly
+       WHERE machine_id = m.id
+       ORDER BY hour_start DESC
+       LIMIT 1
+    ) p ON TRUE
+    WHERE m.id = $1
   `, [machine_id]);
 
   const liveRaw = await redis.get(`machine:${machine_id}:live`);
 
   return {
-    machine: machine[0],
-    production: prod[0] ?? null,
-    oee: oee[0]?.oee ?? 0,
+    machine: rows[0],
     live: liveRaw ? JSON.parse(liveRaw) : null
   };
 };
+
 
 
 
