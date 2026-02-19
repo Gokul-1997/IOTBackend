@@ -4,11 +4,8 @@ exports.dashboard = async (req, res) => {
   try {
     const { page = 1 } = req.query;
 
-    const data = await svc.dashboardPaged({
-      plant_id: req.user.plant_id,
-      page: Number(page),
-      limit: 6
-    });
+    const data = await svc.dashboardPaged(req.user.plant_id,Number(page),6
+    );
 
     res.json({ success: true, ...data });
   } catch (err) {
