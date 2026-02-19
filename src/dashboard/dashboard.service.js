@@ -7,7 +7,7 @@ exports.dashboardPaged = async (plant_id, page = 1, limit = 6) => {
 
   // 1️⃣ Get machines
   const { rows: machines } = await db.query(`
-    SELECT id, machine_name, mage_url
+    SELECT id, machine_name, image_url
     FROM machines
     WHERE plant_id = $1
       AND is_active = TRUE
