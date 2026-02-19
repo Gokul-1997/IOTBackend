@@ -46,21 +46,24 @@ exports.dashboardPaged = async ({ plant_id, page = 1, limit = 6 }) => {
   }
 
   // 🔥 Bulk Redis fetch
-  const redisKeys = machines.map(m => `machine:${m.id}:live`);
-  const liveData = await redis.mGet(redisKeys);
+const redisKeys = machines.map(m => `machine:${m.id}:live`);
 
-  const final = machines.map((m, index) => ({
-    machine_id: m.id,
-    machine_name: m.machine_name,
-    oee: m.oee,
-    production: {
-      run_minutes: m.run_minutes ?? 0,
-      idle_minutes: m.idle_minutes ?? 0,
-      off_minutes: m.off_minutes ?? 0,
-      produced_qty: m.produced_qty ?? 0
-    },
-    live: liveData[index] ? JSON.parse(liveData[index]) : null
-  }));
+const liveData = redisKeys.length
+  ? await redis.mget(...redisKeys)
+  : [];
+
+const final = machines.map((m, index) => ({
+  machine_id: m.id,
+  machine_name: m.machine_name,
+  oee: m.oee,
+  production: {
+    run_minutes: m.run_minutes ?? 0,
+    idle_minutes: m.idle_minutes ?? 0,
+    off_minutes: m.off_minutes ?? 0,
+    produced_qty: m.produced_qty ?? 0
+  },
+  live: liveData[index] ? JSON.parse(liveData[index]) : null
+}));
 
   return {
     success: true,
