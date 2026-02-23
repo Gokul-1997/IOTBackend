@@ -14,5 +14,8 @@ module.exports = app => {
 
   app.use('/api/plants', require('./plants/plant.routes'));
   app.use('/api/upload', require('./upload/upload.routes'));
-  app.use('/api/ai', require('./ai/ai.routes'));
+  app.use('/api/quality', require('./quality/quality.routes'));
+  app.use('/api/master', require('./master/master.routes'));
+  app.use('/api/lines', require('./line/line.routes'));
+
 };

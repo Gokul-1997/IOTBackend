@@ -11,6 +11,8 @@ router.post('/', auth, permit('machine.create'), controller.createMachine);
 // ALL USERS – view machines
 router.get('/', auth, permit('machine.view'), controller.getMachines);
 
+router.put('/:id', auth, permit('machine.update'), controller.updateMachine);  
+
 // ADMIN – enable / disable machine
 router.patch('/:id/status', auth, permit('machine.update'), controller.toggleMachineStatus);
 
@@ -20,5 +22,7 @@ router.post('/:id/regenerate-key', auth, permit('machine.update'), controller.re
 // ADMIN – delete machine
 router.delete('/:id', auth, permit('machine.delete'), controller.deleteMachine);
 
+// ADMIN – edit machine
+router.put('/:id', auth, permit('machine.update'), controller.updateMachine);
 
 module.exports = router;

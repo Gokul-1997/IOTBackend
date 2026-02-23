@@ -5,26 +5,31 @@ const crypto = require('crypto');
 exports.createMachine = async (req) => {
   const {
     machine_name,
+    machine_code,
+    line_id,
     image_url,
     axis_model,
     controller_model,
     machine_year
   } = req.body;
 
-  if (!machine_name) {
-    throw new Error('Machine name required');
+  if (!machine_name || !machine_code || !line_id) {
+    throw new Error('Machine name, machine code and line required');
   }
 
   const apiKey = crypto.randomBytes(16).toString('hex');
 
   const result = await pool.query(
     `INSERT INTO machines
-     (plant_id, machine_name, image_url, axis_model, controller_model, machine_year, api_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
-     RETURNING id, machine_name, api_key`,
+     (plant_id, machine_code, machine_name, line_id,
+      image_url, axis_model, controller_model, machine_year, api_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     RETURNING id, machine_name, machine_code, line_id, api_key`,
     [
       req.user.plant_id,
+      machine_code,
       machine_name,
+      line_id,
       image_url,
       axis_model,
       controller_model,
@@ -42,7 +47,7 @@ exports.getMachines = async (req) => {
     search = '',
     page = 1,
     limit = 10,
-    sortBy = 'id',
+    sortBy = 'm.id',
     sortDir = 'desc'
   } = req.query;
 
@@ -50,35 +55,47 @@ exports.getMachines = async (req) => {
   const offset = (page - 1) * limit;
 
   const sortableColumns = [
-    'id',
-    'machine_name',
-    'axis_model',
-    'controller_model',
-    'machine_year',
-    'is_active'
+    'm.id',
+    'm.machine_name',
+    'm.axis_model',
+    'm.controller_model',
+    'm.machine_year',
+    'm.is_active'
   ];
 
-  const orderColumn = sortableColumns.includes(sortBy) ? sortBy : 'id';
-  const orderDirection = sortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const orderColumn = sortableColumns.includes(sortBy)
+    ? sortBy
+    : 'm.id';
 
-  let whereSQL = `WHERE plant_id = $1`;
+  const orderDirection =
+    sortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+  let whereSQL = `WHERE m.plant_id = $1`;
   const values = [plantId];
 
   if (search) {
     values.push(`%${search}%`);
     whereSQL += `
       AND (
-        machine_name ILIKE $${values.length}
-        OR axis_model ILIKE $${values.length}
-        OR controller_model ILIKE $${values.length}
+        m.machine_name ILIKE $${values.length}
+        OR m.axis_model ILIKE $${values.length}
+        OR m.controller_model ILIKE $${values.length}
       )
     `;
   }
 
   const dataQuery = `
-    SELECT id, machine_name,image_url,axis_model, controller_model,
-           machine_year, is_active
-    FROM machines
+    SELECT m.id,
+           m.machine_name,
+           m.image_url,
+           m.axis_model,
+           m.controller_model,
+           m.machine_year,
+           m.is_active,
+           m.line_id,
+           l.name AS line_name
+    FROM machines m
+    LEFT JOIN line l ON l.id = m.line_id
     ${whereSQL}
     ORDER BY ${orderColumn} ${orderDirection}
     LIMIT $${values.length + 1}
@@ -87,7 +104,7 @@ exports.getMachines = async (req) => {
 
   const countQuery = `
     SELECT COUNT(*)::int AS total
-    FROM machines
+    FROM machines m
     ${whereSQL}
   `;
 
@@ -144,4 +161,50 @@ exports.deleteMachine = async (req) => {
   if (result.rowCount === 0) {
     throw new Error('Machine not found or access denied');
   }
+};
+
+/* UPDATE MACHINE (ADMIN) */
+exports.updateMachine = async (req) => {
+  const { id } = req.params;
+
+  const {
+    machine_name,
+    machine_code,
+    line_id,
+    image_url,
+    axis_model,
+    controller_model,
+    machine_year
+  } = req.body;
+
+  const result = await pool.query(
+    `UPDATE machines
+     SET machine_name = $1,
+         machine_code = $2,
+         line_id = $3,
+         image_url = $4,
+         axis_model = $5,
+         controller_model = $6,
+         machine_year = $7
+     WHERE id = $8
+       AND plant_id = $9
+     RETURNING id, machine_name, machine_code, line_id`,
+    [
+      machine_name,
+      machine_code,
+      line_id,
+      image_url,
+      axis_model,
+      controller_model,
+      machine_year,
+      id,
+      req.user.plant_id
+    ]
+  );
+
+  if (result.rowCount === 0) {
+    throw new Error('Machine not found or access denied');
+  }
+
+  return result.rows[0];
 };

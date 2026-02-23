@@ -48,3 +48,12 @@ exports.deleteMachine = async (req, res) => {
     res.status(400).json({ status: 'error', message: e.message });
   }
 };
+
+exports.updateMachine = async (req, res) => {
+  try {
+    const data = await service.updateMachine(req);
+    res.json({ status: 'success', data });
+  } catch (e) {
+    res.status(400).json({ status: 'error', message: e.message });
+  }
+};
