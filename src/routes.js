@@ -17,5 +17,6 @@ module.exports = app => {
   app.use('/api/quality', require('./quality/quality.routes'));
   app.use('/api/master', require('./master/master.routes'));
   app.use('/api/lines', require('./line/line.routes'));
+  app.use('/api/components', require('./component/component.routes'));
 
 };

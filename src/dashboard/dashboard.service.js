@@ -1,14 +1,21 @@
 const db = require('../db');
 const redis = require('../redis');
 
-/* =====================================================
-   1️⃣ MACHINE CARD LIST
-===================================================== */
 exports.dashboardPaged = async (plant_id, page = 1, limit = 6) => {
 
   const offset = (page - 1) * limit;
 
-  // 1️⃣ Get machines
+  /* ---------- TOTAL MACHINES ---------- */
+  const { rows: countRows } = await db.query(`
+    SELECT COUNT(*)
+    FROM machines
+    WHERE plant_id = $1
+      AND is_active = TRUE
+  `, [plant_id]);
+
+  const total = Number(countRows[0].count);
+
+  /* ---------- MACHINE LIST ---------- */
   const { rows: machines } = await db.query(`
     SELECT id, machine_name, image_url
     FROM machines
@@ -19,111 +26,267 @@ exports.dashboardPaged = async (plant_id, page = 1, limit = 6) => {
   `, [plant_id, limit, offset]);
 
   if (!machines.length) {
-    return {
-      success: true,
-      page,
-      per_page: limit,
-      machines: []
-    };
+    return { page, per_page: limit, total, machines: [] };
   }
 
   const ids = machines.map(m => m.id);
 
-  // 2️⃣ Latest OEE
+  /* =====================================================
+     CURRENT SHIFT
+  ===================================================== */
+  const { rows: shiftRows } = await db.query(`
+    SELECT id, shift_code, start_time, end_time
+    FROM shifts
+    WHERE plant_id = $1
+      AND (
+        (start_time <= end_time AND NOW()::time BETWEEN start_time AND end_time)
+        OR
+        (start_time > end_time AND 
+          (NOW()::time >= start_time OR NOW()::time <= end_time)
+        )
+      )
+      AND is_active = TRUE
+    LIMIT 1
+  `, [plant_id]);
+
+  const currentShift = shiftRows[0] || null;
+
+  /* =====================================================
+     CALCULATE SHIFT START IN NODE (PRODUCTION SAFE)
+  ===================================================== */
+  let shiftStart = null;
+
+  if (currentShift) {
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+
+    const startTime = currentShift.start_time;
+    const endTime = currentShift.end_time;
+
+    if (startTime <= endTime) {
+      shiftStart = new Date(`${today}T${startTime}`);
+    } else {
+      // Night shift
+      if (now.toTimeString().slice(0, 8) >= startTime) {
+        shiftStart = new Date(`${today}T${startTime}`);
+      } else {
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yDate = yesterday.toISOString().split('T')[0];
+        shiftStart = new Date(`${yDate}T${startTime}`);
+      }
+    }
+  }
+
+  /* =====================================================
+     OPERATOR
+  ===================================================== */
+  let operatorMap = {};
+
+  if (currentShift) {
+    const { rows: operatorRows } = await db.query(`
+      SELECT
+        oma.machine_id,
+        o.operator_name
+      FROM operator_machine_assignments oma
+      JOIN operator_shift_assignments osa
+        ON osa.operator_id = oma.operator_id
+        AND osa.shift_id = $1
+        AND osa.is_active = TRUE
+      JOIN operators o
+        ON o.id = oma.operator_id
+        AND o.is_active = TRUE
+      WHERE oma.machine_id = ANY($2)
+        AND oma.is_active = TRUE
+    `, [currentShift.id, ids]);
+
+    operatorRows.forEach(r => {
+      operatorMap[r.machine_id] = r.operator_name;
+    });
+  }
+
+  /* =====================================================
+     REALTIME PRODUCTION
+  ===================================================== */
+  let prodMap = {};
+
+  if (shiftStart) {
+    const { rows: prodRows } = await db.query(`
+      SELECT
+        machine_id,
+        COUNT(*) FILTER (WHERE machine_status IN ('RUN','CUTTING')) / 6 AS run_minutes,
+        COUNT(*) FILTER (WHERE machine_status IN ('READY','HOLD')) / 6 AS idle_minutes,
+        COUNT(*) FILTER (WHERE machine_status IN ('STOP','ALARM','EMERGENCY','UNKNOWN')) / 6 AS off_minutes,
+        MAX(parts_count) AS produced_qty
+      FROM telemetry_raw
+      WHERE machine_id = ANY($1)
+        AND received_at >= $2
+      GROUP BY machine_id
+    `, [ids, shiftStart]);
+
+    prodRows.forEach(r => {
+      prodMap[r.machine_id] = r;
+    });
+  }
+
+  /* =====================================================
+     OEE
+  ===================================================== */
   const { rows: oeeRows } = await db.query(`
     SELECT DISTINCT ON (machine_id)
-      machine_id,
-      oee
+      machine_id, oee
     FROM oee_hourly
     WHERE machine_id = ANY($1)
     ORDER BY machine_id, hour_start DESC
   `, [ids]);
 
   const oeeMap = {};
-  oeeRows.forEach(o => {
-    oeeMap[o.machine_id] = Number(o.oee);
-  });
+  oeeRows.forEach(r => oeeMap[r.machine_id] = Number(r.oee));
 
-  // 3️⃣ Latest production
-  const { rows: prodRows } = await db.query(`
-    SELECT DISTINCT ON (machine_id)
-      machine_id,
-      run_minutes,
-      idle_minutes,
-      off_minutes,
-      produced_qty
-    FROM production_hourly
-    WHERE machine_id = ANY($1)
-    ORDER BY machine_id, hour_start DESC
-  `, [ids]);
-
-  const prodMap = {};
-  prodRows.forEach(p => {
-    prodMap[p.machine_id] = p;
-  });
-
-  // 4️⃣ Active Job + Operator
+  /* =====================================================
+     CURRENT JOB
+  ===================================================== */
   const { rows: jobRows } = await db.query(`
-    SELECT
-      j.machine_id,
-      j.part_name,
-      j.component_id,
-      j.target_qty,
-      j.achieved_qty,
-      o.operator_name
-    FROM machine_current_job j
-    LEFT JOIN operators o ON o.id = j.operator_id
-    WHERE j.machine_id = ANY($1)
-      AND j.is_active = TRUE
+    SELECT machine_id, part_name, component_id, target_qty, achieved_qty
+    FROM machine_current_job
+    WHERE machine_id = ANY($1)
+      AND is_active = TRUE
   `, [ids]);
 
   const jobMap = {};
-  jobRows.forEach(j => {
-    jobMap[j.machine_id] = j;
-  });
+  jobRows.forEach(r => jobMap[r.machine_id] = r);
 
-  // 5️⃣ Redis Live
+  /* =====================================================
+     REDIS LIVE
+  ===================================================== */
   const keys = ids.map(id => `machine:${id}:live`);
   const liveData = await redis.mget(keys);
 
-  const final = machines.map((m, i) => ({
+  /* =====================================================
+     FINAL RESPONSE
+  ===================================================== */
+  const machinesFinal = machines.map((m, i) => ({
     machine_id: m.id,
     machine_name: m.machine_name,
-    mage_url: m.mage_url,
-
+    image_url: m.image_url,
     oee: oeeMap[m.id] || 0,
-
     production: prodMap[m.id] || {
       run_minutes: 0,
       idle_minutes: 0,
       off_minutes: 0,
       produced_qty: 0
     },
-
-    job: jobMap[m.id] || {
-      operator_name: null,
-      part_name: null,
-      component_id: null,
-      target_qty: 0,
-      achieved_qty: 0
+    job: {
+      operator_name: operatorMap[m.id] || '--',
+      part_name: jobMap[m.id]?.part_name || null,
+      component_id: jobMap[m.id]?.component_id || null,
+      target_qty: jobMap[m.id]?.target_qty || 0,
+      achieved_qty: jobMap[m.id]?.achieved_qty || 0
     },
-
-    live: liveData[i] ? JSON.parse(liveData[i]) : null
+    live: liveData[i]
+      ? JSON.parse(liveData[i])
+      : { machine_status: "OFFLINE", rpm: 0, feed_rate: 0 }
   }));
 
   return {
-    success: true,
     page,
     per_page: limit,
-    machines: final
+    total,
+    shift: currentShift,
+    machines: machinesFinal
+  };
+};/* =====================================================
+   DASHBOARD SUMMARY (SHIFT BASED)
+===================================================== */
+exports.dashboardSummary = async (plant_id) => {
+
+  /* ---------- 1️⃣ GET CURRENT SHIFT ---------- */
+  const { rows: shiftRows } = await db.query(`
+    SELECT id, shift_code
+    FROM shifts
+    WHERE plant_id = $1
+      AND (
+        (start_time <= end_time AND NOW()::time BETWEEN start_time AND end_time)
+        OR
+        (start_time > end_time AND 
+          (NOW()::time >= start_time OR NOW()::time <= end_time)
+        )
+      )
+      AND is_active = TRUE
+    LIMIT 1
+  `, [plant_id]);
+
+  const currentShift = shiftRows[0];
+
+  if (!currentShift) {
+    return {
+      shift: null,
+      total: 0,
+      running: 0,
+      idle: 0,
+      stopped: 0
+    };
+  }
+
+  /* ---------- 2️⃣ GET MACHINES IN CURRENT SHIFT ---------- */
+/* ---------- 2️⃣ GET ALL ACTIVE MACHINES ---------- */
+const { rows: machineRows } = await db.query(`
+  SELECT id
+  FROM machines
+  WHERE plant_id = $1
+    AND is_active = TRUE
+`, [plant_id]);
+
+const machineIds = machineRows.map(m => m.id);
+
+if (!machineIds.length) {
+    return {
+      shift: currentShift,
+      total: 0,
+      running: 0,
+      idle: 0,
+      stopped: 0
+    };
+  }
+
+  /* ---------- 3️⃣ GET LATEST STATUS FROM TELEMETRY ---------- */
+  const { rows: statusRows } = await db.query(`
+    SELECT machine_status, COUNT(*) as count
+    FROM (
+      SELECT DISTINCT ON (machine_id)
+             machine_id,
+             machine_status
+      FROM telemetry_raw
+      WHERE machine_id = ANY($1)
+      ORDER BY machine_id, received_at DESC
+    ) t
+    GROUP BY machine_status
+  `, [machineIds]);
+
+  let running = 0;
+  let idle = 0;
+  let stopped = 0;
+
+  statusRows.forEach(r => {
+    const status = r.machine_status;
+    const count = Number(r.count);
+
+    if (['RUN','CUTTING'].includes(status)) running += count;
+    else if (['READY','HOLD'].includes(status)) idle += count;
+    else stopped += count;
+  });
+
+  return {
+    shift: currentShift,
+    total: machineIds.length,
+    running,
+    idle,
+    stopped
   };
 };
 
-
-
-
 /* =====================================================
-   2️⃣ MACHINE DETAIL
+   3️⃣ MACHINE DETAIL
 ===================================================== */
 exports.machineDetail = async (plant_id, machine_id) => {
 
@@ -135,92 +298,26 @@ exports.machineDetail = async (plant_id, machine_id) => {
 
   if (!machineRows.length) throw new Error("Machine not found");
 
-  // Proper shift detection including night shift
-  const { rows: shiftRows } = await db.query(`
-    SELECT id, shift_code, shift_name, start_time, end_time, break_minutes
-    FROM shifts
-    WHERE plant_id = $1
-      AND (
-        (start_time <= end_time AND NOW()::time BETWEEN start_time AND end_time)
-        OR
-        (start_time > end_time AND 
-            (NOW()::time >= start_time OR NOW()::time <= end_time)
-        )
-      )
-      AND is_active = TRUE
-    LIMIT 1
-  `, [plant_id]);
-
-  const shift = shiftRows[0] || null;
-
-  // Active job
-  const { rows: jobRows } = await db.query(`
-    SELECT j.part_name, j.component_id,
-           j.target_qty, j.achieved_qty,
-           o.operator_name
-    FROM machine_current_job j
-    LEFT JOIN operators o ON o.id = j.operator_id
-    WHERE j.machine_id = $1
-      AND j.is_active = TRUE
+  const { rows: prodRows } = await db.query(`
+    SELECT
+      SUM(run_minutes) as run_minutes,
+      SUM(idle_minutes) as idle_minutes,
+      SUM(off_minutes) as off_minutes,
+      MAX(produced_qty) as produced_qty
+    FROM production_hourly_mv
+    WHERE machine_id = $1
+      AND hour_start >= NOW() - INTERVAL '8 hours'
   `, [machine_id]);
-
-  const job = jobRows[0] || {};
-
-  // Production summary
-  let production = {
-    run_minutes: 0,
-    idle_minutes: 0,
-    off_minutes: 0,
-    produced_qty: 0
-  };
-
-  if (shift?.id) {
-    const { rows } = await db.query(`
-      SELECT
-        COALESCE(SUM(run_minutes),0) as run_minutes,
-        COALESCE(SUM(idle_minutes),0) as idle_minutes,
-        COALESCE(SUM(off_minutes),0) as off_minutes,
-        COALESCE(MAX(produced_qty),0) as produced_qty
-      FROM production_hourly
-      WHERE machine_id = $1
-        AND shift_id = $2
-    `, [machine_id, shift.id]);
-
-    production = rows[0];
-  }
-
-  // OEE shift summary
-  let oee = {
-    availability: 0,
-    performance: 0,
-    quality: 0,
-    oee: 0
-  };
-
-  if (shift?.id) {
-    const { rows } = await db.query(`
-      SELECT availability, performance, quality, oee
-      FROM oee_shift_summary
-      WHERE machine_id = $1
-        AND shift_id = $2
-        AND shift_date = CURRENT_DATE
-    `, [machine_id, shift.id]);
-
-    if (rows.length) oee = rows[0];
-  }
 
   return {
     machine: machineRows[0],
-    shift,
-    job,
-    production,
-    oee
+    production: prodRows[0]
   };
 };
 
 
 /* =====================================================
-   3️⃣ LIVE
+   4️⃣ LIVE
 ===================================================== */
 exports.machineLive = async (machine_id) => {
 
@@ -236,106 +333,4 @@ exports.machineLive = async (machine_id) => {
   }
 
   return JSON.parse(raw);
-};
-
-
-/* =====================================================
-   4️⃣ TIMELINE
-===================================================== */
-exports.machineTimeline = async (machine_id) => {
-
-  const { rows } = await db.query(`
-    SELECT
-      time_bucket('10 seconds', received_at) AS bucket,
-      max(machine_status) as machine_status
-    FROM telemetry_raw
-    WHERE machine_id = $1
-      AND received_at >= NOW() - INTERVAL '8 hours'
-    GROUP BY bucket
-    ORDER BY bucket;
-  `, [machine_id]);
-
-  return rows;
-};
-
-
-/* =====================================================
-   5️⃣ TREND
-===================================================== */
-exports.machineTrend = async (machine_id) => {
-
-  const { rows } = await db.query(`
-    SELECT
-      time_bucket('10 seconds', received_at) AS bucket,
-      avg(rpm) as avg_rpm
-    FROM telemetry_raw
-    WHERE machine_id = $1
-      AND received_at >= NOW() - INTERVAL '1 hour'
-    GROUP BY bucket
-    ORDER BY bucket;
-  `, [machine_id]);
-
-  return rows;
-};
-
-
-/* =====================================================
-   6️⃣ DASHBOARD SUMMARY
-===================================================== */
-exports.dashboardSummary = async (plant_id) => {
-
-  const { rows: shiftRows } = await db.query(`
-    SELECT id, shift_name, start_time, end_time
-    FROM shifts
-    WHERE plant_id = $1
-      AND (
-        (start_time <= end_time AND NOW()::time BETWEEN start_time AND end_time)
-        OR
-        (start_time > end_time AND 
-            (NOW()::time >= start_time OR NOW()::time <= end_time)
-        )
-      )
-      AND is_active = TRUE
-    LIMIT 1
-  `, [plant_id]);
-
-  const shift = shiftRows[0] || null;
-
-  const { rows: machines } = await db.query(`
-    SELECT id
-    FROM machines
-    WHERE plant_id = $1
-      AND is_active = TRUE
-  `, [plant_id]);
-
-  const ids = machines.map(m => m.id);
-
-  const keys = ids.map(id => `machine:${id}:live`);
-  const liveData = ids.length ? await redis.mget(keys) : [];
-
-  let running = 0;
-  let idle = 0;
-  let stop = 0;
-
-  liveData.forEach(raw => {
-
-    if (!raw) {
-      stop++;
-      return;
-    }
-
-    const status = JSON.parse(raw).machine_status;
-
-    if (['RUN','CUTTING'].includes(status)) running++;
-    else if (['READY','HOLD','IDLE'].includes(status)) idle++;
-    else stop++;
-  });
-
-  return {
-    shift,
-    total: machines.length,
-    running,
-    idle,
-    stop
-  };
 };

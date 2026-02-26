@@ -5,7 +5,6 @@ const crypto = require('crypto');
 exports.createMachine = async (req) => {
   const {
     machine_name,
-    machine_code,
     line_id,
     image_url,
     axis_model,
@@ -13,21 +12,22 @@ exports.createMachine = async (req) => {
     machine_year
   } = req.body;
 
-  if (!machine_name || !machine_code || !line_id) {
-    throw new Error('Machine name, machine code and line required');
+  if (!machine_name || !line_id) {
+    throw new Error('Machine name and line required');
   }
 
   const apiKey = crypto.randomBytes(16).toString('hex');
 
   const result = await pool.query(
-    `INSERT INTO machines
-     (plant_id, machine_code, machine_name, line_id,
-      image_url, axis_model, controller_model, machine_year, api_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     RETURNING id, machine_name, machine_code, line_id, api_key`,
+    `
+    INSERT INTO machines
+    (plant_id, machine_name, line_id,
+     image_url, axis_model, controller_model, machine_year, api_key)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    RETURNING id, machine_name, line_id, api_key
+    `,
     [
       req.user.plant_id,
-      machine_code,
       machine_name,
       line_id,
       image_url,
@@ -37,6 +37,16 @@ exports.createMachine = async (req) => {
       apiKey
     ]
   );
+
+  const newMachineId = result.rows[0].id;
+
+  // Auto link machine to all existing shifts
+  await pool.query(`
+    INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
+    SELECT $1, $2, id
+    FROM shifts
+    WHERE plant_id = $1
+  `, [req.user.plant_id, newMachineId]);
 
   return result.rows[0];
 };
@@ -166,41 +176,44 @@ exports.deleteMachine = async (req) => {
 /* UPDATE MACHINE (ADMIN) */
 exports.updateMachine = async (req) => {
   const { id } = req.params;
+  const plantId = req.user.plant_id;
 
-  const {
-    machine_name,
-    machine_code,
-    line_id,
-    image_url,
-    axis_model,
-    controller_model,
-    machine_year
-  } = req.body;
+  const allowedFields = [
+    'machine_name',
+    'line_id',
+    'image_url',
+    'axis_model',
+    'controller_model',
+    'machine_year'
+  ];
 
-  const result = await pool.query(
-    `UPDATE machines
-     SET machine_name = $1,
-         machine_code = $2,
-         line_id = $3,
-         image_url = $4,
-         axis_model = $5,
-         controller_model = $6,
-         machine_year = $7
-     WHERE id = $8
-       AND plant_id = $9
-     RETURNING id, machine_name, machine_code, line_id`,
-    [
-      machine_name,
-      machine_code,
-      line_id,
-      image_url,
-      axis_model,
-      controller_model,
-      machine_year,
-      id,
-      req.user.plant_id
-    ]
-  );
+  const fields = [];
+  const values = [];
+  let index = 1;
+
+  for (const key of allowedFields) {
+    if (req.body[key] !== undefined) {
+      fields.push(`${key} = $${index}`);
+      values.push(req.body[key]);
+      index++;
+    }
+  }
+
+  if (fields.length === 0) {
+    throw new Error('No fields provided for update');
+  }
+
+  const query = `
+    UPDATE machines
+    SET ${fields.join(', ')}
+    WHERE id = $${index}
+      AND plant_id = $${index + 1}
+    RETURNING *
+  `;
+
+  values.push(id, plantId);
+
+  const result = await pool.query(query, values);
 
   if (result.rowCount === 0) {
     throw new Error('Machine not found or access denied');

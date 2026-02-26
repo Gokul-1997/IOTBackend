@@ -1,11 +1,12 @@
 const {
   getMachineListService,
-  getShiftListService
+  getShiftListService,
+  getMachinesByLineService
 } = require("./master.service");
 
 const getMachineList = async (req, res) => {
   try {
-    const { plant_id } = req.query;
+    const plant_id  = req.user.plant_id 
 
     const machines = await getMachineListService(plant_id);
 
@@ -23,7 +24,7 @@ const getMachineList = async (req, res) => {
 
 const getShiftList = async (req, res) => {
   try {
-    const { plant_id } = req.query;
+    const plant_id  = req.user.plant_id 
 
     const shifts = await getShiftListService(plant_id);
 
@@ -39,7 +40,31 @@ const getShiftList = async (req, res) => {
   }
 };
 
+const getMachinesByLine = async (req, res) => {
+  try {
+
+    const { line_id } = req.query;
+
+    const machines = await getMachinesByLineService(
+      line_id,
+      req.user.plant_id  
+    );
+
+    res.json({
+      success: true,
+      data: machines
+    });
+
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   getMachineList,
-  getShiftList
+  getShiftList,
+  getMachinesByLine
 };

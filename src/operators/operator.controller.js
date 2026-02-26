@@ -17,3 +17,29 @@ exports.list = async (req, res, next) => {
     next(e);
   }
 };
+
+
+exports.update = async (req, res, next) => {
+  try {
+    const result = await svc.update(
+      req.params.id,
+      req.body,
+      req.user.plant_id
+    );
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+};
+
+exports.getById = async (req, res, next) => {
+  try {
+    const result = await svc.getById(
+      req.params.id,
+      req.user.plant_id
+    );
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+};

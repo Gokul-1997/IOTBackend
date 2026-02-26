@@ -1,7 +1,6 @@
 const pool = require('../db');
 
 exports.getShifts = async (req) => {
-  console.log('Fetching shifts for plant_id:', req.user);
   const result = await pool.query(
     `
     SELECT
@@ -36,11 +35,12 @@ exports.createShift = async (req) => {
     throw new Error('Shift code, start time and end time are required');
   }
 
-  await pool.query(
+  const result = await pool.query(
     `
     INSERT INTO shifts
     (plant_id, shift_code, shift_name, start_time, end_time, break_minutes)
     VALUES ($1,$2,$3,$4,$5,$6)
+    RETURNING id
     `,
     [
       req.user.plant_id,
@@ -51,48 +51,64 @@ exports.createShift = async (req) => {
       break_minutes || 0
     ]
   );
+
+  const newShiftId = result.rows[0].id;
+
+  // Auto link all existing machines to this shift
+  await pool.query(`
+    INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
+    SELECT $1, id, $2
+    FROM machines
+    WHERE plant_id = $1
+  `, [req.user.plant_id, newShiftId]);
+
+  return { message: 'Shift created successfully' };
 };
 
 
-exports.updateShift = async (req) => {
-  const { id } = req.params;
-  const {
-    shift_code,
-    shift_name,
-    start_time,
-    end_time,
-    break_minutes,
-    is_active
-  } = req.body;
+exports.updateShift = async (id, data, plant_id) => {
 
-  const result = await pool.query(
-    `
+  const allowedFields = [
+    'shift_code',
+    'shift_name',
+    'start_time',
+    'end_time',
+    'break_minutes'
+  ];
+
+  const fields = [];
+  const values = [];
+  let index = 1;
+
+  for (const key of allowedFields) {
+    if (data[key] !== undefined) {
+      fields.push(`${key} = $${index}`);
+      values.push(data[key]);
+      index++;
+    }
+  }
+
+  if (fields.length === 0) {
+    throw new Error('No fields provided for update');
+  }
+
+  const query = `
     UPDATE shifts
-    SET
-      shift_code = $1,
-      shift_name = $2,
-      start_time = $3,
-      end_time = $4,
-      break_minutes = $5,
-      is_active = $6
-    WHERE id = $7
-      AND plant_id = $8
-    `,
-    [
-      shift_code,
-      shift_name,
-      start_time,
-      end_time,
-      break_minutes,
-      is_active,
-      id,
-      req.user.plant_id
-    ]
-  );
+    SET ${fields.join(', ')}
+    WHERE id = $${index}
+      AND plant_id = $${index + 1}
+    RETURNING *
+  `;
+
+  values.push(id, plant_id);
+
+  const result = await pool.query(query, values);
 
   if (result.rowCount === 0) {
-    throw new Error('Shift not found');
+    throw new Error('Shift not found or access denied');
   }
+
+  return result.rows[0];
 };
 
 

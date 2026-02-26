@@ -20,13 +20,24 @@ exports.createShift = async (req, res) => {
 
 exports.updateShift = async (req, res) => {
   try {
-    await service.updateShift(req);
-    res.json({ status: 'success', message: 'Shift updated' });
-  } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
+    const data = await service.updateShift(
+      req.params.id,
+      req.body,
+      req.user.plant_id
+    );
+
+    res.json({
+      success: true,
+      data
+    });
+
+  } catch (err) {
+    res.status(400).json({
+      success: false,
+      message: err.message
+    });
   }
 };
-
 
 exports.toggleShift = async (req, res) => {
   try {

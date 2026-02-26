@@ -15,7 +15,7 @@ function makeStore(prefix) {
 
 const standardLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 300,
+  limit: 1000,
   store: makeStore('rl:standard:'),
   skip: (req) => req.method === 'OPTIONS',
   keyGenerator: (req) => ipKeyGenerator(req.ip), // IPv6-safe fallback

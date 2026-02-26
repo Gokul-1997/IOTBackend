@@ -20,13 +20,14 @@ const getQualityDashboard = async (req, res) => {
       to
     });
 
-    res.json({
+    return res.json({
       success: true,
       data
     });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({
+    console.error("Quality API Error:", error);
+    return res.status(500).json({
       success: false,
       message: "Internal Server Error"
     });

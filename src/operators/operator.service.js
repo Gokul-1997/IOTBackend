@@ -126,3 +126,147 @@ exports.list = async (plant_id, query) => {
     }
   };
 };
+
+// operator.service.js
+
+exports.update = async (id, data, plant_id) => {
+  const client = await db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 🔹 Update basic operator fields (dynamic)
+    const fields = [];
+    const values = [];
+    let index = 1;
+
+    const allowedFields = [
+      'operator_code',
+      'operator_name',
+      'skill_level',
+      'is_active'
+    ];
+
+    allowedFields.forEach(field => {
+      if (data[field] !== undefined) {
+        fields.push(`${field} = $${index}`);
+        values.push(data[field]);
+        index++;
+      }
+    });
+
+    if (fields.length > 0) {
+      values.push(id);
+      values.push(plant_id);
+
+      await client.query(
+        `
+        UPDATE operators
+        SET ${fields.join(', ')}
+        WHERE id = $${index} AND plant_id = $${index + 1}
+        `,
+        values
+      );
+    }
+
+    // 🔹 Update shift assignment
+    if (data.shift_id) {
+      await client.query(
+        `
+        UPDATE operator_shift_assignments
+        SET is_active = FALSE
+        WHERE operator_id = $1
+        `,
+        [id]
+      );
+
+      await client.query(
+        `
+        INSERT INTO operator_shift_assignments
+        (plant_id, operator_id, shift_id, effective_from)
+        VALUES ($1,$2,$3,CURRENT_DATE)
+        `,
+        [plant_id, id, data.shift_id]
+      );
+    }
+
+    // 🔹 Update machine assignments
+    if (data.machine_ids) {
+      await client.query(
+        `
+        UPDATE operator_machine_assignments
+        SET is_active = FALSE
+        WHERE operator_id = $1
+        `,
+        [id]
+      );
+
+      for (const m of data.machine_ids) {
+        await client.query(
+          `
+          INSERT INTO operator_machine_assignments
+          (plant_id, operator_id, machine_id, assigned_from)
+          VALUES ($1,$2,$3,CURRENT_DATE)
+          `,
+          [plant_id, id, m]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    return {
+      status: 'success',
+      message: 'Operator updated successfully'
+    };
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+};
+
+exports.getById = async (id, plant_id) => {
+
+  // Basic operator
+  const operator = await db.query(
+    `SELECT id, operator_code, operator_name, skill_level, is_active
+     FROM operators
+     WHERE id = $1 AND plant_id = $2`,
+    [id, plant_id]
+  );
+
+  if (operator.rowCount === 0) {
+    throw new Error('Operator not found');
+  }
+
+  // Active shift
+  const shift = await db.query(
+    `SELECT shift_id
+     FROM operator_shift_assignments
+     WHERE operator_id = $1
+       AND is_active = TRUE
+     LIMIT 1`,
+    [id]
+  );
+
+  // Active machines
+  const machines = await db.query(
+    `SELECT machine_id
+     FROM operator_machine_assignments
+     WHERE operator_id = $1
+       AND is_active = TRUE`,
+    [id]
+  );
+
+  return {
+    status: 'success',
+    data: {
+      ...operator.rows[0],
+      shift_id: shift.rows[0]?.shift_id || null,
+      machine_ids: machines.rows.map(m => m.machine_id)
+    }
+  };
+};
