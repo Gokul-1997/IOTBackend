@@ -2,22 +2,39 @@ const router = require('express').Router();
 const ctrl = require('./dashboard.controller');
 const auth = require('../middleware/auth.middleware');
 
-// Machine card list
+/* =====================================================
+   DASHBOARD MAIN (Paginated Machine Cards)
+   GET /dashboard?page=1&per_page=6
+===================================================== */
 router.get('/', auth, ctrl.dashboard);
 
-// Machine full detail page
-router.get('/detail/:machine_id', auth, ctrl.machineDetail);
 
-// Live data (poll every 2 sec)
-router.get('/live/:machine_id', auth, ctrl.liveSingle);
-
-// Timeline (last 8 hours)
-router.get('/timeline/:machine_id', auth, ctrl.timeline);
-
-// Spindle + Feed trend
-router.get('/trend/:machine_id', auth, ctrl.trend);
-
-// Dashboard summary (shift + counts)
+/* =====================================================
+   DASHBOARD SUMMARY (Header Counts)
+   GET /dashboard/summary
+===================================================== */
 router.get('/summary', auth, ctrl.dashboardSummary);
+
+
+/* =====================================================
+   MACHINE DETAIL PAGE
+   GET /dashboard/:machine_id/detail
+===================================================== */
+router.get('/:machine_id/detail', auth, ctrl.machineDetail);
+
+
+/* =====================================================
+   MACHINE TIMELINE (Last 8 Hours)
+   GET /dashboard/:machine_id/timeline
+===================================================== */
+router.get('/:machine_id/timeline', auth, ctrl.timeline);
+
+
+/* =====================================================
+   MACHINE TREND (Spindle + Feed)
+   GET /dashboard/:machine_id/trend
+===================================================== */
+router.get('/:machine_id/trend', auth, ctrl.trend);
+
 
 module.exports = router;

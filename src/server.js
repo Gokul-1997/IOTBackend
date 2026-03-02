@@ -26,16 +26,12 @@ const io = new Server(httpServer, {
 io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
-
-    if (!token) {
-      return next(new Error('Unauthorized'));
-    }
-
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     socket.user = decoded;
-
     next();
+
   } catch (err) {
+    console.log("JWT VERIFY ERROR:", err.name);
     next(new Error('Unauthorized'));
   }
 });
