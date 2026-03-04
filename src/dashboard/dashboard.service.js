@@ -1,33 +1,50 @@
 const db = require('../db');
 const redis = require('../redis');
 
-/* =====================================================
-   GET CURRENT SHIFT + SHIFT START
-===================================================== */
-async function getCurrentShift(plant_id) {
+function timeToMinutes(t) {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+}
 
-  const { rows } = await db.query(`
-    SELECT id, shift_code, start_time, end_time, break_minutes
-    FROM shifts
-    WHERE plant_id = $1
-      AND (
-        (start_time <= end_time AND NOW()::time BETWEEN start_time AND end_time)
-        OR
-        (start_time > end_time AND 
-          (NOW()::time >= start_time OR NOW()::time <= end_time)
-        )
-      )
-      AND is_active = TRUE
-    LIMIT 1
-  `, [plant_id]);
+function calculateDuration(startMin, endMin) {
+  if (startMin === endMin) return 1440; // 24h shift
+  if (endMin > startMin) return endMin - startMin;
+  return (1440 - startMin) + endMin; // night shift
+}
 
-  if (!rows.length) return null;
-
-  const shift = rows[0];
+exports.dashboard = async (plant_id) => {
 
   const now = new Date();
-  const today = now.toISOString().split('T')[0];
 
+  const currentTime = now.toTimeString().slice(0, 8);
+
+  const { rows: shiftRows } = await db.query(`
+  SELECT id, shift_code, start_time, end_time, break_minutes
+  FROM shifts
+  WHERE plant_id = $1
+    AND (
+      (start_time <= end_time AND $2 BETWEEN start_time AND end_time)
+      OR
+      (start_time > end_time AND 
+        ($2 >= start_time OR $2 <= end_time)
+      )
+    )
+    AND is_active = TRUE
+  LIMIT 1
+`, [plant_id, currentTime]);
+
+  const shift = shiftRows[0];
+
+  if (!shift) {
+    return {
+      shift: null,
+      summary: { total: 0, running: 0, idle: 0 },
+      lines: []
+    };
+  }
+
+  /* ================= SHIFT START ================= */
+  const today = now.toISOString().split('T')[0];
   let shiftStart;
 
   if (shift.start_time <= shift.end_time) {
@@ -36,173 +53,179 @@ async function getCurrentShift(plant_id) {
     if (now.toTimeString().slice(0, 8) >= shift.start_time) {
       shiftStart = new Date(`${today}T${shift.start_time}`);
     } else {
-      const yesterday = new Date(now);
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yDate = yesterday.toISOString().split('T')[0];
-      shiftStart = new Date(`${yDate}T${shift.start_time}`);
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      shiftStart = new Date(`${y.toISOString().split('T')[0]}T${shift.start_time}`);
     }
   }
 
-  return { shift, shiftStart };
-}
+  /* ================= SHIFT END ================= */
+  const startMin = timeToMinutes(shift.start_time);
+  const endMin = timeToMinutes(shift.end_time);
+  const shiftDurationMinutes = calculateDuration(startMin, endMin);
 
+  const shiftEnd = new Date(shiftStart);
+  shiftEnd.setMinutes(shiftEnd.getMinutes() + shiftDurationMinutes);
 
-exports.dashboard = async (plant_id, page = 1, perPage = 6) => {
+  const effectiveNow = now > shiftEnd ? shiftEnd : now;
 
-  const offset = (page - 1) * perPage;
+  const shiftElapsedMinutes =
+    Math.max(0, Math.floor((effectiveNow - shiftStart) / 60000));
 
-  const shiftData = await getCurrentShift(plant_id);
-  if (!shiftData) {
-    return { shift: null, page, perPage, total: 0, machines: [] };
-  }
+  const plannedMinutes =
+    Math.max(0, shiftDurationMinutes - Number(shift.break_minutes || 0));
 
-  const { shift, shiftStart } = shiftData;
-  const now = new Date();
+  /* ================= LINES ================= */
+  const { rows: lines } = await db.query(`
+    SELECT id, name
+    FROM line
+    WHERE plant_id = $1
+    ORDER BY id
+  `, [plant_id]);
 
-  /* ===============================
-     TOTAL MACHINE COUNT
-  =============================== */
-  const { rows: countRows } = await db.query(`
-    SELECT COUNT(*)
+  /* ================= MACHINES ================= */
+  const { rows: machines } = await db.query(`
+    SELECT id, machine_name, image_url, line_id
     FROM machines
     WHERE plant_id = $1
       AND is_active = TRUE
   `, [plant_id]);
 
-  const total = Number(countRows[0].count);
+  const machineIds = machines.map(m => m.id);
 
-  /* ===============================
-     PAGINATED MACHINE LIST
-  =============================== */
-  const { rows: machines } = await db.query(`
-    SELECT id, machine_name, image_url
-    FROM machines
-    WHERE plant_id = $1
-      AND is_active = TRUE
-    ORDER BY machine_name
-    LIMIT $2 OFFSET $3
-  `, [plant_id, perPage, offset]);
-
-  if (!machines.length) {
+  if (!machineIds.length) {
     return {
-      shift: shift.shift_code,
-      page,
-      perPage,
-      total,
-      machines: []
+      shift: {
+        shift_code: shift.shift_code,
+        shiftElapsedMinutes,
+        plannedMinutes
+      },
+      summary: { total: 0, running: 0, idle: 0 },
+      lines: []
     };
   }
 
-  const machineIds = machines.map(m => m.id);
-
-  /* ===============================
-     SHIFT TOTALS FROM HOURLY MV
-  =============================== */
-  const { rows: totals } = await db.query(`
-  SELECT
-    machine_id,
-    SUM(run_minutes) AS total_run,
-    SUM(idle_minutes) AS total_idle,
-    SUM(produced_qty) AS total_parts
-  FROM production_hourly
-  WHERE machine_id = ANY($1)
-    AND hour_start >= $2
-  GROUP BY machine_id
-`, [machineIds, shiftStart]);
-
-  const totalMap = {};
-  totals.forEach(r => totalMap[r.machine_id] = r);
-
-  /* ===============================
-     CURRENT JOB
-  =============================== */
-  const { rows: jobs } = await db.query(`
-    SELECT machine_id, target_qty, achieved_qty
-    FROM machine_current_job
+  /* ================= PRODUCTION DATA ================= */
+  const { rows: prodRows } = await db.query(`
+    SELECT machine_id,
+           SUM(run_minutes) AS run_minutes,
+           SUM(produced_qty) AS produced_qty
+    FROM production_hourly
     WHERE machine_id = ANY($1)
-      AND is_active = TRUE
-  `, [machineIds]);
+      AND hour_start >= $2
+      AND hour_start <= $3
+    GROUP BY machine_id
+  `, [machineIds, shiftStart, effectiveNow]);
 
-  const jobMap = {};
-  jobs.forEach(j => jobMap[j.machine_id] = j);
+  const prodMap = {};
+  prodRows.forEach(r => {
+    prodMap[r.machine_id] = {
+      run_minutes: Number(r.run_minutes || 0),
+      produced_qty: Number(r.produced_qty || 0)
+    };
+  });
 
-  /* ===============================
-     LIVE STATUS FROM REDIS
-  =============================== */
+  /* ================= LIVE STATUS ================= */
   const keys = machineIds.map(id => `machine:${id}:live`);
   const liveData = await redis.mget(keys);
 
-  /* ===============================
-     BUILD RESPONSE
-  =============================== */
-  const response = machines.map((m, i) => {
+  const liveMap = {};
+  machineIds.forEach((id, i) => {
+    try {
+      liveMap[id] = liveData[i]
+        ? JSON.parse(liveData[i])
+        : { machine_status: 'OFFLINE' };
+    } catch {
+      liveMap[id] = { machine_status: 'OFFLINE' };
+    }
+  });
 
-    const live = liveData[i] ? JSON.parse(liveData[i]) : null;
-    const rawStatus = live?.machine_status || 'UNKNOWN';
+  /* ================= BUILD RESPONSE ================= */
+  let total = 0;
+  let running = 0;
+  let idle = 0;
 
-    const status =
-      ['RUN', 'CUTTING', 'RUNNING'].includes(rawStatus)
-        ? 'RUNNING'
-        : 'IDLE';
+  const finalLines = lines.map(line => {
 
-    const alarm = rawStatus === 'ALARM';
+    const machinesInLine = [];
 
-    const totalsRow = totalMap[m.id] || {};
+    for (const m of machines) {
 
-    let run = Number(totalsRow.total_run || 0);
-    let idle = Number(totalsRow.total_idle || 0);
+      if (m.line_id !== line.id) continue;
 
-    /* ===============================
-       SHIFT ELAPSED TIME (MINUTES)
-    =============================== */
-    const shiftElapsedMinutes =
-      Math.max(0, Math.floor((now - new Date(shiftStart)) / 60000));
+      const live = liveMap[m.id] || {};
+      const prod = prodMap[m.id] || {};
 
-    // Break minutes (planned downtime)
-    const breakMinutes = Number(shift.break_minutes || 0);
+      const rawStatus = live.machine_status;
 
-    // Planned production time
-    const plannedMinutes =
-      Math.max(0, shiftElapsedMinutes - breakMinutes);
+      let status = 'IDLE';
 
+      if (['RUN', 'CUTTING', 'RUNNING'].includes(rawStatus)) {
+        status = 'RUNNING';
+        running++;
+      } else {
+        idle++;
+      }
 
-    if ((run + idle) < plannedMinutes) {
-      idle = plannedMinutes - run;
+      total++;
+
+      let run = prod.run_minutes || 0;
+
+      // Clamp run to elapsed time
+      if (run > shiftElapsedMinutes) {
+        run = shiftElapsedMinutes;
+      }
+
+      // Idle = elapsed time - run
+      let plannedElapsedMinutes =
+        Math.max(0, shiftElapsedMinutes - Number(shift.break_minutes || 0));
+
+      // Clamp run to planned elapsed
+      if (run > plannedElapsedMinutes) {
+        run = plannedElapsedMinutes;
+      }
+
+      let idleMinutes = plannedElapsedMinutes - run;
+
+      if (idleMinutes < 0) {
+        idleMinutes = 0;
+      }
+
+      const utilization =
+        plannedMinutes > 0
+          ? Number(((run * 100) / plannedMinutes).toFixed(2))
+          : 0;
+
+      machinesInLine.push({
+        machine_id: m.id,
+        machine_name: m.machine_name,
+        image_url: m.image_url,
+        status,
+        run_minutes: run,
+        idle_minutes: idleMinutes,
+        produced_qty: prod.produced_qty || 0,
+        utilization
+      });
     }
 
-    /* ===============================
-       UTILIZATION (CORRECT FORMULA)
-       run / shiftElapsed
-    =============================== */
-    const utilization =
-      plannedMinutes > 0
-        ? Number(((run * 100) / plannedMinutes).toFixed(2))
-        : 0;
-
     return {
-      machine_id: m.id,
-      machine_name: m.machine_name,
-      image_url: m.image_url,
-      status,
-      alarm,
-      utilization,
-      total_run_minutes: run,
-      total_idle_minutes: idle,
-      total_parts: Number(totalsRow.total_parts || 0),
-      target: jobMap[m.id]?.target_qty || 0,
-      achieved: jobMap[m.id]?.achieved_qty || 0
+      line_id: line.id,
+      line_name: line.name,
+      total: machinesInLine.length,
+      machines: machinesInLine
     };
   });
 
   return {
-    shift: shift.shift_code,
-    page,
-    perPage,
-    total,
-    machines: response
+    shift: {
+      shift_code: shift.shift_code,
+      shiftElapsedMinutes,
+      plannedMinutes
+    },
+    summary: { total, running, idle },
+    lines: finalLines
   };
 };
-
 
 exports.dashboardSummary = async (plant_id) => {
 
@@ -549,7 +572,6 @@ exports.machineDetail = async (plant_id, machine_id) => {
     SELECT
       SUM(run_minutes) as run_minutes,
       SUM(idle_minutes) as idle_minutes,
-      SUM(off_minutes) as off_minutes,
       MAX(produced_qty) as produced_qty
     FROM production_hourly_mv
     WHERE machine_id = $1
