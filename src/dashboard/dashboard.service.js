@@ -109,6 +109,7 @@ exports.dashboard = async (plant_id) => {
   const { rows: prodRows } = await db.query(`
     SELECT machine_id,
            SUM(run_minutes) AS run_minutes,
+           SUM(idle_minutes) AS idle_minutes,
            SUM(produced_qty) AS produced_qty
     FROM production_hourly
     WHERE machine_id = ANY($1)
@@ -121,6 +122,7 @@ exports.dashboard = async (plant_id) => {
   prodRows.forEach(r => {
     prodMap[r.machine_id] = {
       run_minutes: Number(r.run_minutes || 0),
+      idle_minutes: Number(r.idle_minutes || 0),
       produced_qty: Number(r.produced_qty || 0)
     };
   });
@@ -185,7 +187,7 @@ exports.dashboard = async (plant_id) => {
         run = plannedElapsedMinutes;
       }
 
-      let idleMinutes = plannedElapsedMinutes - run;
+      let idleMinutes = prod.idle_minutes
 
       if (idleMinutes < 0) {
         idleMinutes = 0;
