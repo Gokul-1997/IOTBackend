@@ -49,7 +49,7 @@ exports.list = async (plant_id, query) => {
       AND (
         c.part_name ILIKE $${values.length}
         OR c.part_number ILIKE $${values.length}
-        OR m.machine_name ILIKE $${values.length}
+        OR m.machine_serial_no ILIKE $${values.length}
       )
     `;
   }
@@ -62,7 +62,7 @@ exports.list = async (plant_id, query) => {
   `;
 
   const listQuery = `
-    SELECT c.*, m.machine_name
+    SELECT c.*, m.machine_serial_no
     FROM components c
     JOIN machines m ON m.id = c.machine_id
     ${where}

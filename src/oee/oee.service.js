@@ -3,10 +3,10 @@ const db = require('../db'); // pg pool
 exports.getMeta = async (plantId) => {
 
   const machines = await db.query(`
-    SELECT id, machine_name
+    SELECT id, machine_serial_no
     FROM machines
     WHERE plant_id = $1 AND is_active = true
-    ORDER BY machine_name
+    ORDER BY machine_serial_no
   `, [plantId]);
 
   const shifts = await db.query(`
@@ -77,7 +77,7 @@ exports.getReports = async (query, plantId) => {
   const dataQuery = `
     SELECT
       os.shift_date,
-      m.machine_name,
+      m.machine_serial_no,
       s.shift_name,
       os.availability,
       os.performance,

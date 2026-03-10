@@ -12,7 +12,7 @@ const machineInfo = await db.query(
   `
   SELECT 
     m.id,
-    m.machine_name,
+    m.machine_serial_no,
     m.image_url,
     COALESCE(o.operator_name, '-') AS operator_name,
     COALESCE(mcj.component_id, '-') AS component_id,

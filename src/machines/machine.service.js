@@ -4,55 +4,89 @@ const crypto = require('crypto');
 /* CREATE MACHINE (ADMIN) */
 exports.createMachine = async (req) => {
   const {
-    machine_name,
-    line_id,
-    image_url,
-    axis_model,
-    controller_model,
-    machine_year
+    machine_serial_no,
+    x_axis,
+    y_axis,
+    z_axis,
+    fourth_axis,
+    twin_spindle,
+    twin_table,
+    atc_tool_capacity,
+    model,
+    mmc_no,
+    controller,
+    spindle_rpm,
+    image_url
   } = req.body;
 
-  if (!machine_name || !line_id) {
-    throw new Error('Machine name and line required');
+  if (!machine_serial_no) {
+    throw new Error("Machine serial number is required");
   }
 
-  const apiKey = crypto.randomBytes(16).toString('hex');
+  const apiKey = crypto.randomBytes(16).toString("hex");
 
   const result = await pool.query(
     `
-    INSERT INTO machines
-    (plant_id, machine_name, line_id,
-     image_url, axis_model, controller_model, machine_year, api_key)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    RETURNING id, machine_name, line_id, api_key
+    INSERT INTO machines (
+      plant_id,
+      machine_serial_no,
+      x_axis,
+      y_axis,
+      z_axis,
+      fourth_axis,
+      twin_spindle,
+      twin_table,
+      atc_tool_capacity,
+      model,
+      mmc_no,
+      controller,
+      spindle_rpm,
+      image_url,
+      api_key
+    )
+    VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+    )
+    RETURNING id, machine_serial_no, api_key
     `,
     [
       req.user.plant_id,
-      machine_name,
-      line_id,
+      machine_serial_no,
+      x_axis,
+      y_axis,
+      z_axis,
+      fourth_axis,
+      twin_spindle,
+      twin_table,
+      atc_tool_capacity,
+      model,
+      mmc_no,
+      controller,
+      spindle_rpm,
       image_url,
-      axis_model,
-      controller_model,
-      machine_year,
       apiKey
     ]
   );
 
   const newMachineId = result.rows[0].id;
 
-  // Auto link machine to all existing shifts
-  await pool.query(`
+  // Auto link machine to all shifts
+  await pool.query(
+    `
     INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
     SELECT $1, $2, id
     FROM shifts
     WHERE plant_id = $1
-  `, [req.user.plant_id, newMachineId]);
+    `,
+    [req.user.plant_id, newMachineId]
+  );
 
   return result.rows[0];
 };
 
 /* LIST MACHINES */
 exports.getMachines = async (req) => {
+
   const {
     search = '',
     page = 1,
@@ -66,11 +100,12 @@ exports.getMachines = async (req) => {
 
   const sortableColumns = [
     'm.id',
-    'm.machine_name',
-    'm.axis_model',
-    'm.controller_model',
-    'm.machine_year',
-    'm.is_active'
+    'm.machine_serial_no',
+    'm.model',
+    'm.controller',
+    'm.spindle_rpm',
+    'm.is_active',
+    'l.line_name'
   ];
 
   const orderColumn = sortableColumns.includes(sortBy)
@@ -85,25 +120,37 @@ exports.getMachines = async (req) => {
 
   if (search) {
     values.push(`%${search}%`);
+
     whereSQL += `
       AND (
-        m.machine_name ILIKE $${values.length}
-        OR m.axis_model ILIKE $${values.length}
-        OR m.controller_model ILIKE $${values.length}
+        m.machine_serial_no ILIKE $${values.length}
+        OR m.model ILIKE $${values.length}
+        OR m.controller ILIKE $${values.length}
+        OR l.line_name ILIKE $${values.length}
       )
     `;
   }
 
   const dataQuery = `
-    SELECT m.id,
-           m.machine_name,
-           m.image_url,
-           m.axis_model,
-           m.controller_model,
-           m.machine_year,
-           m.is_active,
-           m.line_id,
-           l.name AS line_name
+    SELECT 
+      m.id,
+      m.machine_serial_no,
+      m.line_id,
+      l.name,
+      m.image_url,
+      m.x_axis,
+      m.y_axis,
+      m.z_axis,
+      m.fourth_axis,
+      m.twin_spindle,
+      m.twin_table,
+      m.atc_tool_capacity,
+      m.model,
+      m.mmc_no,
+      m.controller,
+      m.spindle_rpm,
+      m.is_active,
+      m.created_at
     FROM machines m
     LEFT JOIN line l ON l.id = m.line_id
     ${whereSQL}
@@ -115,6 +162,7 @@ exports.getMachines = async (req) => {
   const countQuery = `
     SELECT COUNT(*)::int AS total
     FROM machines m
+    LEFT JOIN line l ON l.id = m.line_id
     ${whereSQL}
   `;
 
@@ -175,16 +223,25 @@ exports.deleteMachine = async (req) => {
 
 /* UPDATE MACHINE (ADMIN) */
 exports.updateMachine = async (req) => {
+
   const { id } = req.params;
   const plantId = req.user.plant_id;
 
   const allowedFields = [
-    'machine_name',
+    'machine_serial_no',
     'line_id',
-    'image_url',
-    'axis_model',
-    'controller_model',
-    'machine_year'
+    'x_axis',
+    'y_axis',
+    'z_axis',
+    'fourth_axis',
+    'twin_spindle',
+    'twin_table',
+    'atc_tool_capacity',
+    'model',
+    'mmc_no',
+    'controller',
+    'spindle_rpm',
+    'image_url'
   ];
 
   const fields = [];

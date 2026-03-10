@@ -4,7 +4,7 @@ exports.hourlyOee = async (plant_id, date) => {
   const { rows } = await db.query(
     `
     SELECT
-      m.machine_name,
+      m.machine_serial_no,
       hour_start,
       availability,
       performance,
@@ -14,7 +14,7 @@ exports.hourlyOee = async (plant_id, date) => {
     JOIN machines m ON m.id = o.machine_id
     WHERE m.plant_id = $1
       AND DATE(hour_start) = $2
-    ORDER BY m.machine_name, hour_start
+    ORDER BY m.machine_serial_no, hour_start
     `,
     [plant_id, date]
   );
@@ -26,7 +26,7 @@ exports.shiftOee = async (plant_id, date) => {
     `
     SELECT
       s.shift_name,
-      m.machine_name,
+      m.machine_serial_no,
       availability,
       performance,
       quality,
@@ -36,7 +36,7 @@ exports.shiftOee = async (plant_id, date) => {
     JOIN shifts s ON s.id = o.shift_id
     WHERE m.plant_id = $1
       AND shift_date = $2
-    ORDER BY s.shift_name, m.machine_name
+    ORDER BY s.shift_name, m.machine_serial_no
     `,
     [plant_id, date]
   );
@@ -47,7 +47,7 @@ exports.production = async (plant_id, date) => {
   const { rows } = await db.query(
     `
     SELECT
-      m.machine_name,
+      m.machine_serial_no,
       hour_start,
       run_minutes,
       idle_minutes,
@@ -57,7 +57,7 @@ exports.production = async (plant_id, date) => {
     JOIN machines m ON m.id = p.machine_id
     WHERE m.plant_id = $1
       AND DATE(hour_start) = $2
-    ORDER BY m.machine_name, hour_start
+    ORDER BY m.machine_serial_no, hour_start
     `,
     [plant_id, date]
   );
