@@ -20,15 +20,15 @@ exports.dashboard = async (plant_id) => {
   /* ================= SHIFT ================= */
 
   const { rows: shiftRows } = await db.query(`
-    SELECT id, shift_code, start_time, end_time, break_minutes
+    SELECT id,shift_code,start_time,end_time,break_minutes
     FROM shifts
-    WHERE plant_id = $1
+    WHERE plant_id=$1
       AND (
-        (start_time <= end_time AND $2 BETWEEN start_time AND end_time)
+        (start_time<=end_time AND $2 BETWEEN start_time AND end_time)
         OR
-        (start_time > end_time AND ($2 >= start_time OR $2 <= end_time))
+        (start_time>end_time AND ($2>=start_time OR $2<=end_time))
       )
-      AND is_active = TRUE
+      AND is_active=TRUE
     LIMIT 1
   `, [plant_id, currentTime]);
 
@@ -61,6 +61,7 @@ exports.dashboard = async (plant_id) => {
 
   const startMin = timeToMinutes(shift.start_time);
   const endMin = timeToMinutes(shift.end_time);
+
   const shiftDurationMinutes = calculateDuration(startMin, endMin);
 
   const shiftEnd = new Date(shiftStart);
@@ -77,10 +78,10 @@ exports.dashboard = async (plant_id) => {
   /* ================= MACHINES ================= */
 
   const { rows: machines } = await db.query(`
-    SELECT id, machine_serial_no, image_url
+    SELECT id,machine_serial_no,image_url
     FROM machines
-    WHERE plant_id = $1
-      AND is_active = TRUE
+    WHERE plant_id=$1
+    AND is_active=TRUE
     ORDER BY id
   `, [plant_id]);
 
@@ -98,64 +99,116 @@ exports.dashboard = async (plant_id) => {
     };
   }
 
+  /* ================= OPERATORS ================= */
+
+  const { rows: operatorRows } = await db.query(`
+    SELECT DISTINCT ON (oma.machine_id)
+      oma.machine_id,
+      o.operator_name
+    FROM operator_machine_assignments oma
+    JOIN operator_shift_assignments osa
+      ON osa.operator_id=oma.operator_id
+     AND osa.shift_id=$1
+     AND osa.is_active=TRUE
+    JOIN operators o
+      ON o.id=oma.operator_id
+     AND o.is_active=TRUE
+    WHERE oma.machine_id=ANY($2)
+      AND oma.is_active=TRUE
+  `, [shift.id, machineIds]);
+
+  const operatorMap = {};
+  operatorRows.forEach(r => {
+    operatorMap[r.machine_id] = r.operator_name;
+  });
+
+  /* ================= CURRENT JOB ================= */
+
+  const { rows: jobRows } = await db.query(`
+    SELECT machine_id,part_name,component_id,target_qty
+    FROM machine_current_job
+    WHERE machine_id=ANY($1)
+    AND is_active=TRUE
+  `, [machineIds]);
+
+  const jobMap = {};
+  jobRows.forEach(r => {
+    jobMap[r.machine_id] = r;
+  });
+
+  /* ================= COMPONENT TARGET ================= */
+
+  const { rows: componentRows } = await db.query(`
+    SELECT j.machine_id,c.target
+    FROM machine_current_job j
+    JOIN components c ON c.id=j.component_id
+    WHERE j.machine_id=ANY($1)
+    AND j.is_active=TRUE
+  `, [machineIds]);
+
+  const componentMap = {};
+  componentRows.forEach(r => {
+    componentMap[r.machine_id] = Number(r.target || 0);
+  });
+
   /* ================= PRODUCTION ================= */
 
   const { rows: prodRows } = await db.query(`
-    SELECT machine_id,
-           SUM(run_minutes) AS run_minutes,
-           SUM(idle_minutes) AS idle_minutes,
-           SUM(produced_qty) AS produced_qty
-    FROM production_hourly
-    WHERE machine_id = ANY($1)
-      AND hour_start >= $2
-      AND hour_start <= $3
-    GROUP BY machine_id
-  `, [machineIds, shiftStart, effectiveNow]);
+  SELECT
+  machine_id,
+  SUM(run_seconds) AS run_seconds,
+  SUM(idle_seconds) AS idle_seconds,
+  SUM(produced_qty) AS produced_qty
+  FROM production_hourly
+  WHERE machine_id = ANY($1)
+  AND hour_start >= date_trunc('hour',$2::timestamp)
+  GROUP BY machine_id
+  `, [machineIds, shiftStart]);
 
   const prodMap = {};
-
   prodRows.forEach(r => {
     prodMap[r.machine_id] = {
-      run_minutes: Number(r.run_minutes || 0),
-      idle_minutes: Number(r.idle_minutes || 0),
+      run_seconds: Number(r.run_seconds || 0),
+      idle_seconds: Number(r.idle_seconds || 0),
       produced_qty: Number(r.produced_qty || 0)
     };
   });
 
-  /* ================= COMPONENT TARGETS ================= */
-
-  const { rows: componentRows } = await db.query(`
-  SELECT
-    machine_id,
-    target
-  FROM components
-  WHERE machine_id = ANY($1)
-    AND CURRENT_DATE BETWEEN from_date AND to_date
-`, [machineIds]);
-
-  const componentMap = {};
-
-  componentRows.forEach(r => {
-    componentMap[r.machine_id] = r;
-  });
-
-
-  /* ================= LIVE STATUS (DB ONLY) ================= */
+  /* ================= LIVE STATUS ================= */
 
   const { rows: liveRows } = await db.query(`
-    SELECT DISTINCT ON (machine_id)
-           machine_id,
-           machine_status,
-           alarm,
-           received_at,
-           parts_count
+    SELECT DISTINCT ON(machine_id)
+      machine_id,
+      machine_status,
+      alarm,
+      parts_count,
+      received_at
     FROM telemetry_raw
-    WHERE machine_id = ANY($1)
-    ORDER BY machine_id, received_at DESC
+    WHERE machine_id=ANY($1)
+    ORDER BY machine_id,received_at DESC
   `, [machineIds]);
 
   const liveMap = {};
-  liveRows.forEach(r => liveMap[r.machine_id] = r);
+  liveRows.forEach(r => {
+    liveMap[r.machine_id] = r;
+  });
+
+  /* ================= SHIFT START COUNTER ================= */
+
+  const { rows: startRows } = await db.query(`
+    SELECT DISTINCT ON(machine_id)
+      machine_id,
+      parts_count
+    FROM telemetry_raw
+    WHERE machine_id=ANY($1)
+      AND received_at >= $2
+    ORDER BY machine_id,received_at ASC
+  `, [machineIds, shiftStart]);
+
+  const startMap = {};
+  startRows.forEach(r => {
+    startMap[r.machine_id] = Number(r.parts_count || 0);
+  });
 
   /* ================= BUILD RESPONSE ================= */
 
@@ -169,6 +222,7 @@ exports.dashboard = async (plant_id) => {
 
     const live = liveMap[m.id] || {};
     const prod = prodMap[m.id] || {};
+    const job = jobMap[m.id] || {};
 
     const rawStatus = (live.machine_status || '').toUpperCase();
     const alarm = live.alarm === true;
@@ -184,45 +238,83 @@ exports.dashboard = async (plant_id) => {
 
     total++;
 
-    let run = prod.run_minutes || 0;
+    /* ===== REALTIME SECONDS ===== */
 
-    if (run > shiftElapsedMinutes) {
-      run = shiftElapsedMinutes;
+    let runSeconds = prod.run_seconds || 0;
+    let idleSeconds = prod.idle_seconds || 0;
+
+    if (live.received_at) {
+
+      const last = new Date(live.received_at);
+      const diff = Math.floor((now - last) / 1000);
+
+      if (diff > 0 && diff < 60) {
+
+        if (status === 'RUNNING') {
+          runSeconds += diff;
+        } else {
+          idleSeconds += diff;
+        }
+
+      }
+
     }
 
-    let plannedElapsedMinutes =
-      Math.max(0, shiftElapsedMinutes - Number(shift.break_minutes || 0));
+    const runMinutes = Math.floor(runSeconds / 60);
+    const idleMinutes = Math.floor(idleSeconds / 60);
 
-    if (run > plannedElapsedMinutes) {
-      run = plannedElapsedMinutes;
-    }
+    const runTime =
+      new Date(runSeconds * 1000).toISOString().substring(11, 19);
 
-    let idleMinutes = prod.idle_minutes || 0;
+    const idleTime =
+      new Date(idleSeconds * 1000).toISOString().substring(11, 19);
 
-    if (idleMinutes < 0) idleMinutes = 0;
 
     const utilization =
       plannedMinutes > 0
-        ? Number(((run * 100) / plannedMinutes).toFixed(2))
+        ? Number(((runMinutes * 100) / plannedMinutes).toFixed(2))
         : 0;
+
+    const currentCount = Number(live.parts_count || 0);
+    const startCount = Number(startMap[m.id] || 0);
+
+    let achieved = 0;
+
+    if (currentCount >= startCount) {
+      achieved = currentCount - startCount;
+    } else {
+      achieved = currentCount;
+    }
 
     machinesList.push({
       machine_id: m.id,
       machine_serial_no: m.machine_serial_no,
       image_url: m.image_url,
+
+      operator_name: operatorMap[m.id] || '--',
+
+      part_name: job.part_name || null,
+      component_id: job.component_id || null,
+
       status,
       alarm,
-      run_minutes: run,
+
+      run_minutes: runMinutes,
       idle_minutes: idleMinutes,
+
+      run_time: runTime,
+      idle_time: idleTime,
+
       produced_qty: prod.produced_qty || 0,
+
       utilization,
-      target_qty: componentMap[m.id]?.target || 0,
-  achieved_qty: live?.parts_count || 0
 
+      target_qty: componentMap[m.id] || 0,
+
+      achieved_qty: achieved
     });
-  }
 
-  /* ================= RESPONSE ================= */
+  }
 
   return {
     shift: {
@@ -233,8 +325,8 @@ exports.dashboard = async (plant_id) => {
     summary: { total, running, idle },
     machines: machinesList
   };
-};
 
+};
 
 
 exports.machineDetail = async (plantId, machineId) => {
