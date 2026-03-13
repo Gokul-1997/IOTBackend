@@ -7,8 +7,8 @@ exports.create = async (data, plant_id) => {
     INSERT INTO components
     (plant_id, machine_id, part_name, part_number,
      operation_number, cycle_time, target,
-     multiplication_factor, from_date, to_date)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     multiplication_factor)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     RETURNING *
   `, [
     plant_id,
@@ -18,9 +18,7 @@ exports.create = async (data, plant_id) => {
     data.operation_number,
     data.cycle_time,
     data.target,
-    data.multiplication_factor || 1,
-    data.from_date,
-    data.to_date
+    data.multiplication_factor || 1
   ]);
 
   return {
@@ -95,9 +93,7 @@ exports.update = async (id, data, plant_id) => {
         operation_number=$3,
         cycle_time=$4,
         target=$5,
-        multiplication_factor=$6,
-        from_date=$7,
-        to_date=$8
+        multiplication_factor=$6
     WHERE id=$9 AND plant_id=$10
     RETURNING *
   `, [
@@ -107,8 +103,6 @@ exports.update = async (id, data, plant_id) => {
     data.cycle_time,
     data.target,
     data.multiplication_factor,
-    data.from_date,
-    data.to_date,
     id,
     plant_id
   ]);

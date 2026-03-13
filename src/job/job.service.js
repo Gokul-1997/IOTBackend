@@ -2,7 +2,7 @@ const db = require('../db');
 
 exports.startJob = async (req) => {
 
-  const { machine_id, operator_id, component_id } = req.body;
+  const { machine_id, component_id } = req.body;
   const plant_id = req.user.plant_id;
 
   const { rows } = await db.query(`
@@ -19,12 +19,11 @@ exports.startJob = async (req) => {
 
   await db.query(`
     INSERT INTO machine_current_job
-    (plant_id,machine_id,operator_id,component_id,part_name,target_qty)
-    VALUES ($1,$2,$3,$4,$5,$6)
+    (plant_id,machine_id,component_id,part_name,target_qty)
+    VALUES ($1,$2,$3,$4,$5)
   `,[
     plant_id,
     machine_id,
-    operator_id,
     component_id,
     component.part_name,
     component.target
@@ -56,22 +55,15 @@ exports.getCurrentJobs = async (plant_id) => {
     SELECT
       m.id AS machine_id,
       m.machine_serial_no,
-
       j.id AS job_id,
       j.part_name,
-      j.target_qty,
-      j.achieved_qty,
-
-      o.operator_name
+      j.target_qty
 
     FROM machines m
 
     LEFT JOIN machine_current_job j
       ON j.machine_id = m.id
       AND j.is_active = true
-
-    LEFT JOIN operators o
-      ON o.id = j.operator_id
 
     WHERE m.plant_id = $1
     AND m.is_active = true

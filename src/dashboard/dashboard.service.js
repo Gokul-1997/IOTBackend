@@ -12,6 +12,14 @@ function calculateDuration(startMin, endMin) {
   return (1440 - startMin) + endMin; // night shift
 }
 
+function formatDuration(totalSeconds) {
+  const sec = Math.max(0, Number(totalSeconds || 0));
+  const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+  const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+  const s = String(sec % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
 exports.dashboard = async (plant_id) => {
 
   const now = new Date();
@@ -154,16 +162,16 @@ exports.dashboard = async (plant_id) => {
   /* ================= PRODUCTION ================= */
 
   const { rows: prodRows } = await db.query(`
-  SELECT
-  machine_id,
-  SUM(run_seconds) AS run_seconds,
-  SUM(idle_seconds) AS idle_seconds,
-  SUM(produced_qty) AS produced_qty
-  FROM production_hourly
-  WHERE machine_id = ANY($1)
-  AND hour_start >= date_trunc('hour',$2::timestamp)
-  GROUP BY machine_id
-  `, [machineIds, shiftStart]);
+SELECT
+machine_id,
+SUM(run_seconds) AS run_seconds,
+SUM(idle_seconds) AS idle_seconds,
+SUM(produced_qty) AS produced_qty
+FROM production_hourly
+WHERE machine_id = ANY($1)
+AND shift_id = $2
+GROUP BY machine_id
+`, [machineIds, shift.id]);
 
   const prodMap = {};
   prodRows.forEach(r => {
@@ -224,13 +232,27 @@ exports.dashboard = async (plant_id) => {
     const prod = prodMap[m.id] || {};
     const job = jobMap[m.id] || {};
 
+
     const rawStatus = (live.machine_status || '').toUpperCase();
     const alarm = live.alarm === true;
 
+    const nowSec = Math.floor(Date.now() / 1000);
+    const receivedAtSec = Number(live.received_at || 0);
+    const freshDiff = receivedAtSec ? (nowSec - receivedAtSec) : null;
+
     let status = 'IDLE';
 
-    if (['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus)) {
-      status = 'RUNNING';
+    if (receivedAtSec) {
+      if (freshDiff > 15) {
+        status = 'OFFLINE';
+      } else if (['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus)) {
+        status = 'RUNNING';
+      } else {
+        status = 'IDLE';
+      }
+    }
+
+    if (status === 'RUNNING') {
       running++;
     } else {
       idle++;
@@ -240,51 +262,51 @@ exports.dashboard = async (plant_id) => {
 
     /* ===== REALTIME SECONDS ===== */
 
-    let runSeconds = prod.run_seconds || 0;
-    let idleSeconds = prod.idle_seconds || 0;
+    let runSeconds = Number(prod.run_seconds || 0);
+    let idleSeconds = Number(prod.idle_seconds || 0);
 
-    if (live.received_at) {
-
-      const last = new Date(live.received_at);
-      const diff = Math.floor((now - last) / 1000);
-
-      if (diff > 0 && diff < 60) {
-
-        if (status === 'RUNNING') {
-          runSeconds += diff;
-        } else {
-          idleSeconds += diff;
-        }
-
+    if (receivedAtSec && freshDiff >= 0 && freshDiff <= 15) {
+      if (status === 'RUNNING') {
+        runSeconds += freshDiff;
+      } else if (status === 'IDLE') {
+        idleSeconds += freshDiff;
       }
-
     }
 
     const runMinutes = Math.floor(runSeconds / 60);
     const idleMinutes = Math.floor(idleSeconds / 60);
 
-    const runTime =
-      new Date(runSeconds * 1000).toISOString().substring(11, 19);
-
-    const idleTime =
-      new Date(idleSeconds * 1000).toISOString().substring(11, 19);
-
+    const runTime = formatDuration(runSeconds);
+    const idleTime = formatDuration(idleSeconds);
 
     const utilization =
       plannedMinutes > 0
         ? Number(((runMinutes * 100) / plannedMinutes).toFixed(2))
         : 0;
 
+    /* ================= ACHIEVED QTY ================= */
+
     const currentCount = Number(live.parts_count || 0);
     const startCount = Number(startMap[m.id] || 0);
+    const produced = Number(prod.produced_qty || 0);
+
 
     let achieved = 0;
 
-    if (currentCount >= startCount) {
-      achieved = currentCount - startCount;
+    if (produced > 0) {
+      achieved = produced;
     } else {
-      achieved = currentCount;
+
+      if (currentCount >= startCount) {
+        achieved = currentCount - startCount;
+      } else {
+        /* machine reset detected */
+        achieved = currentCount;
+      }
+
     }
+
+    if (achieved < 0) achieved = 0;
 
     machinesList.push({
       machine_id: m.id,
@@ -349,18 +371,25 @@ exports.machineDetail = async (plantId, machineId) => {
     /* ================= CURRENT SHIFT ================= */
 
     const { rows: shiftRows } = await db.query(`
-      SELECT shift_code, start_time, end_time
-      FROM shifts
-      WHERE plant_id = $1
-        AND is_active = true
-        AND (
-          (start_time <= end_time AND
-           CURRENT_TIME BETWEEN start_time AND end_time)
-          OR
-          (start_time > end_time AND
-           (CURRENT_TIME >= start_time OR CURRENT_TIME <= end_time))
-        )
-      LIMIT 1
+   SELECT id, shift_code, start_time, end_time
+FROM shifts
+WHERE plant_id = $1
+AND is_active = true
+AND (
+  (start_time <= end_time AND
+   (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time
+   BETWEEN start_time AND end_time)
+
+  OR
+
+  (start_time > end_time AND
+   (
+     (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
+     OR
+     (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time <= end_time
+   ))
+)
+LIMIT 1
     `, [plantId]);
 
     const shift = shiftRows[0] || null;
@@ -371,10 +400,9 @@ exports.machineDetail = async (plantId, machineId) => {
     const { rows: operatorRows } = await db.query(`
       SELECT o.operator_name
       FROM operator_machine_assignments a
-      JOIN operators o
-        ON o.id = a.operator_id
+      JOIN operators o ON o.id = a.operator_id
       WHERE a.machine_id = $1
-        AND a.is_active = TRUE
+      AND a.is_active = TRUE
       LIMIT 1
     `, [machineId]);
 
@@ -384,14 +412,10 @@ exports.machineDetail = async (plantId, machineId) => {
     /* ================= COMPONENT ================= */
 
     const { rows: componentRows } = await db.query(`
-      SELECT
-        part_name,
-        part_number,
-        cycle_time,
-        target
+      SELECT part_name, part_number, cycle_time, target
       FROM components
       WHERE machine_id = $1
-        AND CURRENT_DATE BETWEEN from_date AND to_date
+      AND CURRENT_DATE BETWEEN from_date AND to_date
       ORDER BY created_at DESC
       LIMIT 1
     `, [machineId]);
@@ -399,32 +423,41 @@ exports.machineDetail = async (plantId, machineId) => {
     const component = componentRows[0] || null;
 
 
-
-
     /* ================= PRODUCTION ================= */
 
-    const { rows: timeRows } = await db.query(`
-      SELECT
-        SUM(run_minutes) AS run_minutes,
-        SUM(idle_minutes) AS idle_minutes,
-        SUM(off_minutes) AS off_minutes
-      FROM production_hourly
-      WHERE machine_id = $1
-        AND hour_start >= now() - interval '8 hours'
-    `, [machineId]);
+    let runSeconds = 0;
+    let idleSeconds = 0;
+    let producedQty = 0;
 
-    const timeInfo = timeRows[0] || {};
+    if (shift) {
+
+      const { rows: prodRows } = await db.query(`
+        SELECT
+          COALESCE(SUM(run_seconds),0) AS run_seconds,
+          COALESCE(SUM(idle_seconds),0) AS idle_seconds,
+          COALESCE(SUM(produced_qty),0) AS produced_qty
+        FROM production_hourly
+        WHERE machine_id = $1
+        AND shift_id = $2
+      `, [machineId, shift.id]);
+
+      const prod = prodRows[0] || {};
+
+      runSeconds = Number(prod.run_seconds || 0);
+      idleSeconds = Number(prod.idle_seconds || 0);
+      producedQty = Number(prod.produced_qty || 0);
+    }
 
 
     /* ================= QUALITY ================= */
 
     const { rows: qualityRows } = await db.query(`
       SELECT
-        SUM(total_qty) AS accepted,
-        SUM(reject_qty) AS rejected
+        COALESCE(SUM(total_qty),0) AS accepted,
+        COALESCE(SUM(reject_qty),0) AS rejected
       FROM quality_entries
       WHERE machine_id = $1
-        AND created_at >= now() - interval '8 hours'
+      AND created_at >= CURRENT_DATE
     `, [machineId]);
 
     const quality = qualityRows[0] || {};
@@ -456,6 +489,20 @@ exports.machineDetail = async (plantId, machineId) => {
     const live = liveRows[0] || {};
 
 
+    /* ================= TIME FORMAT ================= */
+
+    const formatDuration = (sec) => {
+
+      sec = Number(sec || 0);
+
+      const h = String(Math.floor(sec / 3600)).padStart(2,'0');
+      const m = String(Math.floor((sec % 3600) / 60)).padStart(2,'0');
+      const s = String(sec % 60).padStart(2,'0');
+
+      return `${h}:${m}:${s}`;
+    };
+
+
     /* ================= RESPONSE ================= */
 
     return {
@@ -478,14 +525,15 @@ exports.machineDetail = async (plantId, machineId) => {
         part_name: component?.part_name || '--',
         component_id: component?.part_number || '--',
         target_qty: component?.target || 0,
-        achieved_qty: live?.parts_count || 0,
+        achieved_qty: producedQty,
         cycle_time: component?.cycle_time || null
       },
 
       production: {
-        run_minutes: Number(timeInfo.run_minutes || 0),
-        idle_minutes: Number(timeInfo.idle_minutes || 0),
-        off_minutes: Number(timeInfo.off_minutes || 0)
+        run_minutes: Math.floor(runSeconds / 60),
+        idle_minutes: Math.floor(idleSeconds / 60),
+        run_time: formatDuration(runSeconds),
+        idle_time: formatDuration(idleSeconds)
       },
 
       quality: {
@@ -502,9 +550,9 @@ exports.machineDetail = async (plantId, machineId) => {
 
       live: {
         machine_status: live?.machine_status || 'UNKNOWN',
-        rpm: live?.rpm || 0,
-        feed_rate: live?.feed_rate || 0,
-        parts_count: live?.parts_count || 0
+        rpm: Number(live?.rpm || 0),
+        feed_rate: Number(live?.feed_rate || 0),
+        parts_count: Number(live?.parts_count || 0)
       }
 
     };
