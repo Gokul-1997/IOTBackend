@@ -238,18 +238,35 @@ GROUP BY machine_id
 
     const nowSec = Math.floor(Date.now() / 1000);
     const receivedAtSec = Number(live.received_at || 0);
+
+const lastUpdated =
+  receivedAtSec
+    ? new Date(receivedAtSec).toISOString()
+    : null;
+
+
+    const OFFLINE_THRESHOLD = 10; // seconds
+
     const freshDiff = receivedAtSec ? (nowSec - receivedAtSec) : null;
 
-    let status = 'IDLE';
+    let status = 'OFFLINE';
 
     if (receivedAtSec) {
-      if (freshDiff > 15) {
+
+      if (freshDiff > OFFLINE_THRESHOLD) {
+
         status = 'OFFLINE';
+
       } else if (['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus)) {
+
         status = 'RUNNING';
+
       } else {
+
         status = 'IDLE';
+
       }
+
     }
 
     if (status === 'RUNNING') {
@@ -333,7 +350,8 @@ GROUP BY machine_id
 
       target_qty: componentMap[m.id] || 0,
 
-      achieved_qty: achieved
+      achieved_qty: achieved,
+       last_updated_time: lastUpdated 
     });
 
   }
@@ -495,9 +513,9 @@ LIMIT 1
 
       sec = Number(sec || 0);
 
-      const h = String(Math.floor(sec / 3600)).padStart(2,'0');
-      const m = String(Math.floor((sec % 3600) / 60)).padStart(2,'0');
-      const s = String(sec % 60).padStart(2,'0');
+      const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+      const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+      const s = String(sec % 60).padStart(2, '0');
 
       return `${h}:${m}:${s}`;
     };
