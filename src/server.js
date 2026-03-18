@@ -25,13 +25,26 @@ const io = new Server(httpServer, {
 ================================ */
 io.use((socket, next) => {
   try {
-    const token = socket.handshake.auth?.token;
+    let token = socket.handshake.auth?.token;
+
+    if (!token) {
+      console.log("❌ No token received");
+      return next(new Error('Unauthorized'));
+    }
+
+    /* ✅ REMOVE "Bearer " if exists */
+    if (token.startsWith('Bearer ')) {
+      token = token.slice(7);
+    }
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
     socket.user = decoded;
+
     next();
 
   } catch (err) {
-    console.log("JWT VERIFY ERROR:", err.name);
+    console.log("❌ JWT VERIFY ERROR:", err.message);
     next(new Error('Unauthorized'));
   }
 });

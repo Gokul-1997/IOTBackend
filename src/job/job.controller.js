@@ -27,9 +27,9 @@ exports.stopJob = async (req,res)=>{
 
   try{
 
-    const { machine_id } = req.body;
+    const { machine_id, job_end } = req.body;
 
-    await service.stopJob(machine_id);
+    await service.stopJob(machine_id, job_end);
 
     return res.json({
       status:"success"

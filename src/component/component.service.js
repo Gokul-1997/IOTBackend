@@ -94,7 +94,7 @@ exports.update = async (id, data, plant_id) => {
         cycle_time=$4,
         target=$5,
         multiplication_factor=$6
-    WHERE id=$9 AND plant_id=$10
+    WHERE id=$7 AND plant_id=$8
     RETURNING *
   `, [
     data.part_name,
