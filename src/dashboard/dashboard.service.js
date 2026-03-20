@@ -617,15 +617,27 @@ exports.machineDetail = async (plantId, machineId) => {
  
     /* ================= OEE ================= */
  
-    const { rows: oeeRows } = await db.query(`
-      SELECT availability, performance, quality, oee
-      FROM oee_shift_summary
-      WHERE machine_id = $1
-      ORDER BY shift_date DESC
-      LIMIT 1
-    `, [machineId]);
- 
-    const oee = oeeRows[0] || {};
+    // Scope OEE to current shift + current shift-date only.
+    // Without this, a newly-started shift shows the previous shift's OEE.
+    // If the cron hasn't written a row yet for this shift, return zeros.
+    const shiftDateForOee = detailShiftStart
+      ? [detailShiftStart.getFullYear(),
+         String(detailShiftStart.getMonth() + 1).padStart(2, '0'),
+         String(detailShiftStart.getDate()).padStart(2, '0')].join('-')
+      : null;
+
+    let oee = {};
+    if (shift && shiftDateForOee) {
+      const { rows: oeeRows } = await db.query(`
+        SELECT availability, performance, quality, oee
+        FROM oee_shift_summary
+        WHERE machine_id = $1
+          AND shift_id   = $2
+          AND shift_date::date = $3::date
+        LIMIT 1
+      `, [machineId, shift.id, shiftDateForOee]);
+      oee = oeeRows[0] || {};
+    }
  
     /* ================= LIVE + ADJUSTED PARTS COUNT ================= */
     /*
