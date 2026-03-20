@@ -3,10 +3,13 @@ const router = express.Router();
 
 const auth = require('../middleware/auth.middleware');
 const permit = require('../middleware/permission.middleware');
+const validate = require('../middleware/validate.middleware');
 const controller = require('./machine.controller');
 
 // ADMIN – create machine
-router.post('/', auth, permit('machine.create'), controller.createMachine);
+router.post('/', auth, permit('machine.create'), validate({
+  machine_serial_no: { required: true, maxLength: 100, label: 'Machine serial number' }
+}), controller.createMachine);
 
 // ALL USERS – view machines
 router.get('/', auth, permit('machine.view'), controller.getMachines);

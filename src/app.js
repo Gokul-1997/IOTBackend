@@ -48,6 +48,9 @@ app.use('/auth', authLimiter);
 
 require('./routes')(app);
 
+// FIX: cron jobs were never imported anywhere — scheduled jobs never ran
+require('./cron');
+
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found' });
 });

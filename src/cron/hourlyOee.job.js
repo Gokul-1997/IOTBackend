@@ -36,9 +36,9 @@ module.exports = async () => {
       const shift = await getCurrentShift(plant.id, hourStart);
       if (!shift) continue;
 
-      // Planned seconds for this shift (used as availability denominator)
-      const shiftDurationMinutes = getShiftDurationMinutes(shift);
-      const plannedSeconds = shiftDurationMinutes * 60;
+      // FIX: hourly availability must use 3600s (1 hour), not full shift duration.
+      // Full shift duration (e.g. 28800s for 8h) caused max availability of 12.5% per hour.
+      const plannedSeconds = 3600;
 
       // Get production_hourly rows for this plant's machines in this hour
       const { rows: prodRows } = await db.query(

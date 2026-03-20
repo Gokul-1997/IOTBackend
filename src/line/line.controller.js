@@ -11,7 +11,7 @@ exports.createLine = async (req, res) => {
 
 exports.getLines = async (req, res) => {
   try {
-    const data = await service.getLines();
+    const data = await service.getLines(req);
     res.json({ status: 'success', data });
   } catch (e) {
     res.status(500).json({ status: 'error', message: e.message });

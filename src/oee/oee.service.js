@@ -30,14 +30,16 @@ exports.getMeta = async (plantId) => {
 
     console.log(`✅ Loaded ${linesQuery.rows.length} lines`);
 
-    // ✅ Get MACHINES (with machine_serial_no)
+    // FIX: was LEFT JOIN line l ON m.plant_id = l.plant_id (Cartesian product)
+    // corrected to join on m.line_id = l.id
     const machinesQuery = await db.query(`
-      SELECT 
+      SELECT
         m.id,
         m.machine_serial_no,
-        l.id as line_id
+        m.line_id,
+        l.name as line_name
       FROM machines m
-      LEFT JOIN line l ON m.plant_id = l.plant_id
+      LEFT JOIN line l ON l.id = m.line_id
       WHERE m.plant_id = $1 AND m.is_active = TRUE
       ORDER BY m.machine_serial_no ASC
     `, [plantId]);

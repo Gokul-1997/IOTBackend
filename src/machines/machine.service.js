@@ -105,7 +105,7 @@ exports.getMachines = async (req) => {
     'm.controller',
     'm.spindle_rpm',
     'm.is_active',
-    'l.line_name'
+    'l.name'     // FIX: was 'l.line_name' but column is 'name' in line table
   ];
 
   const orderColumn = sortableColumns.includes(sortBy)
@@ -126,7 +126,7 @@ exports.getMachines = async (req) => {
         m.machine_serial_no ILIKE $${values.length}
         OR m.model ILIKE $${values.length}
         OR m.controller ILIKE $${values.length}
-        OR l.line_name ILIKE $${values.length}
+        OR l.name ILIKE $${values.length}    /* FIX: was l.line_name (wrong column name) */
       )
     `;
   }

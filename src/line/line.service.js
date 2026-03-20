@@ -3,25 +3,32 @@ const pool = require('../db');
 /* CREATE LINE */
 exports.createLine = async (req) => {
   const { name } = req.body;
+  // FIX: plant_id from authenticated user (was missing, caused NOT NULL violation)
+  const plant_id = req.user.plant_id;
 
   if (!name) throw new Error('Line name required');
 
   const result = await pool.query(
-    `INSERT INTO line (name)
-     VALUES ($1)
+    `INSERT INTO line (plant_id, name)
+     VALUES ($1, $2)
      RETURNING *`,
-    [name]
+    [plant_id, name]
   );
 
   return result.rows[0];
 };
 
 /* LIST LINES */
-exports.getLines = async () => {
+exports.getLines = async (req) => {
+  // FIX: filter by plant_id so users only see their own plant's lines
+  const plant_id = req.user.plant_id;
+
   const result = await pool.query(
     `SELECT id, name
      FROM line
-     ORDER BY name`
+     WHERE plant_id = $1
+     ORDER BY name`,
+    [plant_id]
   );
 
   return result.rows;

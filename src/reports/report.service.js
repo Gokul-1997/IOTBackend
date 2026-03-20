@@ -44,14 +44,16 @@ exports.shiftOee = async (plant_id, date) => {
 };
 
 exports.production = async (plant_id, date) => {
+  // FIX: production_hourly stores run_seconds/idle_seconds, not run_minutes/idle_minutes/off_minutes
+  // Those column names only exist on the production_hourly_mv materialized view
   const { rows } = await db.query(
     `
     SELECT
       m.machine_serial_no,
       hour_start,
-      run_minutes,
-      idle_minutes,
-      off_minutes,
+      run_seconds,
+      idle_seconds,
+      (3600 - run_seconds - idle_seconds) AS off_seconds,
       produced_qty
     FROM production_hourly p
     JOIN machines m ON m.id = p.machine_id

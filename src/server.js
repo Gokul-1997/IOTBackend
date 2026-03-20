@@ -45,6 +45,10 @@ io.use((socket, next) => {
 
   } catch (err) {
     console.log("❌ JWT VERIFY ERROR:", err.message);
+    // Send distinct error code so the frontend can refresh vs. reject
+    if (err.name === 'TokenExpiredError') {
+      return next(new Error('TOKEN_EXPIRED'));
+    }
     next(new Error('Unauthorized'));
   }
 });
@@ -91,7 +95,14 @@ subscriber.on('message', (channel, message) => {
   if (channel === 'machine_updates') {
     console.log('🔥 REDIS RECEIVED:', message);
 
-    const data = JSON.parse(message);
+    // FIX: added try/catch — malformed Redis message would crash the message handler
+    let data;
+    try {
+      data = JSON.parse(message);
+    } catch (parseErr) {
+      console.error('❌ Invalid JSON from Redis:', parseErr.message);
+      return;
+    }
 
     console.log('🔥 EMITTING TO ROOM:', `plant:${data.plant_id}`);
 

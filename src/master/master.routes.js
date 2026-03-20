@@ -8,7 +8,8 @@ const controller = require('./master.controller');
 router.get("/machines", auth, controller.getMachineList);
 router.get("/shifts", auth, controller.getShiftList);
 router.get('/machines-by-line', auth, controller.getMachinesByLine);
-router.post('/test-multi', async (req, res) => {
+// FIX: added auth middleware — was unauthenticated, allowed fake telemetry injection
+router.post('/test-multi', auth, async (req, res) => {
 
   const machines = req.body.machines;
 

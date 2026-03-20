@@ -1,5 +1,4 @@
 const db = require('../db');
-const redis = require('../redis');
 
 function timeToMinutes(t) {
   const [h, m] = t.split(':').map(Number);
@@ -222,15 +221,43 @@ exports.dashboard = async (plant_id) => {
         machine_id,
         parts_count,
         received_at,
-        LAG(parts_count) OVER (PARTITION BY machine_id ORDER BY received_at) AS prev_count
+        LAG(parts_count) OVER (PARTITION BY machine_id ORDER BY received_at) AS prev_count,
+        -- Look ahead up to 10 readings to detect connection-drop recovery.
+        -- A real machine reset: counter stays near 0 for many readings.
+        -- A connection drop: counter immediately recovers to the original high value.
+        GREATEST(
+          COALESCE(LEAD(parts_count, 1)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
+          COALESCE(LEAD(parts_count, 3)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
+          COALESCE(LEAD(parts_count, 5)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
+          COALESCE(LEAD(parts_count, 8)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
+          COALESCE(LEAD(parts_count, 10) OVER (PARTITION BY machine_id ORDER BY received_at), 0)
+        ) AS max_future_10
       FROM telemetry_raw
       WHERE machine_id = ANY($1)
         AND received_at >= to_timestamp($2)
     ),
+    -- Baseline: the very first parts_count seen at or after shift start.
+    -- Subtracted so machines that start with a non-zero counter (leftover
+    -- from previous shift) report 0, not the carry-over value.
+    first_count AS (
+      SELECT DISTINCT ON (machine_id)
+        machine_id, parts_count AS first_parts
+      FROM telemetry_raw
+      WHERE machine_id = ANY($1)
+        AND received_at >= to_timestamp($2)
+      ORDER BY machine_id, received_at ASC
+    ),
     resets AS (
       SELECT machine_id, COALESCE(SUM(prev_count), 0) AS total_offset
       FROM shift_raw
-      WHERE prev_count IS NOT NULL AND parts_count < prev_count
+      -- Only a TRUE counter reset (machine power cycle) drops to near zero.
+      -- Any small decrease (e.g. 30→29) is comm noise, NOT a reset.
+      -- Connection drop guard: if the counter recovers back to >50% of the
+      -- pre-drop value within 10 readings, it was a network glitch, not a reset.
+      WHERE prev_count IS NOT NULL
+        AND parts_count <= 2
+        AND prev_count > 2
+        AND max_future_10 < (prev_count * 0.5)
       GROUP BY machine_id
     ),
     latest AS (
@@ -245,10 +272,15 @@ exports.dashboard = async (plant_id) => {
       l.machine_status,
       l.alarm,
       l.received_at,
-      l.parts_count + COALESCE(r.total_offset, 0) AS adjusted_parts_count,
+      GREATEST(0,
+        l.parts_count
+        + COALESCE(r.total_offset, 0)
+        - COALESCE(f.first_parts, 0)
+      ) AS adjusted_parts_count,
       l.parts_count AS raw_parts_count
     FROM latest l
-    LEFT JOIN resets r ON r.machine_id = l.machine_id
+    LEFT JOIN resets      r ON r.machine_id = l.machine_id
+    LEFT JOIN first_count f ON f.machine_id = l.machine_id
   `, [machineIds, shiftStartEpoch]);
 
   const liveMap = {};
@@ -277,7 +309,10 @@ exports.dashboard = async (plant_id) => {
     const alarm         = live.alarm === true;
 
     const nowSec        = Math.floor(Date.now() / 1000);
-    const receivedAtSec = Number(live.received_at || 0);
+    // received_at is TIMESTAMPTZ → JS Date; convert to epoch seconds
+    const receivedAtSec = live.received_at
+      ? Math.floor(new Date(live.received_at).getTime() / 1000)
+      : 0;
 
     const OFFLINE_THRESHOLD = 10;
     const freshDiff = receivedAtSec ? (nowSec - receivedAtSec) : null;
@@ -553,6 +588,7 @@ exports.machineDetail = async (plantId, machineId) => {
       idleSeconds = Number(prod.idle_seconds || 0);
       producedQty = Number(prod.produced_qty || 0);
     }
+
  
     /* ================= QUALITY ================= */
  
@@ -569,7 +605,8 @@ exports.machineDetail = async (plantId, machineId) => {
     const quality = qualityRows[0] || {};
     const qualityRejected = Number(quality.rejected || 0);
     const qualityRework   = Number(quality.rework   || 0);
-    const qualityAccepted = Math.max(0, producedQty - qualityRejected - qualityRework);
+    // qualityAccepted is computed AFTER the live query
+    // so we can use live.parts_count (reset-adjusted) as the base
  
     /* ================= OEE ================= */
  
@@ -583,20 +620,145 @@ exports.machineDetail = async (plantId, machineId) => {
  
     const oee = oeeRows[0] || {};
  
-    /* ================= LIVE ================= */
- 
+    /* ================= LIVE + ADJUSTED PARTS COUNT ================= */
+    /*
+     * Apply the same reset-offset logic used in the dashboard query.
+     * Without this, machineDetail returns raw parts_count (e.g. 29)
+     * while the dashboard card shows adjusted (e.g. 59) — inconsistent.
+     */
+
+    const detailShiftStartEpoch = detailShiftStart
+      ? Math.floor(detailShiftStart.getTime() / 1000)
+      : 0;
+
     const { rows: liveRows } = await db.query(`
-      SELECT machine_status, rpm, feed_rate, parts_count
-      FROM telemetry_raw
-      WHERE machine_id = $1
-      ORDER BY received_at DESC
-      LIMIT 1
-    `, [machineId]);
- 
+      WITH shift_raw AS (
+        SELECT
+          parts_count,
+          received_at,
+          LAG(parts_count) OVER (ORDER BY received_at) AS prev_count,
+          -- Connection-drop guard: look ahead 10 readings.
+          -- If counter recovers to >50% of pre-drop value, it was a network glitch.
+          GREATEST(
+            COALESCE(LEAD(parts_count, 1)  OVER (ORDER BY received_at), 0),
+            COALESCE(LEAD(parts_count, 3)  OVER (ORDER BY received_at), 0),
+            COALESCE(LEAD(parts_count, 5)  OVER (ORDER BY received_at), 0),
+            COALESCE(LEAD(parts_count, 8)  OVER (ORDER BY received_at), 0),
+            COALESCE(LEAD(parts_count, 10) OVER (ORDER BY received_at), 0)
+          ) AS max_future_10
+        FROM telemetry_raw
+        WHERE machine_id = $1
+          AND received_at >= to_timestamp($2)
+      ),
+      first_count AS (
+        SELECT parts_count AS first_parts
+        FROM telemetry_raw
+        WHERE machine_id = $1
+          AND received_at >= to_timestamp($2)
+        ORDER BY received_at ASC
+        LIMIT 1
+      ),
+      resets AS (
+        SELECT COALESCE(SUM(prev_count), 0) AS total_offset
+        FROM shift_raw
+        -- Only a TRUE counter reset drops to near zero (machine power cycle).
+        -- Connection drop guard: if counter recovers to >50% of pre-drop value
+        -- within 10 readings, exclude it — that was a network glitch, not a reset.
+        WHERE prev_count IS NOT NULL
+          AND parts_count <= 2
+          AND prev_count > 2
+          AND max_future_10 < (prev_count * 0.5)
+      ),
+      latest AS (
+        SELECT machine_status, rpm, feed_rate, parts_count, received_at, alarm
+        FROM telemetry_raw
+        WHERE machine_id = $1
+        ORDER BY received_at DESC
+        LIMIT 1
+      )
+      SELECT
+        l.machine_status,
+        l.rpm,
+        l.feed_rate,
+        l.alarm,
+        l.received_at,
+        GREATEST(0,
+          l.parts_count
+          + COALESCE(r.total_offset, 0)
+          - COALESCE(f.first_parts, 0)
+        ) AS parts_count
+      FROM latest l, resets r, first_count f
+    `, [machineId, detailShiftStartEpoch]);
+
     const live = liveRows[0] || {};
- 
+
+    /* ================= ACCEPTED QTY ================= */
+    /*
+     * Use live.parts_count (reset-adjusted, same value shown on dashboard card)
+     * as the production base, NOT producedQty from production_hourly.
+     * production_hourly can lag or carry inflated counts from before the fix;
+     * live.parts_count is the correct current shift count.
+     *
+     * Fallback to producedQty when machine is offline (no live data).
+     */
+    const achievedBase   = live.parts_count != null
+      ? Number(live.parts_count || 0)
+      : producedQty;
+    const qualityAccepted = Math.max(0, achievedBase - qualityRejected - qualityRework);
+
+    /* ================= REALTIME SECONDS (same logic as dashboard) ================= */
+    /*
+     * production_hourly is written in hourly batches — the current open hour
+     * has no row yet.  Add seconds elapsed since last telemetry so the times
+     * match the dashboard card in real time.
+     * freshDiff guard (<=15 s) prevents adding stale time when offline.
+     */
+
+    const nowRT          = new Date();
+    const effectiveNowRT = (detailShiftEnd && nowRT > detailShiftEnd) ? detailShiftEnd : nowRT;
+    const shiftElapsedRT = detailShiftStart
+      ? Math.max(0, Math.floor((effectiveNowRT - detailShiftStart) / 60000))
+      : 0;
+    const maxSecondsRT   = shiftElapsedRT * 60;
+
+    // received_at is TIMESTAMPTZ → JS Date; convert to epoch seconds
+    const receivedAtRT   = live.received_at
+      ? Math.floor(new Date(live.received_at).getTime() / 1000)
+      : 0;
+    const nowSecRT       = Math.floor(Date.now() / 1000);
+    const freshDiffRT    = receivedAtRT ? (nowSecRT - receivedAtRT) : null;
+
+    const OFFLINE_THRESHOLD_RT = 10; // seconds — same as dashboard
+
+    const rawStatus  = (live.machine_status || '').toUpperCase();
+    const isOnline   = receivedAtRT && freshDiffRT !== null && freshDiffRT <= OFFLINE_THRESHOLD_RT;
+    const isRunning  = isOnline && ['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus);
+    const isIdle     = isOnline && !isRunning && rawStatus !== '';
+
+    /* Derived status — matches dashboard card logic */
+    const detailStatus = !receivedAtRT
+      ? 'OFFLINE'
+      : freshDiffRT > OFFLINE_THRESHOLD_RT
+        ? 'OFFLINE'
+        : isRunning ? 'RUNNING' : 'IDLE';
+
+    if (receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT) {
+      if (isRunning) {
+        runSeconds  += freshDiffRT;
+      } else if (isIdle) {
+        idleSeconds += freshDiffRT;
+      }
+    }
+
+    runSeconds  = Math.min(runSeconds,  maxSecondsRT);
+    idleSeconds = Math.min(idleSeconds, maxSecondsRT);
+
+    if ((runSeconds + idleSeconds) > maxSecondsRT) {
+      idleSeconds = Math.max(0, maxSecondsRT - runSeconds);
+    }
+
     /* ================= TIME FORMAT ================= */
- 
+
     const formatDuration = (sec) => {
       sec = Number(sec || 0);
       const h = String(Math.floor(sec / 3600)).padStart(2, '0');
@@ -604,44 +766,41 @@ exports.machineDetail = async (plantId, machineId) => {
       const s = String(sec % 60).padStart(2, '0');
       return `${h}:${m}:${s}`;
     };
- 
+
     /* ================= RESPONSE ================= */
- 
+
     return {
- 
+
       machine: {
         id:    machine.id,
         name:  machine.machine_serial_no,
         image: machine.image_url
       },
- 
+
       shift: {
         shift_code: shift?.shift_code || '--'
       },
- 
+
       operator: {
         operator_name: operator?.operator_name || '--'
       },
- 
+
       job: {
         part_name: component?.part_name || '--',
         // part_number from components table; fallback to component_id FK from machine_current_job
         component_id: component?.part_number || component?.component_id || '--',
         target_qty:   component?.target      || 0,
-        // parts_count IS the achieved_qty (shift-scoped counter from machine)
-        achieved_qty: live.parts_count != null
-          ? Number(live.parts_count || 0)
-          : producedQty,
+        achieved_qty: Number(live.parts_count || 0),
         cycle_time: component?.cycle_time || null
       },
- 
+
       production: {
         run_minutes:  Math.floor(runSeconds  / 60),
         idle_minutes: Math.floor(idleSeconds / 60),
         run_time:     formatDuration(runSeconds),
         idle_time:    formatDuration(idleSeconds)
       },
- 
+
       quality: {
         accepted: qualityAccepted,
         rejected: qualityRejected
@@ -655,10 +814,12 @@ exports.machineDetail = async (plantId, machineId) => {
       },
  
       live: {
-        machine_status: live?.machine_status || 'UNKNOWN',
-        rpm:            Number(live?.rpm         || 0),
-        feed_rate:      Number(live?.feed_rate   || 0),
-        parts_count:    Number(live?.parts_count || 0)
+        // Use derived status (same OFFLINE threshold as dashboard card)
+        machine_status:  detailStatus,
+        rpm:             isOnline ? Number(live?.rpm       || 0) : 0,
+        feed_rate:       isOnline ? Number(live?.feed_rate || 0) : 0,
+        // adjusted (reset-offset included) — matches dashboard card value
+        parts_count:     Number(live?.parts_count || 0)
       }
  
     };
