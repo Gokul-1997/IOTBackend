@@ -22,7 +22,7 @@ function formatDuration(totalSeconds) {
 exports.dashboard = async (plant_id) => {
 
   const now = new Date();
-  const currentTime = now.toTimeString().slice(0, 8);
+  const currentTime = now.toTimeString().slice(0, 8); // local time (IST when TZ=Asia/Kolkata)
 
   /* ================= SHIFT ================= */
 
@@ -51,7 +51,12 @@ exports.dashboard = async (plant_id) => {
 
   /* ================= SHIFT TIME ================= */
 
-  const today = now.toISOString().split('T')[0];
+  // Use local date (respects TZ=Asia/Kolkata) — NOT toISOString() which is always UTC
+  const today = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0')
+  ].join('-');
   let shiftStart;
 
   if (shift.start_time <= shift.end_time) {
@@ -62,7 +67,8 @@ exports.dashboard = async (plant_id) => {
     } else {
       const y = new Date(now);
       y.setDate(y.getDate() - 1);
-      shiftStart = new Date(`${y.toISOString().split('T')[0]}T${shift.start_time}`);
+      const yStr = [y.getFullYear(), String(y.getMonth()+1).padStart(2,'0'), String(y.getDate()).padStart(2,'0')].join('-');
+      shiftStart = new Date(`${yStr}T${shift.start_time}`);
     }
   }
 
@@ -500,7 +506,7 @@ exports.machineDetail = async (plantId, machineId) => {
  
     if (shift) {
       const nowD         = new Date();
-      const todayD       = nowD.toISOString().split('T')[0];
+      const todayD       = [nowD.getFullYear(), String(nowD.getMonth()+1).padStart(2,'0'), String(nowD.getDate()).padStart(2,'0')].join('-'); // local IST date
       const currentTimeD = nowD.toTimeString().slice(0, 8);
  
       if (shift.start_time <= shift.end_time) {
@@ -511,7 +517,8 @@ exports.machineDetail = async (plantId, machineId) => {
         } else {
           const yd = new Date(nowD);
           yd.setDate(yd.getDate() - 1);
-          detailShiftStart = new Date(`${yd.toISOString().split('T')[0]}T${shift.start_time}`);
+          const ydStr = [yd.getFullYear(), String(yd.getMonth()+1).padStart(2,'0'), String(yd.getDate()).padStart(2,'0')].join('-');
+          detailShiftStart = new Date(`${ydStr}T${shift.start_time}`);
         }
       }
  
