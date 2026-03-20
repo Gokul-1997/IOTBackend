@@ -190,7 +190,7 @@ exports.dashboard = async (plant_id) => {
     FROM production_hourly
     WHERE machine_id = ANY($1)
       AND shift_id   = $2
-      AND hour_start >= $3
+      AND hour_start >= date_trunc('hour', $3::timestamptz)
       AND hour_start <  $4
     GROUP BY machine_id
   `, [machineIds, shift.id, shiftStart, shiftEnd]);
@@ -312,7 +312,7 @@ exports.dashboard = async (plant_id) => {
     const job  = jobMap[m.id]  || {};
 
     const rawStatus     = (live.machine_status || '').toUpperCase();
-    const alarm         = live.alarm === true;
+    const alarm         = !!live.alarm; // handles boolean true, integer 1, string "true"
 
     const nowSec        = Math.floor(Date.now() / 1000);
     // received_at is TIMESTAMPTZ → JS Date; convert to epoch seconds
@@ -585,7 +585,7 @@ exports.machineDetail = async (plantId, machineId) => {
         FROM production_hourly
         WHERE machine_id = $1
           AND shift_id   = $2
-          AND hour_start >= $3
+          AND hour_start >= date_trunc('hour', $3::timestamptz)
           AND hour_start <  $4
       `, [machineId, shift.id, detailShiftStart, detailShiftEnd]);
  
