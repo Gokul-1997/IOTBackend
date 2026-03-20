@@ -270,3 +270,17 @@ exports.getById = async (id, plant_id) => {
     }
   };
 };
+exports.remove = async (id, plant_id) => {
+  const result = await db.query(
+    `DELETE FROM operators WHERE id = $1 AND plant_id = $2 RETURNING id`,
+    [id, plant_id]
+  );
+
+  if (result.rowCount === 0) {
+    const err = new Error('Operator not found');
+    err.status = 404;
+    throw err;
+  }
+
+  return { status: 'success', message: 'Operator deleted successfully' };
+};

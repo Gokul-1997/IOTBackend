@@ -168,7 +168,7 @@ exports.getReports = async (query, plantId) => {
       SELECT COUNT(*) as total
       FROM oee_shift_summary os
       JOIN machines m ON m.id = os.machine_id
-      LEFT JOIN line l ON m.plant_id = l.plant_id
+      LEFT JOIN line l ON l.id = m.line_id
       JOIN shifts s ON s.id = os.shift_id
       ${whereClause}
     `;
@@ -203,7 +203,7 @@ exports.getReports = async (query, plantId) => {
         ROUND(CAST(os.quality AS NUMERIC), 2) as quality
       FROM oee_shift_summary os
       JOIN machines m ON m.id = os.machine_id
-      LEFT JOIN line l ON m.plant_id = l.plant_id
+      LEFT JOIN line l ON l.id = m.line_id
       JOIN shifts s ON s.id = os.shift_id
       ${whereClause}
       ORDER BY ${sortColumn === 'machine_serial_no' ? 'm.' : 'os.'}${sortColumn} ${sortDir}
@@ -304,7 +304,7 @@ exports.exportCSV = async (query, plantId) => {
         os.quality
       FROM oee_shift_summary os
       JOIN machines m ON m.id = os.machine_id
-      LEFT JOIN line l ON m.plant_id = l.plant_id
+      LEFT JOIN line l ON l.id = m.line_id
       JOIN shifts s ON s.id = os.shift_id
       ${whereClause}
       ORDER BY os.shift_date DESC

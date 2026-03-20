@@ -12,4 +12,5 @@ router.post('/', auth, permit('operator.create'), validate({
 router.get('/', auth, permit('operator.view'), ctrl.list);
 router.put('/:id', auth, permit('operator.update'), ctrl.update);
 router.get('/:id', auth, permit('operator.view'), ctrl.getById);
+router.delete('/:id', auth, permit('operator.delete'), ctrl.remove);
 module.exports = router;

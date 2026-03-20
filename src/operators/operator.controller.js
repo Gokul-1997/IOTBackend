@@ -43,3 +43,12 @@ exports.getById = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.remove = async (req, res, next) => {
+  try {
+    const result = await svc.remove(req.params.id, req.user.plant_id);
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+};
