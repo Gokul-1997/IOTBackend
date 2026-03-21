@@ -689,7 +689,7 @@ exports.machineDetail = async (plantId, machineId) => {
           AND max_future_10 < (prev_count * 0.5)
       ),
       latest AS (
-        SELECT machine_status, rpm, feed_rate, parts_count, received_at, alarm
+        SELECT machine_status, spindle_load, feed_rate, parts_count, received_at, alarm
         FROM telemetry_raw
         WHERE machine_id = $1
         ORDER BY received_at DESC
@@ -697,7 +697,7 @@ exports.machineDetail = async (plantId, machineId) => {
       )
       SELECT
         l.machine_status,
-        l.rpm,
+        l.spindle_load,
         l.feed_rate,
         l.alarm,
         l.received_at,
@@ -720,11 +720,6 @@ exports.machineDetail = async (plantId, machineId) => {
      *
      * Fallback to producedQty when machine is offline (no live data).
      */
-    const achievedBase   = live.parts_count != null
-      ? Number(live.parts_count || 0)
-      : producedQty;
-    const qualityAccepted = Math.max(0, achievedBase - qualityRejected - qualityRework);
-
     /* ================= REALTIME SECONDS (same logic as dashboard) ================= */
     /*
      * production_hourly is written in hourly batches — the current open hour
@@ -760,6 +755,12 @@ exports.machineDetail = async (plantId, machineId) => {
       : freshDiffRT > OFFLINE_THRESHOLD_RT
         ? 'OFFLINE'
         : isRunning ? 'RUNNING' : 'IDLE';
+
+    // Mirror dashboard fallback: when OFFLINE use production_hourly, not live counter
+    const achievedBase = detailStatus !== 'OFFLINE' && live.parts_count != null
+      ? Number(live.parts_count || 0)
+      : producedQty;
+    const qualityAccepted = Math.max(0, achievedBase - qualityRejected - qualityRework);
 
     if (receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT) {
       if (isRunning) {
@@ -809,7 +810,7 @@ exports.machineDetail = async (plantId, machineId) => {
         // part_number from components table; fallback to component_id FK from machine_current_job
         component_id: component?.part_number || component?.component_id || '--',
         target_qty:   component?.target      || 0,
-        achieved_qty: Number(live.parts_count || 0),
+        achieved_qty: achievedBase,
         cycle_time: component?.cycle_time || null
       },
 
@@ -835,10 +836,10 @@ exports.machineDetail = async (plantId, machineId) => {
       live: {
         // Use derived status (same OFFLINE threshold as dashboard card)
         machine_status:  detailStatus,
-        rpm:             isOnline ? Number(live?.rpm       || 0) : 0,
-        feed_rate:       isOnline ? Number(live?.feed_rate || 0) : 0,
-        // adjusted (reset-offset included) — matches dashboard card value
-        parts_count:     Number(live?.parts_count || 0)
+        spindle_load:    isOnline ? Number(live?.spindle_load || 0) : 0,
+        feed_rate:       isOnline ? Number(live?.feed_rate    || 0) : 0,
+        // adjusted (reset-offset included); falls back to producedQty when OFFLINE
+        parts_count:     achievedBase
       }
  
     };

@@ -18,6 +18,7 @@ module.exports = app => {
   app.use('/api/master', require('./master/master.routes'));
   app.use('/api/lines', require('./line/line.routes'));
   app.use('/api/components', require('./component/component.routes'));
-  app.use('/api/jobs', require('./job/job.routes'));
+  app.use('/api/jobs',   require('./job/job.routes'));
+  app.use('/api/charts', require('./charts/charts.routes'));
 
 };

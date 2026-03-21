@@ -5,6 +5,7 @@ const crypto = require('crypto');
 exports.createMachine = async (req) => {
   const {
     machine_serial_no,
+    line_id,
     x_axis,
     y_axis,
     z_axis,
@@ -29,6 +30,7 @@ exports.createMachine = async (req) => {
     `
     INSERT INTO machines (
       plant_id,
+      line_id,
       machine_serial_no,
       x_axis,
       y_axis,
@@ -45,12 +47,13 @@ exports.createMachine = async (req) => {
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
     )
     RETURNING id, machine_serial_no, api_key
     `,
     [
       req.user.plant_id,
+      line_id || null,
       machine_serial_no,
       x_axis,
       y_axis,
