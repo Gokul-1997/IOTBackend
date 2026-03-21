@@ -570,18 +570,22 @@ exports.machineDetail = async (plantId, machineId) => {
  
     /* ================= PRODUCTION ================= */
  
-    let runSeconds  = 0;
-    let idleSeconds = 0;
-    let producedQty = 0;
- 
+    let runSeconds     = 0;
+    let idleSeconds    = 0;
+    let manualSeconds  = 0;
+    let producedQty    = 0;
+    let shiftEnergyKwh = 0;
+
     if (shift) {
  
       /* FIX: scope to today's shift only — shift_id repeats daily */
       const { rows: prodRows } = await db.query(`
         SELECT
-          COALESCE(SUM(run_seconds),0)  AS run_seconds,
-          COALESCE(SUM(idle_seconds),0) AS idle_seconds,
-          COALESCE(SUM(produced_qty),0) AS produced_qty
+          COALESCE(SUM(run_seconds),0)    AS run_seconds,
+          COALESCE(SUM(idle_seconds),0)   AS idle_seconds,
+          COALESCE(SUM(manual_seconds),0) AS manual_seconds,
+          COALESCE(SUM(produced_qty),0)   AS produced_qty,
+          COALESCE(SUM(energy_kwh),0)     AS shift_energy_kwh
         FROM production_hourly
         WHERE machine_id = $1
           AND shift_id   = $2
@@ -591,9 +595,11 @@ exports.machineDetail = async (plantId, machineId) => {
  
       const prod = prodRows[0] || {};
  
-      runSeconds  = Number(prod.run_seconds  || 0);
-      idleSeconds = Number(prod.idle_seconds || 0);
-      producedQty = Number(prod.produced_qty || 0);
+      runSeconds    = Number(prod.run_seconds    || 0);
+      idleSeconds   = Number(prod.idle_seconds   || 0);
+      manualSeconds = Number(prod.manual_seconds || 0);
+      producedQty   = Number(prod.produced_qty   || 0);
+      shiftEnergyKwh = Number(prod.shift_energy_kwh || 0);
     }
 
  
@@ -689,7 +695,7 @@ exports.machineDetail = async (plantId, machineId) => {
           AND max_future_10 < (prev_count * 0.5)
       ),
       latest AS (
-        SELECT machine_status, spindle_load, feed_rate, parts_count, received_at, alarm
+        SELECT machine_status, spindle_load, feed_rate, parts_count, received_at, alarm, mode, energy
         FROM telemetry_raw
         WHERE machine_id = $1
         ORDER BY received_at DESC
@@ -815,10 +821,12 @@ exports.machineDetail = async (plantId, machineId) => {
       },
 
       production: {
-        run_minutes:  Math.floor(runSeconds  / 60),
-        idle_minutes: Math.floor(idleSeconds / 60),
-        run_time:     formatDuration(runSeconds),
-        idle_time:    formatDuration(idleSeconds)
+        run_minutes:    Math.floor(runSeconds    / 60),
+        idle_minutes:   Math.floor(idleSeconds   / 60),
+        manual_seconds: manualSeconds,
+        setup_time:     formatDuration(manualSeconds),
+        run_time:       formatDuration(runSeconds),
+        idle_time:      formatDuration(idleSeconds)
       },
 
       quality: {
@@ -832,14 +840,21 @@ exports.machineDetail = async (plantId, machineId) => {
         quality:      Number(oee.quality      || 0),
         oee:          Number(oee.oee          || 0)
       },
- 
+
+      power: {
+        shift_kwh: Number(shiftEnergyKwh.toFixed(2)),
+        total_kwh: live?.energy != null ? Number(Number(live.energy).toFixed(2)) : null
+      },
+
       live: {
         // Use derived status (same OFFLINE threshold as dashboard card)
         machine_status:  detailStatus,
+        mode:            live?.mode || null,
         spindle_load:    isOnline ? Number(live?.spindle_load || 0) : 0,
         feed_rate:       isOnline ? Number(live?.feed_rate    || 0) : 0,
         // adjusted (reset-offset included); falls back to producedQty when OFFLINE
-        parts_count:     achievedBase
+        parts_count:     achievedBase,
+        total_energy:    live?.energy != null ? Number(live.energy) : null
       }
  
     };

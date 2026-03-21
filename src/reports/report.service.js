@@ -50,15 +50,17 @@ exports.production = async (plant_id, date) => {
     `
     SELECT
       m.machine_serial_no,
-      hour_start,
+      TO_CHAR(hour_start AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hour,
       run_seconds,
       idle_seconds,
-      (3600 - run_seconds - idle_seconds) AS off_seconds,
-      produced_qty
+      COALESCE(manual_seconds, 0)                                AS manual_seconds,
+      (3600 - run_seconds - idle_seconds)                        AS off_seconds,
+      produced_qty,
+      ROUND(COALESCE(energy_kwh, 0)::numeric, 3)                 AS energy_kwh
     FROM production_hourly p
     JOIN machines m ON m.id = p.machine_id
     WHERE m.plant_id = $1
-      AND DATE(hour_start) = $2
+      AND DATE(hour_start AT TIME ZONE 'Asia/Kolkata') = $2
     ORDER BY m.machine_serial_no, hour_start
     `,
     [plant_id, date]
