@@ -570,11 +570,12 @@ exports.machineDetail = async (plantId, machineId) => {
  
     /* ================= PRODUCTION ================= */
  
-    let runSeconds     = 0;
-    let idleSeconds    = 0;
-    let manualSeconds  = 0;
-    let producedQty    = 0;
-    let shiftEnergyKwh = 0;
+    let runSeconds          = 0;
+    let idleSeconds         = 0;
+    let manualSeconds       = 0;
+    let producedQty         = 0;
+    let shiftEnergyKwh      = 0;
+    let energyAtShiftStart  = null;
 
     if (shift) {
  
@@ -584,8 +585,7 @@ exports.machineDetail = async (plantId, machineId) => {
           COALESCE(SUM(run_seconds),0)    AS run_seconds,
           COALESCE(SUM(idle_seconds),0)   AS idle_seconds,
           COALESCE(SUM(manual_seconds),0) AS manual_seconds,
-          COALESCE(SUM(produced_qty),0)   AS produced_qty,
-          COALESCE(SUM(energy_kwh),0)     AS shift_energy_kwh
+          COALESCE(SUM(produced_qty),0)   AS produced_qty
         FROM production_hourly
         WHERE machine_id = $1
           AND shift_id   = $2
@@ -597,9 +597,23 @@ exports.machineDetail = async (plantId, machineId) => {
  
       runSeconds    = Number(prod.run_seconds    || 0);
       idleSeconds   = Number(prod.idle_seconds   || 0);
-      manualSeconds = Number(prod.manual_seconds || 0);
-      producedQty   = Number(prod.produced_qty   || 0);
-      shiftEnergyKwh = Number(prod.shift_energy_kwh || 0);
+      manualSeconds  = Number(prod.manual_seconds || 0);
+      producedQty    = Number(prod.produced_qty   || 0);
+
+      // shift_kwh = current_energy − first energy reading of this shift
+      // More reliable than summing deltas (unaffected by missed MQTT messages)
+      const { rows: energyRows } = await db.query(`
+        SELECT energy
+        FROM telemetry_raw
+        WHERE machine_id  = $1
+          AND received_at >= $2
+          AND received_at <  $3
+          AND energy IS NOT NULL
+        ORDER BY received_at ASC
+        LIMIT 1
+      `, [machineId, detailShiftStart, detailShiftEnd]);
+
+      energyAtShiftStart = energyRows[0]?.energy ?? null;
     }
 
  
@@ -707,6 +721,8 @@ exports.machineDetail = async (plantId, machineId) => {
         l.feed_rate,
         l.alarm,
         l.received_at,
+        l.mode,
+        l.energy,
         GREATEST(0,
           l.parts_count
           + COALESCE(r.total_offset, 0)
@@ -761,6 +777,12 @@ exports.machineDetail = async (plantId, machineId) => {
       : freshDiffRT > OFFLINE_THRESHOLD_RT
         ? 'OFFLINE'
         : isRunning ? 'RUNNING' : 'IDLE';
+
+    // shift_kwh = current energy − first energy reading this shift
+    const currentEnergy = live?.energy != null ? Number(live.energy) : null;
+    if (currentEnergy !== null && energyAtShiftStart !== null) {
+      shiftEnergyKwh = Math.max(0, currentEnergy - Number(energyAtShiftStart));
+    }
 
     // Mirror dashboard fallback: when OFFLINE use production_hourly, not live counter
     const achievedBase = detailStatus !== 'OFFLINE' && live.parts_count != null
