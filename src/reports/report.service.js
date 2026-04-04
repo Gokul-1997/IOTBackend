@@ -97,7 +97,14 @@ exports.productionData = async (plant_id, date_from, date_to, machine_id, shift_
     LEFT JOIN shifts   s    ON s.id = p.shift_id
     LEFT JOIN op_map   op   ON op.machine_id = p.machine_id
     WHERE m.plant_id = $1
-      AND DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata') BETWEEN $2 AND $3
+      AND CASE
+            WHEN s.start_time IS NOT NULL
+             AND (p.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
+            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
+            WHEN s.start_time IS NOT NULL
+            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
+            ELSE DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
+          END BETWEEN $2::date AND $3::date
       ${extra}
     ORDER BY m.machine_serial_no, p.hour_start
   `, params);
@@ -151,9 +158,17 @@ exports.oeeHourlyData = async (plant_id, date_from, date_to, machine_id, shift_i
       ROUND(o.oee::numeric,          2)                                           AS oee
     FROM oee_hourly o
     JOIN machines m ON m.id = o.machine_id
+    LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
     WHERE m.plant_id = $1
-      AND DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata') BETWEEN $2 AND $3
+      AND CASE
+            WHEN s.start_time IS NOT NULL
+             AND (o.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
+            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
+            WHEN s.start_time IS NOT NULL
+            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
+            ELSE DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
+          END BETWEEN $2::date AND $3::date
       ${extra}
     ORDER BY m.machine_serial_no, o.hour_start
   `, params);
@@ -240,9 +255,17 @@ exports.hourlyOee = async (plant_id, date) => {
       ROUND(o.oee::numeric,          2)                                           AS "OEE %"
     FROM oee_hourly o
     JOIN machines m ON m.id = o.machine_id
+    LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
     WHERE m.plant_id = $1
-      AND DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata') = $2
+      AND CASE
+            WHEN s.start_time IS NOT NULL
+             AND (o.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
+            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
+            WHEN s.start_time IS NOT NULL
+            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
+            ELSE DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
+          END = $2::date
     ORDER BY m.machine_serial_no, o.hour_start
   `, [plant_id, date]);
   return rows;
@@ -290,7 +313,14 @@ exports.production = async (plant_id, date) => {
     LEFT JOIN shifts   s  ON s.id = p.shift_id
     LEFT JOIN op_map   op ON op.machine_id = p.machine_id
     WHERE m.plant_id = $1
-      AND DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata') = $2
+      AND CASE
+            WHEN s.start_time IS NOT NULL
+             AND (p.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
+            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
+            WHEN s.start_time IS NOT NULL
+            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
+            ELSE DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
+          END = $2::date
     ORDER BY m.machine_serial_no, p.hour_start
   `, [plant_id, date]);
   return rows;
