@@ -2,12 +2,22 @@ const db = require('../db');
 
 exports.startJob = async (req) => {
 
-  const { machine_id, component_id, job_start, setting_time_start, setting_time_end } = req.body;
+  const { machine_id, component_id, job_start } = req.body;
   const plant_id = req.user.plant_id;
 
   if (!job_start) throw new Error("job_start (date & time) is required");
-  if (!setting_time_start) throw new Error("setting_time_start is required");
-  if (!setting_time_end) throw new Error("setting_time_end is required");
+
+  // Block if machine already has an active job
+  const { rows: existing } = await db.query(`
+    SELECT j.id, j.part_name
+    FROM machine_current_job j
+    JOIN machines m ON m.id = j.machine_id
+    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.plant_id = $2
+  `, [machine_id, plant_id]);
+
+  if (existing.length > 0) {
+    throw new Error(`Machine already has an active job (${existing[0].part_name}). Stop it before starting a new one.`);
+  }
 
   const { rows } = await db.query(`
     SELECT part_name, target
@@ -17,53 +27,70 @@ exports.startJob = async (req) => {
 
   const component = rows[0];
 
-  if(!component){
+  if (!component) {
     throw new Error("Component not found");
   }
 
-  // Stop any existing active job for this machine before starting a new one
-  await db.query(`
-    UPDATE machine_current_job
-    SET is_active = false, ended_at = now()
-    WHERE machine_id = $1 AND is_active = true
-  `,[machine_id]);
-
   await db.query(`
     INSERT INTO machine_current_job
-    (plant_id,machine_id,component_id,part_name,target_qty,started_at,setting_time_start,setting_time_end)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    (plant_id,machine_id,component_id,part_name,target_qty,started_at)
+    VALUES ($1,$2,$3,$4,$5,$6)
   `,[
     plant_id,
     machine_id,
     component_id,
     component.part_name,
     component.target,
-    job_start,
-    setting_time_start,
-    setting_time_end
+    job_start
   ]);
 
 };
 
 
 
-exports.stopJob = async (machine_id, job_end) => {
+exports.stopJob = async (machine_id, plant_id) => {
 
-  const end_time = job_end || 'now()';
+  // Guard: no active job means nothing to stop
+  const { rows: active } = await db.query(`
+    SELECT j.id, j.part_name
+    FROM machine_current_job j
+    JOIN machines m ON m.id = j.machine_id
+    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.plant_id = $2
+  `, [machine_id, plant_id]);
+
+  if (active.length === 0) {
+    throw new Error('No active job found for this machine.');
+  }
 
   await db.query(`
     UPDATE machine_current_job
     SET is_active = false,
-        ended_at = $2
+        ended_at = now(),
+        setting_time_end = now()
     WHERE machine_id = $1
       AND is_active = true
-  `,[machine_id, end_time === 'now()' ? new Date() : job_end]);
+  `,[machine_id]);
 
   return true;
 
 };
 
 
+
+exports.getAvailableMachines = async (plant_id) => {
+  const { rows } = await db.query(`
+    SELECT m.id, m.machine_serial_no
+    FROM machines m
+    WHERE m.plant_id = $1
+      AND m.is_active = TRUE
+      AND NOT EXISTS (
+        SELECT 1 FROM machine_current_job j
+        WHERE j.machine_id = m.id AND j.is_active = TRUE
+      )
+    ORDER BY m.machine_serial_no
+  `, [plant_id]);
+  return rows;
+};
 
 exports.getCurrentJobs = async (plant_id) => {
 
@@ -74,23 +101,34 @@ exports.getCurrentJobs = async (plant_id) => {
       j.id AS job_id,
       j.part_name,
       j.target_qty,
-      j.achieved_qty,
+      j.started_at
+    FROM machine_current_job j
+    JOIN machines m ON m.id = j.machine_id
+    WHERE m.plant_id = $1
+      AND m.is_active = TRUE
+      AND j.is_active = TRUE
+    ORDER BY j.started_at DESC
+  `,[plant_id]);
+
+  return rows;
+
+};
+
+exports.getJobHistory = async (plant_id) => {
+
+  const { rows } = await db.query(`
+    SELECT
+      m.machine_serial_no,
+      j.part_name,
+      j.target_qty,
       j.started_at,
       j.ended_at,
-      j.setting_time_start,
-      j.setting_time_end,
       j.is_active
-
-    FROM machines m
-
-    LEFT JOIN machine_current_job j
-      ON j.machine_id = m.id
-      AND j.is_active = true
-
+    FROM machine_current_job j
+    JOIN machines m ON m.id = j.machine_id
     WHERE m.plant_id = $1
-    AND m.is_active = true
-
-    ORDER BY m.id
+    ORDER BY j.started_at DESC
+    LIMIT 200
   `,[plant_id]);
 
   return rows;

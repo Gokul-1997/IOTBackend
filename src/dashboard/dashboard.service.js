@@ -411,10 +411,12 @@ exports.dashboard = async (plant_id) => {
     let achieved = 0;
 
     if (status !== 'OFFLINE' && receivedAtSec) {
-      // PRIMARY: parts_count is the shift-scoped counter from machine
+      // PRIMARY: parts_count is the shift-scoped counter from machine (reset-adjusted, baseline-subtracted)
       achieved = Number(live.parts_count || 0);
     } else {
-      // FALLBACK: machine offline, use production_hourly
+      // FALLBACK: machine offline — use production_hourly but only rows
+      // within the current shift window (same filter as the hourly chart)
+      // so the count matches the online telemetry value.
       achieved = Number(prod.produced_qty || 0);
     }
 

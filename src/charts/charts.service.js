@@ -63,18 +63,31 @@ exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
     `, [machineId, shiftId, date]);
     hourlyRows = hourlyRes.rows;
   } else if (machineId && date) {
-    /* no shift filter — aggregate all shifts for that day */
+    /* no shift selected — sum across all shifts for that date,
+       but respect each shift's own window so night-shift carry-over
+       from the previous day is NOT counted against this date.
+       Each shift is scoped by its start/end on $3::date (same logic
+       as the single-shift query above). */
     const hourlyRes = await db.query(`
       SELECT
-        TO_CHAR(hour_start AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hour,
-        SUM(produced_qty)::int AS produced
+        TO_CHAR(ph.hour_start AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hour,
+        SUM(ph.produced_qty)::int AS produced
       FROM production_hourly ph
+      JOIN shifts s ON s.id = ph.shift_id
       JOIN machines m ON m.id = ph.machine_id
-      WHERE m.plant_id  = $1
+      WHERE m.plant_id    = $1
         AND ph.machine_id = $2
-        AND ph.hour_start::date = $3::date
-      GROUP BY hour_start
-      ORDER BY hour_start
+        AND s.plant_id    = $1
+        AND s.is_active   = TRUE
+        AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+        AND ph.hour_start <  (
+              CASE WHEN s.start_time > s.end_time
+                   THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                   ELSE ($3::date + s.end_time)
+              END
+            ) AT TIME ZONE 'Asia/Kolkata'
+      GROUP BY ph.hour_start
+      ORDER BY ph.hour_start
     `, [plantId, machineId, date]);
     hourlyRows = hourlyRes.rows;
   }
@@ -84,7 +97,69 @@ exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
     produced: Number(r.produced || 0)
   }));
 
-  const totalProduced = hourlyCount.reduce((s, r) => s + r.produced, 0);
+  /* ── Live parts_count from telemetry_raw (same source as dashboard) ──
+     This matches the number shown on the dashboard card exactly,
+     because it reads the actual machine counter (reset-adjusted). */
+  let totalProduced = hourlyCount.reduce((s, r) => s + r.produced, 0);
+
+  if (machineId && shiftId) {
+    // Get shift start epoch for reset-offset calculation
+    const { rows: shiftRows } = await db.query(`
+      SELECT start_time, end_time,
+        CASE WHEN start_time <= end_time
+          THEN ($2::date + start_time) AT TIME ZONE 'Asia/Kolkata'
+          ELSE (
+            CASE WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
+              THEN ($2::date + start_time) AT TIME ZONE 'Asia/Kolkata'
+              ELSE (($2::date - INTERVAL '1 day') + start_time) AT TIME ZONE 'Asia/Kolkata'
+            END
+          )
+        END AS shift_start
+      FROM shifts WHERE id = $1
+    `, [shiftId, date]);
+
+    if (shiftRows[0]) {
+      const shiftStartEpoch = Math.floor(new Date(shiftRows[0].shift_start).getTime() / 1000);
+
+      const { rows: liveRows } = await db.query(`
+        WITH first_count AS (
+          SELECT parts_count AS first_parts
+          FROM telemetry_raw
+          WHERE machine_id = $1 AND received_at >= to_timestamp($2)
+          ORDER BY received_at ASC LIMIT 1
+        ),
+        shift_raw AS (
+          SELECT parts_count, received_at,
+            LAG(parts_count) OVER (ORDER BY received_at) AS prev_count,
+            GREATEST(
+              COALESCE(LEAD(parts_count,1)  OVER (ORDER BY received_at),0),
+              COALESCE(LEAD(parts_count,5)  OVER (ORDER BY received_at),0),
+              COALESCE(LEAD(parts_count,10) OVER (ORDER BY received_at),0)
+            ) AS max_future_10
+          FROM telemetry_raw
+          WHERE machine_id = $1 AND received_at >= to_timestamp($2)
+        ),
+        resets AS (
+          SELECT COALESCE(SUM(prev_count),0) AS total_offset
+          FROM shift_raw
+          WHERE prev_count IS NOT NULL AND parts_count <= 2
+            AND prev_count > 2 AND max_future_10 < (prev_count * 0.5)
+        ),
+        latest AS (
+          SELECT parts_count FROM telemetry_raw
+          WHERE machine_id = $1 ORDER BY received_at DESC LIMIT 1
+        )
+        SELECT GREATEST(0,
+          l.parts_count + COALESCE(r.total_offset,0) - COALESCE(f.first_parts,0)
+        ) AS adjusted
+        FROM latest l, resets r, first_count f
+      `, [machineId, shiftStartEpoch]);
+
+      if (liveRows[0]) {
+        totalProduced = Number(liveRows[0].adjusted);
+      }
+    }
+  }
 
   return {
     hourlyCount,
@@ -119,11 +194,16 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch }) => {
         AND received_at >= to_timestamp($2)
     ),
     part_events AS (
-      -- Row where parts_count just incremented = part completed
+      -- Row where parts_count just incremented = part completed.
+      -- started_at = previous part's completed_at.
+      -- For the very first part, fall back to shift start (to_timestamp($2)).
       SELECT
-        parts_count                                         AS part_no,
-        received_at                                         AS completed_at,
-        LAG(received_at) OVER (ORDER BY received_at)        AS started_at
+        ROW_NUMBER() OVER (ORDER BY received_at)                              AS part_no,
+        received_at                                                           AS completed_at,
+        COALESCE(
+          LAG(received_at) OVER (ORDER BY received_at),
+          to_timestamp($2)
+        )                                                                     AS started_at
       FROM ordered
       WHERE prev_parts IS NOT NULL
         AND parts_count > prev_parts
@@ -143,17 +223,13 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch }) => {
     JOIN ordered o
       ON o.received_at >  pe.started_at
      AND o.received_at <= pe.completed_at
-    WHERE pe.started_at IS NOT NULL
     GROUP BY pe.part_no, pe.started_at
     ORDER BY pe.started_at
-    LIMIT 60
   `, [machineId, shiftStartEpoch]);
 
   return res.rows.map(r => ({
-    part_no:      Number(r.part_no),
-    run_seconds:  Number(r.run_seconds),
-    idle_seconds: Number(r.idle_seconds),
-    run_min:      +(Number(r.run_seconds)  / 60).toFixed(1),
-    idle_min:     +(Number(r.idle_seconds) / 60).toFixed(1)
+    part_no:  Number(r.part_no),
+    run_min:  +(Number(r.run_seconds)  / 60).toFixed(1),
+    idle_min: +(Number(r.idle_seconds) / 60).toFixed(1)
   }));
 };
