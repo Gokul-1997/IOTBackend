@@ -535,11 +535,16 @@ exports.machineDetail = async (plantId, machineId) => {
     const { rows: operatorRows } = await db.query(`
       SELECT o.operator_name
       FROM operator_machine_assignments a
+      JOIN operator_shift_assignments osa
+        ON osa.operator_id = a.operator_id
+       AND osa.shift_id = $2
+       AND osa.is_active = TRUE
       JOIN operators o ON o.id = a.operator_id
+        AND o.is_active = TRUE
       WHERE a.machine_id = $1
-      AND a.is_active = TRUE
+        AND a.is_active = TRUE
       LIMIT 1
-    `, [machineId]);
+    `, [machineId, shift?.id]);
  
     const operator = operatorRows[0] || null;
  

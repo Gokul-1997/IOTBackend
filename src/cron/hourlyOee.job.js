@@ -20,12 +20,13 @@ const { getCurrentShift } = require('../utils/shift.util');
 module.exports = async () => {
   const now = new Date();
 
-  // Previous hour window
+  // Previous hour window — use UTC methods so the IST +5:30 offset
+  // doesn't cause a :30 misalignment against production_hourly timestamps.
   const hourEnd   = new Date(now);
-  hourEnd.setMinutes(0, 0, 0);
+  hourEnd.setUTCMinutes(0, 0, 0);
 
   const hourStart = new Date(hourEnd);
-  hourStart.setHours(hourEnd.getHours() - 1);
+  hourStart.setUTCHours(hourEnd.getUTCHours() - 1);
 
   try {
     const { rows: plants } = await db.query(
