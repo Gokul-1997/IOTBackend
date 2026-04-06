@@ -17,14 +17,16 @@ function shiftPlannedSeconds(shift) {
 // ─────────────────────────────────────────────────────────────
 // Helper: OEE from raw numbers
 // ─────────────────────────────────────────────────────────────
-function calcOee({ runSeconds, plannedSeconds, producedQty, cycleTimeSec, accepted }) {
+function calcOee({ runSeconds, plannedSeconds, producedQty, cycleTimeSec, accepted, multFactor = 1 }) {
   const availability = plannedSeconds > 0
     ? Math.min(100, (runSeconds / plannedSeconds) * 100)
     : 0;
 
-  const idealQty    = cycleTimeSec > 0 ? runSeconds / cycleTimeSec : 0;
+  // idealQty = how many parts should have been made in run time (× factor for multi-part fixtures)
+  const idealQty    = cycleTimeSec > 0 ? (runSeconds / cycleTimeSec) * multFactor : 0;
+  const actualQty   = producedQty * multFactor;
   const performance = idealQty > 0
-    ? Math.min(100, (producedQty / idealQty) * 100)
+    ? Math.min(100, (actualQty / idealQty) * 100)
     : 0;
 
   const quality = producedQty > 0
@@ -57,7 +59,8 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
        COALESCE(mcj.part_name, '-')      AS part_name,
        COALESCE(c.operation_number, '')  AS operation_number,
        COALESCE(mcj.target_qty, 0)       AS target_qty,
-       EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0'))::int AS cycle_time_seconds
+       EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0'))::int AS cycle_time_seconds,
+       COALESCE(c.multiplication_factor, 1)               AS multiplication_factor
      FROM machines m
      LEFT JOIN machine_current_job mcj
        ON mcj.machine_id = m.id AND mcj.is_active = TRUE
@@ -81,6 +84,7 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
 
   const machine = machineRows[0] || {};
   const cycleTimeSec = Number(machine.cycle_time_seconds || 0);
+  const multFactor   = Number(machine.multiplication_factor || 1);
 
   // 2. Shift info (for planned seconds)
   const { rows: shiftRows } = await db.query(
@@ -91,14 +95,20 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
   const plannedSeconds = shift ? shiftPlannedSeconds(shift) : 0;
 
   // 3. Production totals from production_hourly
+  //    Use logical shift_date: hours before shift.start_time belong to previous day's shift
   const { rows: prodRows } = await db.query(
     `SELECT
        COALESCE(SUM(produced_qty), 0)  AS produced,
        COALESCE(SUM(run_seconds), 0)   AS run_seconds
-     FROM production_hourly
-     WHERE machine_id = $1
-       AND shift_id   = $2
-       AND hour_start::date = $3::date`,
+     FROM production_hourly ph
+     JOIN shifts s ON s.id = ph.shift_id
+     WHERE ph.machine_id = $1
+       AND ph.shift_id   = $2
+       AND CASE
+             WHEN (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
+             THEN DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata')
+             ELSE DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
+           END = $3::date`,
     [machine_id, shift_id, date]
   );
 
@@ -125,7 +135,7 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
     : 0;
 
   // 5. OEE — calculated on the fly from production_hourly + quality_entries
-  const oee = calcOee({ runSeconds, plannedSeconds, producedQty: produced, cycleTimeSec, accepted });
+  const oee = calcOee({ runSeconds, plannedSeconds, producedQty: produced, cycleTimeSec, accepted, multFactor });
 
   // Also upsert oee_shift_summary so future reads are fast
   if (produced > 0 && shift) {
@@ -146,15 +156,20 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
   // 6. Hourly chart — per hour OEE from production_hourly
   const { rows: hourlyRows } = await db.query(
     `SELECT
-       hour_start,
-       COALESCE(run_seconds, 0)   AS run_seconds,
-       COALESCE(idle_seconds, 0)  AS idle_seconds,
-       COALESCE(produced_qty, 0)  AS produced_qty
-     FROM production_hourly
-     WHERE machine_id = $1
-       AND shift_id   = $2
-       AND hour_start::date = $3::date
-     ORDER BY hour_start`,
+       ph.hour_start,
+       COALESCE(ph.run_seconds, 0)   AS run_seconds,
+       COALESCE(ph.idle_seconds, 0)  AS idle_seconds,
+       COALESCE(ph.produced_qty, 0)  AS produced_qty
+     FROM production_hourly ph
+     JOIN shifts s ON s.id = ph.shift_id
+     WHERE ph.machine_id = $1
+       AND ph.shift_id   = $2
+       AND CASE
+             WHEN (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
+             THEN DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata')
+             ELSE DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
+           END = $3::date
+     ORDER BY ph.hour_start`,
     [machine_id, shift_id, date]
   );
 
@@ -176,7 +191,8 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
       plannedSeconds: hourPlanned,
       producedQty:   hProduced,
       cycleTimeSec,
-      accepted:      hAccepted
+      accepted:      hAccepted,
+      multFactor
     });
 
     return {

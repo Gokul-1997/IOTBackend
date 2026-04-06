@@ -47,7 +47,8 @@ module.exports = async () => {
            ph.machine_id,
            COALESCE(ph.run_seconds, 0)  AS run_seconds,
            COALESCE(ph.produced_qty, 0) AS produced_qty,
-           EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0'))::int AS cycle_time_seconds
+           EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0'))::int AS cycle_time_seconds,
+           COALESCE(c.multiplication_factor, 1) AS multiplication_factor
          FROM production_hourly ph
          JOIN machines m ON m.id = ph.machine_id AND m.plant_id = $1
          LEFT JOIN machine_current_job mcj
@@ -59,9 +60,10 @@ module.exports = async () => {
       );
 
       for (const row of prodRows) {
-        const runSeconds    = Number(row.run_seconds);
-        const producedQty   = Number(row.produced_qty);
-        const cycleTimeSec  = Number(row.cycle_time_seconds);
+        const runSeconds       = Number(row.run_seconds);
+        const producedQty      = Number(row.produced_qty);
+        const cycleTimeSec     = Number(row.cycle_time_seconds);
+        const multFactor       = Number(row.multiplication_factor || 1);
 
         // Availability: run / planned  (cap at 100)
         const availability = plannedSeconds > 0
@@ -69,9 +71,11 @@ module.exports = async () => {
           : 0;
 
         // Performance: actual / ideal output in run time  (cap at 100)
-        const idealQty = cycleTimeSec > 0 ? runSeconds / cycleTimeSec : 0;
+        // idealQty × multFactor = how many parts should have been made
+        const idealQty = cycleTimeSec > 0 ? (runSeconds / cycleTimeSec) * multFactor : 0;
+        const actualQty = producedQty * multFactor;
         const performance = idealQty > 0
-          ? Math.min(100, (producedQty / idealQty) * 100)
+          ? Math.min(100, (actualQty / idealQty) * 100)
           : 0;
 
         // Quality: accepted / produced

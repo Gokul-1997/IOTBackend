@@ -152,16 +152,18 @@ exports.dashboard = async (plant_id) => {
   /* ================= COMPONENT TARGET ================= */
 
   const { rows: componentRows } = await db.query(`
-    SELECT j.machine_id,c.target
+    SELECT j.machine_id, c.target, COALESCE(c.multiplication_factor, 1) AS multiplication_factor
     FROM machine_current_job j
     JOIN components c ON c.id=j.component_id
     WHERE j.machine_id=ANY($1)
     AND j.is_active=TRUE
   `, [machineIds]);
 
-  const componentMap = {};
+  const componentMap  = {};
+  const multiFactorMap = {};
   componentRows.forEach(r => {
-    componentMap[r.machine_id] = Number(r.target || 0);
+    componentMap[r.machine_id]   = Number(r.target || 0);
+    multiFactorMap[r.machine_id] = Number(r.multiplication_factor || 1);
   });
 
   /* ================= PRODUCTION ================= */
@@ -384,9 +386,10 @@ exports.dashboard = async (plant_id) => {
      */
 
     const _target   = componentMap[m.id] || 0;
-    const _achieved = status !== 'OFFLINE' && receivedAtSec
+    const _multFactor = multiFactorMap[m.id] || 1;
+    const _achieved = (status !== 'OFFLINE' && receivedAtSec
       ? Number(live.parts_count || 0)
-      : Number(prod.produced_qty || 0);
+      : Number(prod.produced_qty || 0)) * _multFactor;
 
     const _rawUtil = _target > 0
       ? (_achieved * 100) / _target
@@ -409,15 +412,16 @@ exports.dashboard = async (plant_id) => {
      */
 
     let achieved = 0;
+    const multFactor = multiFactorMap[m.id] || 1;
 
     if (status !== 'OFFLINE' && receivedAtSec) {
       // PRIMARY: parts_count is the shift-scoped counter from machine (reset-adjusted, baseline-subtracted)
-      achieved = Number(live.parts_count || 0);
+      achieved = Number(live.parts_count || 0) * multFactor;
     } else {
       // FALLBACK: machine offline — use production_hourly but only rows
       // within the current shift window (same filter as the hourly chart)
       // so the count matches the online telemetry value.
-      achieved = Number(prod.produced_qty || 0);
+      achieved = Number(prod.produced_qty || 0) * multFactor;
     }
 
     if (achieved < 0) achieved = 0;
@@ -565,15 +569,17 @@ exports.machineDetail = async (plantId, machineId) => {
         j.component_id,
         c.part_number,
         c.cycle_time,
-        c.target
+        c.target,
+        COALESCE(c.multiplication_factor, 1) AS multiplication_factor
       FROM machine_current_job j
       LEFT JOIN components c ON c.id = j.component_id
       WHERE j.machine_id = $1
         AND j.is_active = TRUE
       LIMIT 1
     `, [machineId]);
- 
+
     const component = jobDetailRows[0] || null;
+    const detailMultFactor = Number(component?.multiplication_factor || 1);
  
     /* ================= PRODUCTION ================= */
  
@@ -792,9 +798,10 @@ exports.machineDetail = async (plantId, machineId) => {
     }
 
     // Mirror dashboard fallback: when OFFLINE use production_hourly, not live counter
-    const achievedBase = detailStatus !== 'OFFLINE' && live.parts_count != null
+    // Multiply by multiplication_factor (each machine cycle may produce >1 part)
+    const achievedBase = (detailStatus !== 'OFFLINE' && live.parts_count != null
       ? Number(live.parts_count || 0)
-      : producedQty;
+      : producedQty) * detailMultFactor;
     const qualityAccepted = Math.max(0, achievedBase - qualityRejected - qualityRework);
 
     if (receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT) {
@@ -871,8 +878,8 @@ exports.machineDetail = async (plantId, machineId) => {
       },
 
       power: {
-        shift_kwh: Number(shiftEnergyKwh.toFixed(2)),
-        total_kwh: live?.energy != null ? Number(Number(live.energy).toFixed(2)) : null
+        shift_kwh: Number(shiftEnergyKwh.toFixed(3)),
+        total_kwh: live?.energy != null ? Number(Number(live.energy).toFixed(3)) : null
       },
 
       live: {
