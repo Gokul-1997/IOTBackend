@@ -193,6 +193,28 @@ exports.updateShift = async (id, data, plant_id) => {
 };
 
 /* =====================================================
+   DELETE SHIFT
+===================================================== */
+
+exports.deleteShift = async (id, plant_id) => {
+  const existing = await pool.query(`
+    SELECT id FROM shifts WHERE id = $1 AND plant_id = $2
+  `, [id, plant_id]);
+
+  if (!existing.rowCount) {
+    throw new Error('Shift not found');
+  }
+
+  // Remove or nullify all FK references before deleting the shift
+  await pool.query(`DELETE FROM oee_shift_summary WHERE shift_id = $1`, [id]);
+  await pool.query(`DELETE FROM oee_hourly WHERE shift_id = $1`, [id]);
+  await pool.query(`DELETE FROM production_hourly WHERE shift_id = $1`, [id]);
+  await pool.query(`UPDATE quality_entries SET shift_id = NULL WHERE shift_id = $1`, [id]);
+  await pool.query(`DELETE FROM machine_shift_config WHERE shift_id = $1`, [id]);
+  await pool.query(`DELETE FROM shifts WHERE id = $1 AND plant_id = $2`, [id, plant_id]);
+};
+
+/* =====================================================
    TOGGLE SHIFT
 ===================================================== */
 

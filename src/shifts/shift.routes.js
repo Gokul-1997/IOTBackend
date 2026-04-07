@@ -14,5 +14,6 @@ router.post('/', auth, permit('shift.create'), validate({
 }), ctrl.createShift);
 router.put('/:id', auth, permit('shift.update'), ctrl.updateShift);
 router.patch('/:id/status', auth, permit('shift.update'), ctrl.toggleShift);
+router.delete('/:id', auth, permit('shift.update'), ctrl.deleteShift);
 
 module.exports = router;

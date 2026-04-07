@@ -39,6 +39,15 @@ exports.updateShift = async (req, res) => {
   }
 };
 
+exports.deleteShift = async (req, res) => {
+  try {
+    await service.deleteShift(req.params.id, req.user.plant_id);
+    res.json({ success: true, message: 'Shift deleted' });
+  } catch (e) {
+    res.status(400).json({ success: false, message: e.message });
+  }
+};
+
 exports.toggleShift = async (req, res) => {
   try {
     await service.toggleShift(req);
