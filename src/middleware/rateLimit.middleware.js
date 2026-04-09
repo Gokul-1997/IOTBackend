@@ -13,11 +13,13 @@ function makeStore(prefix) {
   });
 }
 
+const isRedisReady = () => redis.status === 'ready';
+
 const standardLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 1000,
   store: makeStore('rl:standard:'),
-  skip: (req) => req.method === 'OPTIONS',
+  skip: (req) => req.method === 'OPTIONS' || !isRedisReady(),
   keyGenerator: (req) => ipKeyGenerator(req.ip), // IPv6-safe fallback
   standardHeaders: true,
   legacyHeaders: false,
@@ -28,7 +30,7 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
   store: makeStore('rl:auth:'),
-  skip: (req) => req.method === 'OPTIONS',
+  skip: (req) => req.method === 'OPTIONS' || !isRedisReady(),
   keyGenerator: (req) => ipKeyGenerator(req.ip),
   standardHeaders: true,
   legacyHeaders: false,

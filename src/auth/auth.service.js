@@ -24,51 +24,74 @@ function generateRefreshToken() {
 exports.login = async ({ email, password }, req) => {
   if (!email || !password) throw { status: 400, message: 'Email and password required' };
 
+  // Step 1: Get user WITHOUT lock first (read-only)
+  const userRes = await db.query(
+    `SELECT id, email, username, password_hash, plant_id,
+            is_active, failed_login_attempts, lock_until
+     FROM users
+     WHERE email = $1`,
+    [email]
+  );
+
+  if (!userRes.rowCount) throw { status: 404, message: 'User not found' };
+
+  const user = userRes.rows[0];
+
+  if (!user.is_active) throw { status: 403, message: 'Account inactive' };
+
+  if (user.lock_until && new Date(user.lock_until) > new Date()) {
+    throw { status: 403, message: 'Account locked. Try again later.' };
+  }
+
+  // Step 2: Validate password (CPU-bound, no DB lock needed)
+  const passwordValid = await bcrypt.compare(password, user.password_hash);
+
+  if (!passwordValid) {
+    // Update failed attempts (non-critical, use fire-and-forget)
+    const failed = (user.failed_login_attempts || 0) + 1;
+    const lockUntil = failed >= MAX_FAILED_ATTEMPTS
+      ? new Date(Date.now() + LOCK_TIME_MINUTES * 60000)
+      : null;
+
+    db.query(
+      `UPDATE users
+       SET failed_login_attempts = $1,
+           lock_until = $2
+       WHERE id = $3`,
+      [failed, lockUntil, user.id]
+    ).catch(err => console.error('Failed to update login attempts:', err));
+
+    throw { status: 401, message: 'Invalid credentials' };
+  }
+
+  // Step 3: Get roles + permissions in parallel
+  const [roleRes, permRes] = await Promise.all([
+    db.query(
+      `SELECT r.role_name
+       FROM roles r
+       JOIN user_roles ur ON ur.role_id = r.id
+       WHERE ur.user_id = $1`,
+      [user.id]
+    ),
+    db.query(
+      `SELECT DISTINCT p.permission_key
+       FROM permissions p
+       JOIN role_permissions rp ON rp.permission_id = p.id
+       JOIN user_roles ur ON ur.role_id = rp.role_id
+       WHERE ur.user_id = $1`,
+      [user.id]
+    )
+  ]);
+
+  const roles = roleRes.rows.map(r => r.role_name);
+  const permissions = permRes.rows.map(p => p.permission_key);
+
+  // Step 4: Only update session info (use transaction)
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Lock row to avoid race update
-    const userRes = await client.query(
-      `SELECT id, email, username, password_hash, plant_id,
-              is_active, failed_login_attempts, lock_until
-       FROM users
-       WHERE email = $1
-       FOR UPDATE`,
-      [email]
-    );
-
-    if (!userRes.rowCount) throw { status: 404, message: 'User not found' };
-
-    const user = userRes.rows[0];
-
-    if (!user.is_active) throw { status: 403, message: 'Account inactive' };
-
-    if (user.lock_until && new Date(user.lock_until) > new Date()) {
-      throw { status: 403, message: 'Account locked. Try again later.' };
-    }
-
-    const passwordValid = await bcrypt.compare(password, user.password_hash);
-
-    if (!passwordValid) {
-      const failed = (user.failed_login_attempts || 0) + 1;
-      const lockUntil = failed >= MAX_FAILED_ATTEMPTS
-        ? new Date(Date.now() + LOCK_TIME_MINUTES * 60000)
-        : null;
-
-      await client.query(
-        `UPDATE users
-         SET failed_login_attempts = $1,
-             lock_until = $2
-         WHERE id = $3`,
-        [failed, lockUntil, user.id]
-      );
-
-      await client.query('COMMIT');
-      throw { status: 401, message: 'Invalid credentials' };
-    }
-
-    // reset failed attempts + login info
+    // Update login info
     await client.query(
       `UPDATE users
        SET failed_login_attempts = 0,
@@ -79,27 +102,34 @@ exports.login = async ({ email, password }, req) => {
       [req.ip, user.id]
     );
 
-    // roles
-    const roleRes = await client.query(
-      `SELECT r.role_name
-       FROM roles r
-       JOIN user_roles ur ON ur.role_id = r.id
-       WHERE ur.user_id = $1`,
+    // Create refresh session
+    const refreshToken = generateRefreshToken();
+    const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
+
+    await client.query(
+      `INSERT INTO user_sessions (user_id, refresh_token, expires_at, last_ip, user_agent)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [user.id, refreshToken, expiresAt, req.ip, req.headers['user-agent'] || null]
+    );
+
+    // Keep only last 2 valid sessions
+    await client.query(
+      `UPDATE user_sessions
+       SET revoked = true
+       WHERE user_id = $1
+         AND revoked = false
+         AND id NOT IN (
+           SELECT id FROM user_sessions
+           WHERE user_id = $1 AND revoked = false
+           ORDER BY created_at DESC
+           LIMIT 2
+         )`,
       [user.id]
     );
-    const roles = roleRes.rows.map(r => r.role_name);
 
-    // permissions
-    const permRes = await client.query(
-      `SELECT DISTINCT p.permission_key
-       FROM permissions p
-       JOIN role_permissions rp ON rp.permission_id = p.id
-       JOIN user_roles ur ON ur.role_id = rp.role_id
-       WHERE ur.user_id = $1`,
-      [user.id]
-    );
-    const permissions = permRes.rows.map(p => p.permission_key);
+    await client.query('COMMIT');
 
+    // Step 5: Generate tokens and return
     const tokenPayload = {
       user_id: user.id,
       plant_id: user.plant_id,
@@ -108,36 +138,6 @@ exports.login = async ({ email, password }, req) => {
     };
 
     const accessToken = signAccessToken(tokenPayload);
-
-    // create refresh session (limit 2 active sessions)
-    const refreshToken = generateRefreshToken();
-    const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
-
-    // Insert session
-    await client.query(
-      `INSERT INTO user_sessions (user_id, refresh_token, expires_at, last_ip, user_agent)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [user.id, refreshToken, expiresAt, req.ip, req.headers['user-agent'] || null]
-    );
-
-    // keep only last 2 valid sessions
-    await client.query(
-      `
-      UPDATE user_sessions
-      SET revoked = true
-      WHERE user_id = $1
-        AND revoked = false
-        AND id NOT IN (
-          SELECT id FROM user_sessions
-          WHERE user_id = $1 AND revoked = false
-          ORDER BY created_at DESC
-          LIMIT 2
-        )
-      `,
-      [user.id]
-    );
-
-    await client.query('COMMIT');
 
     return {
       accessToken,
@@ -206,23 +206,6 @@ exports.refresh = async (refreshToken, req) => {
   });
 
   return { accessToken };
-};
-
-exports.logout = async (req) => {
-  // Best practice: logout = revoke refresh token session
-  const refreshToken =
-    req.body?.refreshToken ||
-    req.headers['x-refresh-token'] ||
-    null;
-
-  if (!refreshToken) return;
-
-  await db.query(
-    `UPDATE user_sessions
-     SET revoked = true
-     WHERE refresh_token = $1`,
-    [refreshToken]
-  );
 };
 
 /* =========================================================
