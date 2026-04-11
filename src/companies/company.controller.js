@@ -37,6 +37,18 @@ exports.getPlanFeatures = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+exports.getCompanyPermissions = async (req, res, next) => {
+  try {
+    res.json(await svc.getCompanyPermissions(req.params.id));
+  } catch (e) { next(e); }
+};
+
+exports.assignCompanyPermissions = async (req, res, next) => {
+  try {
+    res.json(await svc.assignCompanyPermissions(req.params.id, req.body.permission_ids, req.user.id));
+  } catch (e) { next(e); }
+};
+
 exports.remove = async (req, res, next) => {
   try {
     await svc.remove(req.params.id);

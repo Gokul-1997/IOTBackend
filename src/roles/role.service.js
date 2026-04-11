@@ -29,6 +29,7 @@ const LEGACY_API_PERMISSIONS = [
  * Called on app startup.
  */
 exports.seedPagePermissions = async () => {
+  const { APP_MODULES, ACTION_LABELS } = require('../plans/plan.service');
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -52,6 +53,22 @@ exports.seedPagePermissions = async () => {
       }
     }
 
+    // Seed page-level permissions (page:dashboard:partcount, etc.)
+    let pageCount = 0;
+    for (const mod of APP_MODULES) {
+      for (const action of mod.actions) {
+        const key = `page:${mod.key}:${action}`;
+        const friendlyAction = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+        const desc = `${friendlyAction} — ${mod.label}`;
+        await client.query(
+          `INSERT INTO permissions (permission_key, description)
+           VALUES ($1, $2) ON CONFLICT (permission_key) DO NOTHING`,
+          [key, desc]
+        );
+        pageCount++;
+      }
+    }
+
     // SNT_SUPER gets ALL permissions
     await client.query(
       `INSERT INTO role_permissions (role_id, permission_id)
@@ -61,7 +78,7 @@ exports.seedPagePermissions = async () => {
     );
 
     await client.query('COMMIT');
-    return { seeded: LEGACY_API_PERMISSIONS.length };
+    return { seeded: LEGACY_API_PERMISSIONS.length, pages: pageCount };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -87,10 +104,11 @@ exports.list = async ({ company_id, is_snt_super = false } = {}) => {
               ORDER BY r.is_system DESC, r.role_name`;
     params = [];
   } else if (company_id) {
+    // Company admin only sees roles created for their company — no system roles
     query  = `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id
               FROM roles r
-              WHERE r.company_id = $1 OR r.is_system = true
-              ORDER BY r.is_system DESC, r.role_name`;
+              WHERE r.company_id = $1
+              ORDER BY r.role_name`;
     params = [company_id];
   } else {
     query  = `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id
@@ -194,28 +212,21 @@ exports.assignPermissions = async (roleId, permissionIds, company_id) => {
   try {
     await client.query('BEGIN');
 
-    // Validate plan features if company_id provided
-    if (company_id) {
-      const { rows: planFeatures } = await client.query(
-        `SELECT pf.feature_key FROM company_plans cp
-         JOIN plan_features pf ON pf.plan_id = cp.plan_id
-         WHERE cp.company_id = $1 AND cp.is_active = true AND pf.is_enabled = true`,
+    // Validate against company_permissions (what super user allowed)
+    if (company_id && permissionIds.length) {
+      const { rows: companyPerms } = await client.query(
+        `SELECT permission_id FROM company_permissions WHERE company_id = $1`,
         [company_id]
       );
-      const allowedModules = new Set(planFeatures.map(f => f.feature_key));
+      const allowedIds = new Set(companyPerms.map(r => r.permission_id));
 
-      if (permissionIds.length) {
-        const { rows: perms } = await client.query(
-          `SELECT permission_key FROM permissions WHERE id = ANY($1)`,
-          [permissionIds]
-        );
-        for (const perm of perms) {
-          if (perm.permission_key.startsWith('page:')) {
-            const module = perm.permission_key.split(':').slice(0, 2).join(':');
-            if (!allowedModules.has(module)) {
-              throw { status: 403, message: `Permission '${perm.permission_key}' is not available on your plan` };
-            }
-          }
+      for (const pid of permissionIds) {
+        if (!allowedIds.has(pid)) {
+          const { rows: pInfo } = await client.query(
+            `SELECT permission_key FROM permissions WHERE id = $1`, [pid]
+          );
+          const key = pInfo[0]?.permission_key || pid;
+          throw { status: 403, message: `Permission '${key}' is not allowed for this company. Contact S&T admin.` };
         }
       }
     }
@@ -276,9 +287,49 @@ exports.assign = async (user_id, role_ids) => {
   }
 };
 
-exports.listPermissions = async () => {
-  const { rows } = await db.query(
-    `SELECT id, permission_key, description FROM permissions ORDER BY permission_key`
-  );
-  return rows;
+/**
+ * List permissions grouped by module for the role editor UI.
+ * If company_id provided, only return permissions that the company
+ * has been granted access to by super user. SNT_SUPER sees all.
+ */
+exports.listPermissions = async ({ company_id, is_snt_super } = {}) => {
+  const { APP_MODULES } = require('../plans/plan.service');
+
+  let query, params;
+  if (is_snt_super || !company_id) {
+    query = `SELECT id, permission_key, description FROM permissions WHERE permission_key LIKE 'page:%' ORDER BY permission_key`;
+    params = [];
+  } else {
+    query = `SELECT p.id, p.permission_key, p.description
+             FROM permissions p
+             JOIN company_permissions cp ON cp.permission_id = p.id
+             WHERE cp.company_id = $1 AND p.permission_key LIKE 'page:%'
+             ORDER BY p.permission_key`;
+    params = [company_id];
+  }
+
+  const { rows } = await db.query(query, params);
+
+  // Group by module
+  const grouped = {};
+  for (const row of rows) {
+    const parts  = row.permission_key.split(':');
+    const module = parts.slice(1, -1).join(':');
+    const action = parts[parts.length - 1];
+    const def    = APP_MODULES.find(m => m.key === module);
+
+    if (!grouped[module]) {
+      grouped[module] = {
+        module,
+        label: def?.label || module,
+        group: def?.group || 'Other',
+        permissions: []
+      };
+    }
+    const { ACTION_LABELS } = require('../plans/plan.service');
+    const actionLabel = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+    grouped[module].permissions.push({ ...row, action, actionLabel });
+  }
+
+  return Object.values(grouped);
 };

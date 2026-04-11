@@ -3,7 +3,7 @@ const ctrl   = require('./report.controller');
 const auth   = require('../middleware/auth.middleware');
 const role   = require('../middleware/role.middleware');
 
-const adminOrSup = [auth, role(['ADMIN', 'SUPERVISOR'])];
+const adminOrSup = [auth, role(['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN', 'SUPERVISOR'])];
 
 /* ── Dropdowns ── */
 router.get('/machines',         ...adminOrSup, ctrl.getMachines);

@@ -65,7 +65,7 @@ exports.login = async ({ email, password }, req) => {
   }
 
   // Step 3: Get roles + permissions + company plan in parallel
-  const [roleRes, permRes, planRes] = await Promise.all([
+  const [roleRes, permRes, planRes, companyPermRes] = await Promise.all([
     db.query(
       `SELECT r.role_name
        FROM roles r
@@ -86,14 +86,20 @@ exports.login = async ({ email, password }, req) => {
           `SELECT p.plan_code, p.plan_name, p.tier,
                   COALESCE(cp.max_users, p.max_users)       AS max_users,
                   COALESCE(cp.max_plants, p.max_plants)     AS max_plants,
-                  COALESCE(cp.max_machines, p.max_machines) AS max_machines,
-                  json_agg(json_build_object('feature_key', pf.feature_key, 'is_enabled', pf.is_enabled)) AS features
+                  COALESCE(cp.max_machines, p.max_machines) AS max_machines
            FROM company_plans cp
            JOIN plans p ON p.id = cp.plan_id
-           JOIN plan_features pf ON pf.plan_id = p.id
-           WHERE cp.company_id = $1 AND cp.is_active = true
-           GROUP BY p.plan_code, p.plan_name, p.tier, cp.max_users, cp.max_plants, cp.max_machines,
-                    p.max_users, p.max_plants, p.max_machines`,
+           WHERE cp.company_id = $1 AND cp.is_active = true`,
+          [user.company_id]
+        )
+      : Promise.resolve({ rows: [] }),
+    // Company-level allowed permissions (what super user granted)
+    user.company_id
+      ? db.query(
+          `SELECT p.permission_key
+           FROM company_permissions cp
+           JOIN permissions p ON p.id = cp.permission_id
+           WHERE cp.company_id = $1`,
           [user.company_id]
         )
       : Promise.resolve({ rows: [] })
@@ -102,6 +108,7 @@ exports.login = async ({ email, password }, req) => {
   const roles = roleRes.rows.map(r => r.role_name);
   const permissions = permRes.rows.map(p => p.permission_key);
   const plan = planRes.rows[0] || null;
+  const company_permissions = companyPermRes.rows.map(r => r.permission_key);
   const is_snt_super = roles.includes('SNT_SUPER');
 
   // Step 4: Only update session info (use transaction)
@@ -174,6 +181,7 @@ exports.login = async ({ email, password }, req) => {
         is_snt_super,
         roles,
         permissions,
+        company_permissions,
         plan
       }
     };

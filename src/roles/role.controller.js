@@ -46,7 +46,10 @@ exports.update = async (req, res) => {
 
 exports.listPermissions = async (req, res) => {
   try {
-    res.json(await svc.listPermissions());
+    res.json(await svc.listPermissions({
+      company_id: req.user.company_id,
+      is_snt_super: req.user.is_snt_super
+    }));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
   }

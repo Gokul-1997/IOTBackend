@@ -9,6 +9,9 @@ const ADMINS = ['SNT_SUPER', 'COMPANY_ADMIN'];
 // Seed page permissions (SNT_SUPER only, run once)
 router.post('/pages/seed', auth, roleMidd(['SNT_SUPER']), ctrl.seedPages);
 
+// List page permissions (used by frontend role editor)
+router.get('/pages/list', auth, roleMidd(ADMINS), ctrl.listPermissions);
+
 // List all permissions
 router.get('/permissions/list', auth, roleMidd(ADMINS), ctrl.listPermissions);
 

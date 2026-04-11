@@ -2,12 +2,19 @@ const db = require('../db');
 
 // ── All app modules with CRUD actions ─────────────────────────
 const APP_MODULES = [
-  { key: 'dashboard',      label: 'Dashboard',       group: 'Main',   actions: ['view'] },
-  { key: 'dashboard:live', label: 'Live Dashboard',   group: 'Main',   actions: ['view'] },
-  { key: 'oee-reports',    label: 'OEE Reports',      group: 'Main',   actions: ['view'] },
-  { key: 'reports',        label: 'Reports',          group: 'Main',   actions: ['view'] },
-  { key: 'charts',         label: 'Charts',           group: 'Main',   actions: ['view'] },
-  { key: 'quality',        label: 'Quality',          group: 'Main',   actions: ['view', 'create', 'edit', 'delete'] },
+  // ── Dashboard (widget-level control) ──
+  { key: 'dashboard',      label: 'Dashboard',       group: 'Main',   actions: ['view', 'partcount', 'target', 'utilization', 'runtime', 'operator', 'status'] },
+  { key: 'dashboard:live', label: 'Live Dashboard',   group: 'Main',   actions: ['view', 'power-consume', 'feed-override-chart', 'spindle-speed-chart'] },
+
+  // ── OEE & Reports (widget-level control) ──
+  { key: 'oee-reports',    label: 'OEE Reports',      group: 'Main',   actions: ['view', 'oee', 'availability', 'performance', 'quality', 'export'] },
+  { key: 'reports',        label: 'Reports',          group: 'Main',   actions: ['view', 'kpi', 'export'] },
+  { key: 'charts',         label: 'Charts',           group: 'Main',   actions: ['view', 'partwise-chart', 'hourly-chart'] },
+
+  // ── Quality (widget-level) ──
+  { key: 'quality',        label: 'Quality',          group: 'Main',   actions: ['view', 'oee-metrics', 'production-cards', 'hourly-chart', 'edit'] },
+
+  // ── Master pages (CRUD) ──
   { key: 'machines',       label: 'Machines',         group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'component',      label: 'Component',        group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'job',            label: 'Job',              group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
@@ -17,11 +24,50 @@ const APP_MODULES = [
   { key: 'machine-shifts', label: 'Machine Shifts',   group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'plants',         label: 'Plants',           group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'lines',          label: 'Lines',            group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
+
+  // ── Admin pages (CRUD) ──
   { key: 'users',          label: 'Users',            group: 'Admin',  actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'roles',          label: 'Roles',            group: 'Admin',  actions: ['view', 'create', 'edit', 'delete'] },
 ];
 
 exports.APP_MODULES = APP_MODULES;
+
+/**
+ * Friendly labels for widget/action names shown in the permission UI.
+ * Falls back to capitalized action name if not found here.
+ */
+const ACTION_LABELS = {
+  view:              'View Page',
+  create:            'Create',
+  edit:              'Edit',
+  delete:            'Delete',
+  // Dashboard widgets
+  partcount:         'Part Count (Achieved)',
+  target:            'Target Quantity',
+  utilization:       'Utilization Donut',
+  runtime:           'Run / Idle Time',
+  operator:          'Operator Panel',
+  status:            'Status Summary Bar',
+  // Live Dashboard widgets
+  'power-consume':       'Power Consumption',
+  'feed-override-chart': 'Feed Override Rate Chart',
+  'spindle-speed-chart': 'Spindle Speed Chart',
+  // OEE Reports widgets
+  oee:               'OEE %',
+  availability:      'Availability %',
+  performance:       'Performance %',
+  quality:           'Quality %',
+  export:            'Export (CSV/Excel)',
+  // Reports widgets
+  kpi:               'KPI Summary Cards',
+  // Charts widgets
+  'partwise-chart':  'Part-Wise Run vs Idle Chart',
+  'hourly-chart':    'Hourly Part Count Chart',
+  // Quality widgets
+  'oee-metrics':     'OEE Metric Cards',
+  'production-cards':'Production Cards (Target/Accepted/Rejected/Rework)',
+};
+exports.ACTION_LABELS = ACTION_LABELS;
 
 /**
  * Seed all page:module:action permissions into the permissions table.
@@ -34,7 +80,8 @@ exports.seedPermissions = async () => {
     for (const mod of APP_MODULES) {
       for (const action of mod.actions) {
         const key  = `page:${mod.key}:${action}`;
-        const desc = `${action.charAt(0).toUpperCase() + action.slice(1)} on ${mod.label}`;
+        const friendlyAction = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+        const desc = `${friendlyAction} — ${mod.label}`;
         await client.query(
           `INSERT INTO permissions (permission_key, description)
            VALUES ($1, $2)
@@ -80,7 +127,8 @@ exports.listPermissions = async () => {
         permissions: []
       };
     }
-    grouped[module].permissions.push({ ...row, action });
+    const actionLabel = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+    grouped[module].permissions.push({ ...row, action, actionLabel });
   }
 
   return Object.values(grouped);
