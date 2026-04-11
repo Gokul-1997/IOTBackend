@@ -1,40 +1,42 @@
-const router = require('express').Router();
-const ctrl = require('./role.controller');
-const auth = require('../middleware/auth.middleware');
-const role = require('../middleware/role.middleware');
+const router   = require('express').Router();
+const ctrl     = require('./role.controller');
+const auth     = require('../middleware/auth.middleware');
+const roleMidd = require('../middleware/role.middleware');
 const validate = require('../middleware/validate.middleware');
 
-// List all roles with their permissions (ADMIN only)
-router.get('/', auth, role(['ADMIN']), ctrl.list);
+const ADMINS = ['SNT_SUPER', 'COMPANY_ADMIN'];
 
-// Get all available permissions (ADMIN only)
-router.get('/permissions/list', auth, role(['ADMIN']), ctrl.listPermissions);
+// Seed page permissions (SNT_SUPER only, run once)
+router.post('/pages/seed', auth, roleMidd(['SNT_SUPER']), ctrl.seedPages);
 
-// Get page permissions grouped (ADMIN only)
-router.get('/pages/list', auth, role(['ADMIN']), ctrl.listPages);
+// List all permissions
+router.get('/permissions/list', auth, roleMidd(ADMINS), ctrl.listPermissions);
 
-// Seed page permissions into DB (ADMIN only, run once)
-router.post('/pages/seed', auth, role(['ADMIN']), ctrl.seedPages);
+// List roles (company-scoped)
+router.get('/', auth, roleMidd(ADMINS), ctrl.list);
 
-// Get role by ID (ADMIN only)
-router.get('/:id', auth, role(['ADMIN']), ctrl.getById);
+// Get role by ID
+router.get('/:id', auth, roleMidd(ADMINS), ctrl.getById);
 
-// Create role (ADMIN only)
-router.post('/', auth, role(['ADMIN']), validate({
-  role_name: { required: true, maxLength: 50, label: 'Role name' }
+// Create role (COMPANY_ADMIN creates for their company; SNT_SUPER can create anywhere)
+router.post('/', auth, roleMidd(ADMINS), validate({
+  role_name: { required: true, maxLength: 100, label: 'Role name' }
 }), ctrl.create);
 
-// Assign roles to user — MUST be before /:id routes (ADMIN only)
-router.post('/assign/:id', auth, role(['ADMIN']), validate({
-  role_ids: { required: true, type: 'array', label: 'Role IDs' }
-}), ctrl.assign);
+// Update role name/description
+router.put('/:id', auth, roleMidd(ADMINS), ctrl.update);
 
-// Assign permissions to role (ADMIN only)
-router.put('/:id/permissions', auth, role(['ADMIN']), validate({
+// Assign permissions to role (plan-validated)
+router.put('/:id/permissions', auth, roleMidd(ADMINS), validate({
   permission_ids: { required: true, type: 'array', label: 'Permission IDs' }
 }), ctrl.assignPermissions);
 
-// Delete role (ADMIN only)
-router.delete('/:id', auth, role(['ADMIN']), ctrl.remove);
+// Assign roles to a user
+router.post('/assign/:id', auth, roleMidd(ADMINS), validate({
+  role_ids: { required: true, type: 'array', label: 'Role IDs' }
+}), ctrl.assign);
+
+// Delete role (only custom roles, not system roles)
+router.delete('/:id', auth, roleMidd(ADMINS), ctrl.remove);
 
 module.exports = router;

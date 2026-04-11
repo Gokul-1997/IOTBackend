@@ -1,7 +1,9 @@
 module.exports = app => {
-  app.use('/api/auth', require('./auth/auth.routes'));
-  app.use('/api/users', require('./users/user.routes'));
-  app.use('/api/roles', require('./roles/role.routes'));
+  app.use('/api/auth',      require('./auth/auth.routes'));
+  app.use('/api/users',     require('./users/user.routes'));
+  app.use('/api/roles',     require('./roles/role.routes'));
+  app.use('/api/companies', require('./companies/company.routes'));
+  app.use('/api/plans',     require('./plans/plan.routes'));
 
   app.use('/api/machines', require('./machines/machine.routes'));
   app.use('/api/operators', require('./operators/operator.routes'));

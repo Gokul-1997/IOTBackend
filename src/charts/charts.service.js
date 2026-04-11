@@ -97,88 +97,9 @@ exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
     produced: Number(r.produced || 0)
   }));
 
-  /* ── Live parts_count from telemetry_raw (same source as dashboard) ──
-     This matches the number shown on the dashboard card exactly,
-     because it reads the actual machine counter (reset-adjusted). */
-  let totalProduced = hourlyCount.reduce((s, r) => s + r.produced, 0);
-
-  if (machineId && shiftId) {
-    // Get shift start AND end epoch for reset-offset calculation
-    const { rows: shiftRows } = await db.query(`
-      SELECT start_time, end_time,
-        CASE WHEN start_time <= end_time
-          THEN ($2::date + start_time) AT TIME ZONE 'Asia/Kolkata'
-          ELSE (
-            CASE WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
-              THEN ($2::date + start_time) AT TIME ZONE 'Asia/Kolkata'
-              ELSE (($2::date - INTERVAL '1 day') + start_time) AT TIME ZONE 'Asia/Kolkata'
-            END
-          )
-        END AS shift_start,
-        CASE WHEN start_time <= end_time
-          THEN ($2::date + end_time) AT TIME ZONE 'Asia/Kolkata'
-          ELSE (
-            CASE WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
-              THEN (($2::date + INTERVAL '1 day') + end_time) AT TIME ZONE 'Asia/Kolkata'
-              ELSE ($2::date + end_time) AT TIME ZONE 'Asia/Kolkata'
-            END
-          )
-        END AS shift_end
-      FROM shifts WHERE id = $1
-    `, [shiftId, date]);
-
-    if (shiftRows[0]) {
-      const shiftStartEpoch = Math.floor(new Date(shiftRows[0].shift_start).getTime() / 1000);
-      const shiftEndEpoch   = Math.floor(new Date(shiftRows[0].shift_end).getTime()   / 1000);
-      // For ongoing (current) shifts, cap at now so we don't look into the future
-      const effectiveEndEpoch = Math.min(shiftEndEpoch, Math.floor(Date.now() / 1000));
-
-      const { rows: liveRows } = await db.query(`
-        WITH first_count AS (
-          SELECT parts_count AS first_parts
-          FROM telemetry_raw
-          WHERE machine_id = $1
-            AND received_at >= to_timestamp($2)
-            AND received_at <  to_timestamp($3)
-          ORDER BY received_at ASC LIMIT 1
-        ),
-        shift_raw AS (
-          SELECT parts_count, received_at,
-            LAG(parts_count) OVER (ORDER BY received_at) AS prev_count,
-            GREATEST(
-              COALESCE(LEAD(parts_count,1)  OVER (ORDER BY received_at),0),
-              COALESCE(LEAD(parts_count,5)  OVER (ORDER BY received_at),0),
-              COALESCE(LEAD(parts_count,10) OVER (ORDER BY received_at),0)
-            ) AS max_future_10
-          FROM telemetry_raw
-          WHERE machine_id = $1
-            AND received_at >= to_timestamp($2)
-            AND received_at <  to_timestamp($3)
-        ),
-        resets AS (
-          SELECT COALESCE(SUM(prev_count),0) AS total_offset
-          FROM shift_raw
-          WHERE prev_count IS NOT NULL AND parts_count <= 2
-            AND prev_count > 2 AND max_future_10 < (prev_count * 0.5)
-        ),
-        latest AS (
-          SELECT parts_count FROM telemetry_raw
-          WHERE machine_id = $1
-            AND received_at >= to_timestamp($2)
-            AND received_at <  to_timestamp($3)
-          ORDER BY received_at DESC LIMIT 1
-        )
-        SELECT GREATEST(0,
-          l.parts_count + COALESCE(r.total_offset,0) - COALESCE(f.first_parts,0)
-        ) AS adjusted
-        FROM latest l, resets r, first_count f
-      `, [machineId, shiftStartEpoch, effectiveEndEpoch]);
-
-      if (liveRows[0]) {
-        totalProduced = Number(liveRows[0].adjusted);
-      }
-    }
-  }
+  // totalProduced = sum of production_hourly buckets — same source as the hourly bar chart.
+  // Both numbers on the page now come from the same table, so they are always consistent.
+  const totalProduced = hourlyCount.reduce((s, r) => s + r.produced, 0);
 
   return {
     hourlyCount,
@@ -193,7 +114,7 @@ exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
      run_seconds – seconds machine was RUNNING while producing this part
      idle_seconds– seconds machine was IDLE before next part started
 ───────────────────────────────────────────────────────────── */
-exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch }) => {
+exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxParts }) => {
 
   if (!machineId || !shiftStartEpoch) return [];
 
@@ -219,23 +140,25 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch }) =>
         AND received_at <  to_timestamp($3)
     ),
     part_events AS (
-      -- Row where parts_count just incremented = part completed.
-      -- started_at = previous part's completed_at.
-      -- For the very first part, fall back to shift start (to_timestamp($2)).
+      -- Each row where parts_count incremented = one telemetry event.
+      -- increment = how many parts were actually produced in this interval
+      -- (can be > 1 when telemetry has a gap and the counter jumped).
       SELECT
-        ROW_NUMBER() OVER (ORDER BY received_at)                              AS part_no,
         received_at                                                           AS completed_at,
         COALESCE(
           LAG(received_at) OVER (ORDER BY received_at),
           to_timestamp($2)
-        )                                                                     AS started_at
+        )                                                                     AS started_at,
+        (parts_count - prev_parts)                                            AS increment
       FROM ordered
       WHERE prev_parts IS NOT NULL
         AND parts_count > prev_parts
         AND parts_count > 0
     )
     SELECT
-      pe.part_no,
+      pe.completed_at,
+      pe.started_at,
+      pe.increment,
       GREATEST(0, SUM(
         CASE WHEN UPPER(o.machine_status) IN ('RUN','RUNNING','CUTTING')
              THEN COALESCE(o.interval_sec, 0) ELSE 0 END
@@ -248,13 +171,28 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch }) =>
     JOIN ordered o
       ON o.received_at >  pe.started_at
      AND o.received_at <= pe.completed_at
-    GROUP BY pe.part_no, pe.started_at
+    GROUP BY pe.completed_at, pe.started_at, pe.increment
     ORDER BY pe.started_at
   `, [machineId, shiftStartEpoch, effectiveEnd]);
 
-  return res.rows.map(r => ({
-    part_no:  Number(r.part_no),
-    run_min:  +(Number(r.run_seconds)  / 60).toFixed(1),
-    idle_min: +(Number(r.idle_seconds) / 60).toFixed(1)
-  }));
+  // Expand multi-part jumps: if parts_count jumped by N in one interval,
+  // split run/idle time equally across N parts.
+  const parts = [];
+  let partNo = 1;
+  for (const r of res.rows) {
+    const increment  = Math.max(1, Number(r.increment));
+    const runSec     = Number(r.run_seconds);
+    const idleSec    = Number(r.idle_seconds);
+    const runPerPart  = runSec  / increment;
+    const idlePerPart = idleSec / increment;
+
+    for (let i = 0; i < increment; i++) {
+      parts.push({
+        part_no:  partNo++,
+        run_min:  +(runPerPart  / 60).toFixed(1),
+        idle_min: +(idlePerPart / 60).toFixed(1)
+      });
+    }
+  }
+  return maxParts ? parts.slice(0, maxParts) : parts;
 };

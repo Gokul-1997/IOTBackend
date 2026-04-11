@@ -26,7 +26,7 @@ exports.login = async ({ email, password }, req) => {
 
   // Step 1: Get user WITHOUT lock first (read-only)
   const userRes = await db.query(
-    `SELECT id, email, username, password_hash, plant_id,
+    `SELECT id, email, username, password_hash, plant_id, company_id, user_type,
             is_active, failed_login_attempts, lock_until
      FROM users
      WHERE email = $1`,
@@ -64,8 +64,8 @@ exports.login = async ({ email, password }, req) => {
     throw { status: 401, message: 'Invalid credentials' };
   }
 
-  // Step 3: Get roles + permissions in parallel
-  const [roleRes, permRes] = await Promise.all([
+  // Step 3: Get roles + permissions + company plan in parallel
+  const [roleRes, permRes, planRes] = await Promise.all([
     db.query(
       `SELECT r.role_name
        FROM roles r
@@ -80,11 +80,29 @@ exports.login = async ({ email, password }, req) => {
        JOIN user_roles ur ON ur.role_id = rp.role_id
        WHERE ur.user_id = $1`,
       [user.id]
-    )
+    ),
+    user.company_id
+      ? db.query(
+          `SELECT p.plan_code, p.plan_name, p.tier,
+                  COALESCE(cp.max_users, p.max_users)       AS max_users,
+                  COALESCE(cp.max_plants, p.max_plants)     AS max_plants,
+                  COALESCE(cp.max_machines, p.max_machines) AS max_machines,
+                  json_agg(json_build_object('feature_key', pf.feature_key, 'is_enabled', pf.is_enabled)) AS features
+           FROM company_plans cp
+           JOIN plans p ON p.id = cp.plan_id
+           JOIN plan_features pf ON pf.plan_id = p.id
+           WHERE cp.company_id = $1 AND cp.is_active = true
+           GROUP BY p.plan_code, p.plan_name, p.tier, cp.max_users, cp.max_plants, cp.max_machines,
+                    p.max_users, p.max_plants, p.max_machines`,
+          [user.company_id]
+        )
+      : Promise.resolve({ rows: [] })
   ]);
 
   const roles = roleRes.rows.map(r => r.role_name);
   const permissions = permRes.rows.map(p => p.permission_key);
+  const plan = planRes.rows[0] || null;
+  const is_snt_super = roles.includes('SNT_SUPER');
 
   // Step 4: Only update session info (use transaction)
   const client = await db.connect();
@@ -131,10 +149,14 @@ exports.login = async ({ email, password }, req) => {
 
     // Step 5: Generate tokens and return
     const tokenPayload = {
-      user_id: user.id,
-      plant_id: user.plant_id,
+      user_id:    user.id,
+      plant_id:   user.plant_id,
+      company_id: user.company_id,
+      user_type:  user.user_type,
+      is_snt_super,
       roles,
-      permissions
+      permissions,
+      plan: plan ? { plan_code: plan.plan_code, tier: plan.tier } : null
     };
 
     const accessToken = signAccessToken(tokenPayload);
@@ -143,12 +165,16 @@ exports.login = async ({ email, password }, req) => {
       accessToken,
       refreshToken,
       user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
+        id:          user.id,
+        email:       user.email,
+        username:    user.username,
+        plant_id:    user.plant_id,
+        company_id:  user.company_id,
+        user_type:   user.user_type,
+        is_snt_super,
         roles,
         permissions,
-        plant_id: user.plant_id
+        plan
       }
     };
   } catch (e) {
@@ -198,9 +224,19 @@ exports.refresh = async (refreshToken, req) => {
   );
   const permissions = permRes.rows.map(p => p.permission_key);
 
+  // reload company + plan on refresh
+  const sessionUser = await db.query(
+    `SELECT company_id, user_type FROM users WHERE id = $1`, [s.user_id]
+  );
+  const su = sessionUser.rows[0] || {};
+  const is_snt_super_refresh = roles.includes('SNT_SUPER');
+
   const accessToken = signAccessToken({
-    user_id: s.user_id,
-    plant_id: s.plant_id,
+    user_id:    s.user_id,
+    plant_id:   s.plant_id,
+    company_id: su.company_id,
+    user_type:  su.user_type,
+    is_snt_super: is_snt_super_refresh,
     roles,
     permissions
   });

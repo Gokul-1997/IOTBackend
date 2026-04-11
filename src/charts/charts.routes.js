@@ -37,13 +37,14 @@ router.get('/data', auth, async (req, res) => {
 /* GET /api/charts/parts?machine_id=&shift_start_epoch= */
 router.get('/parts', auth, async (req, res) => {
   try {
-    const { machine_id, shift_start_epoch, shift_end_epoch } = req.query;
+    const { machine_id, shift_start_epoch, shift_end_epoch, max_parts } = req.query;
     if (!machine_id) return res.status(400).json({ success: false, message: 'machine_id required' });
 
     const data = await svc.getPartTiming({
       machineId:       machine_id,
       shiftStartEpoch: shift_start_epoch || Math.floor(Date.now() / 1000) - 28800, // default 8h ago
-      shiftEndEpoch:   shift_end_epoch   || null
+      shiftEndEpoch:   shift_end_epoch   || null,
+      maxParts:        max_parts         ? Number(max_parts) : null
     });
 
     res.json({ success: true, data });
