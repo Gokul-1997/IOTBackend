@@ -154,6 +154,7 @@ exports.getMachines = async (req) => {
       m.mmc_no,
       m.controller,
       m.spindle_rpm,
+      m.api_key,
       m.is_active,
       m.created_at
     FROM machines m
