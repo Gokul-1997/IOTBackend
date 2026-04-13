@@ -7,7 +7,7 @@ const svc = require('./dashboard.service');
 exports.dashboard = async (req, res) => {
   try {
 
-    const data = await svc.dashboard(req.user.plant_id);
+    const data = await svc.dashboard(req.user.plant_id, req.user.company_id);
 
     return res.json({
       status: "success",
@@ -45,7 +45,8 @@ exports.machineDetail = async (req, res) => {
 
     const data = await svc.machineDetail(
       req.user.plant_id,
-      machineId
+      machineId,
+      req.user.company_id
     );
 
     return res.json({

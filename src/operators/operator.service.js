@@ -1,7 +1,7 @@
 const db = require('../db');
 const { validateCreate } = require('../helpers/validators/operator.validator');
 
-exports.create = async (data, plant_id) => {
+exports.create = async (data, plant_id, company_id) => {
   validateCreate(data);
 
   const client = await db.connect();
@@ -11,10 +11,10 @@ exports.create = async (data, plant_id) => {
 
     const { rows } = await client.query(
       `INSERT INTO operators
-       (plant_id, operator_code, operator_name, skill_level)
-       VALUES ($1,$2,$3,$4)
+       (plant_id, company_id, operator_code, operator_name, skill_level)
+       VALUES ($1,$2,$3,$4,$5)
        RETURNING id`,
-      [plant_id, data.operator_code, data.operator_name, data.skill_level]
+      [plant_id, company_id, data.operator_code, data.operator_name, data.skill_level]
     );
 
     const operatorId = rows[0].id;
@@ -52,7 +52,7 @@ exports.create = async (data, plant_id) => {
 };
 
 
-exports.list = async (plant_id, query) => {
+exports.list = async (plant_id, query, company_id) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
   const offset = (page - 1) * limit;
@@ -60,8 +60,8 @@ exports.list = async (plant_id, query) => {
   const sortBy = query.sortBy || 'o.created_at';
   const order = query.order === 'asc' ? 'ASC' : 'DESC';
 
-  const values = [plant_id];
-  let where = `WHERE o.plant_id = $1`;
+  const values = [company_id];
+  let where = `WHERE o.company_id = $1`;
 
   if (search) {
     values.push(`%${search}%`);
@@ -129,7 +129,7 @@ exports.list = async (plant_id, query) => {
 
 // operator.service.js
 
-exports.update = async (id, data, plant_id) => {
+exports.update = async (id, data, plant_id, company_id) => {
   const client = await db.connect();
 
   try {
@@ -157,13 +157,13 @@ exports.update = async (id, data, plant_id) => {
 
     if (fields.length > 0) {
       values.push(id);
-      values.push(plant_id);
+      values.push(company_id);
 
       await client.query(
         `
         UPDATE operators
         SET ${fields.join(', ')}
-        WHERE id = $${index} AND plant_id = $${index + 1}
+        WHERE id = $${index} AND company_id = $${index + 1}
         `,
         values
       );
@@ -228,14 +228,14 @@ exports.update = async (id, data, plant_id) => {
   }
 };
 
-exports.getById = async (id, plant_id) => {
+exports.getById = async (id, plant_id, company_id) => {
 
   // Basic operator
   const operator = await db.query(
     `SELECT id, operator_code, operator_name, skill_level, is_active
      FROM operators
-     WHERE id = $1 AND plant_id = $2`,
-    [id, plant_id]
+     WHERE id = $1 AND company_id = $2`,
+    [id, company_id]
   );
 
   if (operator.rowCount === 0) {
@@ -270,10 +270,10 @@ exports.getById = async (id, plant_id) => {
     }
   };
 };
-exports.remove = async (id, plant_id) => {
+exports.remove = async (id, plant_id, company_id) => {
   const result = await db.query(
-    `DELETE FROM operators WHERE id = $1 AND plant_id = $2 RETURNING id`,
-    [id, plant_id]
+    `DELETE FROM operators WHERE id = $1 AND company_id = $2 RETURNING id`,
+    [id, company_id]
   );
 
   if (result.rowCount === 0) {

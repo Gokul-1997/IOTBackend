@@ -55,3 +55,10 @@ exports.remove = async (req, res, next) => {
     res.json({ message: 'Company deactivated' });
   } catch (e) { next(e); }
 };
+
+exports.permanentDelete = async (req, res, next) => {
+  try {
+    await svc.permanentDelete(req.params.id);
+    res.json({ message: 'Company permanently deleted' });
+  } catch (e) { next(e); }
+};

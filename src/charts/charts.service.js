@@ -3,20 +3,20 @@ const db = require('../db');
 /* ─────────────────────────────────────────────────────────────
    META  –  machines + shifts for filter dropdowns
 ───────────────────────────────────────────────────────────── */
-exports.getMeta = async (plantId) => {
+exports.getMeta = async (plantId, companyId) => {
   const [machinesRes, shiftsRes] = await Promise.all([
     db.query(`
       SELECT id, machine_serial_no
       FROM machines
-      WHERE plant_id = $1 AND is_active = TRUE
+      WHERE company_id = $1 AND is_active = TRUE
       ORDER BY machine_serial_no
-    `, [plantId]),
+    `, [companyId]),
     db.query(`
       SELECT id, shift_code, shift_name, start_time, end_time
       FROM shifts
-      WHERE plant_id = $1 AND is_active = TRUE
+      WHERE company_id = $1 AND is_active = TRUE
       ORDER BY start_time
-    `, [plantId])
+    `, [companyId])
   ]);
 
   return {
@@ -32,7 +32,7 @@ exports.getMeta = async (plantId) => {
      hourlyCount  – hourly produced qty for the selected machine+shift+date
      totalProduced
 ───────────────────────────────────────────────────────────── */
-exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
+exports.getChartData = async ({ plantId, companyId, machineId, shiftId, date }) => {
 
   /* ── Hourly part count (line chart) ── */
   let hourlyRows = [];
@@ -75,9 +75,9 @@ exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
       FROM production_hourly ph
       JOIN shifts s ON s.id = ph.shift_id
       JOIN machines m ON m.id = ph.machine_id
-      WHERE m.plant_id    = $1
+      WHERE m.company_id  = $1
         AND ph.machine_id = $2
-        AND s.plant_id    = $1
+        AND s.company_id  = $1
         AND s.is_active   = TRUE
         AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
         AND ph.hour_start <  (
@@ -88,7 +88,7 @@ exports.getChartData = async ({ plantId, machineId, shiftId, date }) => {
             ) AT TIME ZONE 'Asia/Kolkata'
       GROUP BY ph.hour_start
       ORDER BY ph.hour_start
-    `, [plantId, machineId, date]);
+    `, [companyId, machineId, date]);
     hourlyRows = hourlyRes.rows;
   }
 

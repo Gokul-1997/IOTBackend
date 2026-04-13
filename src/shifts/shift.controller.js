@@ -23,7 +23,7 @@ exports.updateShift = async (req, res) => {
     const data = await service.updateShift(
       req.params.id,
       req.body,
-      req.user.plant_id
+      req.user.company_id
     );
 
     res.json({
@@ -41,7 +41,7 @@ exports.updateShift = async (req, res) => {
 
 exports.deleteShift = async (req, res) => {
   try {
-    await service.deleteShift(req.params.id, req.user.plant_id);
+    await service.deleteShift(req.params.id, req.user.company_id);
     res.json({ success: true, message: 'Shift deleted' });
   } catch (e) {
     res.status(400).json({ success: false, message: e.message });

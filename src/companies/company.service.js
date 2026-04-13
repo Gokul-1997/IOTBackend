@@ -75,6 +75,17 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
       );
     }
 
+    // AUTO-GRANT all permissions to the new company (full access)
+    // Get all available permissions
+    const permRes = await client.query(`SELECT id FROM permissions ORDER BY id`);
+    for (const perm of permRes.rows) {
+      await client.query(
+        `INSERT INTO company_permissions (company_id, permission_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [company.id, perm.id]
+      );
+    }
+
     await client.query('COMMIT');
 
     // Send login credentials email (fire and forget)
@@ -287,4 +298,61 @@ exports.remove = async (id) => {
     [id]
   );
   if (!rowCount) throw { status: 404, message: 'Company not found' };
+};
+
+/**
+ * Permanently delete a company and ALL related data.
+ * CASCADE handles: company_plans, company_permissions, users.company_id, roles.company_id
+ * We also need to clean up user_roles and user_sessions for users in this company.
+ */
+exports.permanentDelete = async (id) => {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Get all user IDs for this company
+    const { rows: companyUsers } = await client.query(
+      `SELECT id FROM users WHERE company_id = $1`, [id]
+    );
+    const userIds = companyUsers.map(u => u.id);
+
+    if (userIds.length > 0) {
+      // Delete user_roles
+      await client.query(`DELETE FROM user_roles WHERE user_id = ANY($1)`, [userIds]);
+      // Delete user_sessions
+      await client.query(`DELETE FROM user_sessions WHERE user_id = ANY($1)`, [userIds]);
+      // Delete password_reset_tokens
+      await client.query(`DELETE FROM password_reset_tokens WHERE user_id = ANY($1)`, [userIds]);
+      // Delete users
+      await client.query(`DELETE FROM users WHERE company_id = $1`, [id]);
+    }
+
+    // Delete custom roles for this company
+    const { rows: companyRoles } = await client.query(
+      `SELECT id FROM roles WHERE company_id = $1`, [id]
+    );
+    const roleIds = companyRoles.map(r => r.id);
+    if (roleIds.length > 0) {
+      await client.query(`DELETE FROM role_permissions WHERE role_id = ANY($1)`, [roleIds]);
+      await client.query(`DELETE FROM roles WHERE company_id = $1`, [id]);
+    }
+
+    // Delete company_permissions, company_plans (CASCADE should handle, but explicit)
+    await client.query(`DELETE FROM company_permissions WHERE company_id = $1`, [id]);
+    await client.query(`DELETE FROM company_plans WHERE company_id = $1`, [id]);
+
+    // Delete the company
+    const { rowCount } = await client.query(`DELETE FROM companies WHERE id = $1`, [id]);
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      throw { status: 404, message: 'Company not found' };
+    }
+
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 };

@@ -1,17 +1,18 @@
 const db = require('../db');
 
 /* CREATE */
-exports.create = async (data, plant_id) => {
+exports.create = async (data, plant_id, company_id) => {
 
   const result = await db.query(`
     INSERT INTO components
-    (plant_id, machine_id, part_name, part_number,
+    (plant_id, company_id, machine_id, part_name, part_number,
      operation_number, cycle_time, target,
      multiplication_factor)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
     RETURNING *
   `, [
     plant_id,
+    company_id,
     data.machine_id,
     data.part_name,
     data.part_number,
@@ -31,15 +32,15 @@ exports.create = async (data, plant_id) => {
 /* ===========================
    LIST WITH SEARCH + PAGINATION
 =========================== */
-exports.list = async (plant_id, query) => {
+exports.list = async (plant_id, query, company_id) => {
 
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 6;
   const offset = (page - 1) * limit;
   const search = query.search || '';
 
-  const values = [plant_id];
-  let where = `WHERE c.plant_id = $1`;
+  const values = [company_id];
+  let where = `WHERE c.company_id = $1`;
 
   if (search) {
     values.push(`%${search}%`);
@@ -84,7 +85,7 @@ exports.list = async (plant_id, query) => {
 };
 
 /* UPDATE */
-exports.update = async (id, data, plant_id) => {
+exports.update = async (id, data, plant_id, company_id) => {
 
   const result = await db.query(`
     UPDATE components
@@ -94,7 +95,7 @@ exports.update = async (id, data, plant_id) => {
         cycle_time=$4,
         target=$5,
         multiplication_factor=$6
-    WHERE id=$7 AND plant_id=$8
+    WHERE id=$7 AND company_id=$8
     RETURNING *
   `, [
     data.part_name,
@@ -104,7 +105,7 @@ exports.update = async (id, data, plant_id) => {
     data.target,
     data.multiplication_factor,
     id,
-    plant_id
+    company_id
   ]);
 
   return {
@@ -115,12 +116,12 @@ exports.update = async (id, data, plant_id) => {
 
 
 /* DELETE */
-exports.remove = async (id, plant_id) => {
+exports.remove = async (id, plant_id, company_id) => {
 
   await db.query(`
     DELETE FROM components
-    WHERE id=$1 AND plant_id=$2
-  `, [id, plant_id]);
+    WHERE id=$1 AND company_id=$2
+  `, [id, company_id]);
 
   return { status: 'success' };
 };

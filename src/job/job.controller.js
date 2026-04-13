@@ -29,7 +29,7 @@ exports.stopJob = async (req,res)=>{
 
     const { machine_id } = req.body;
 
-    await service.stopJob(machine_id, req.user.plant_id);
+    await service.stopJob(machine_id, req.user.company_id);
 
     return res.json({
       status:"success"
@@ -53,9 +53,9 @@ exports.getCurrentJobs = async (req, res) => {
 
   try {
 
-    const plantId = req.user.plant_id;
+    const companyId = req.user.company_id;
 
-    const result = await service.getCurrentJobs(plantId);
+    const result = await service.getCurrentJobs(companyId);
 
     res.json({
       status: "success",
@@ -77,7 +77,7 @@ exports.getCurrentJobs = async (req, res) => {
 
 exports.getAvailableMachines = async (req, res) => {
   try {
-    const result = await service.getAvailableMachines(req.user.plant_id);
+    const result = await service.getAvailableMachines(req.user.company_id);
     res.json({ status: 'success', data: result });
   } catch (err) {
     console.error(err);
@@ -89,9 +89,9 @@ exports.getJobHistory = async (req, res) => {
 
   try {
 
-    const plantId = req.user.plant_id;
+    const companyId = req.user.company_id;
 
-    const result = await service.getJobHistory(plantId);
+    const result = await service.getJobHistory(companyId);
 
     res.json({
       status: "success",

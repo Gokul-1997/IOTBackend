@@ -6,9 +6,7 @@ const {
 
 const getMachineList = async (req, res) => {
   try {
-    const plant_id  = req.user.plant_id 
-
-    const machines = await getMachineListService(plant_id);
+    const machines = await getMachineListService(req.user.plant_id, req.user.company_id);
 
     res.json({
       success: true,
@@ -24,9 +22,7 @@ const getMachineList = async (req, res) => {
 
 const getShiftList = async (req, res) => {
   try {
-    const plant_id  = req.user.plant_id 
-
-    const shifts = await getShiftListService(plant_id);
+    const shifts = await getShiftListService(req.user.plant_id, req.user.company_id);
 
     res.json({
       success: true,
@@ -47,7 +43,8 @@ const getMachinesByLine = async (req, res) => {
 
     const machines = await getMachinesByLineService(
       line_id,
-      req.user.plant_id  
+      req.user.plant_id,
+      req.user.company_id
     );
 
     res.json({

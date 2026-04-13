@@ -7,10 +7,14 @@ const validate = require('../middleware/validate.middleware');
 const controller = require('./line.controller');
 
 router.post('/', auth, permit('line.create'), validate({
-  name: { required: true, maxLength: 100, label: 'Line name' }
+  name: { required: true, maxLength: 100, label: 'Line name' },
+  is_active: { type: 'boolean' }
 }), controller.createLine);
 router.get('/', auth, permit('line.view'), controller.getLines);
-router.put('/:id', auth, permit('line.update'), controller.updateLine);
+router.put('/:id', auth, permit('line.update'), validate({
+  name: { maxLength: 100, label: 'Line name' },
+  is_active: { type: 'boolean' }
+}), controller.updateLine);
 router.delete('/:id', auth, permit('line.delete'), controller.deleteLine);
 
 module.exports = router;

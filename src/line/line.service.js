@@ -2,17 +2,17 @@ const pool = require('../db');
 
 /* CREATE LINE */
 exports.createLine = async (req) => {
-  const { name } = req.body;
-  // FIX: plant_id from authenticated user (was missing, caused NOT NULL violation)
+  const { name, is_active } = req.body;
   const plant_id = req.user.plant_id;
+  const company_id = req.user.company_id;
 
   if (!name) throw new Error('Line name required');
 
   const result = await pool.query(
-    `INSERT INTO line (plant_id, name)
-     VALUES ($1, $2)
+    `INSERT INTO line (plant_id, company_id, name, is_active)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [plant_id, name]
+    [plant_id, company_id, name, is_active !== false]
   );
 
   return result.rows[0];
@@ -20,15 +20,14 @@ exports.createLine = async (req) => {
 
 /* LIST LINES */
 exports.getLines = async (req) => {
-  // FIX: filter by plant_id so users only see their own plant's lines
-  const plant_id = req.user.plant_id;
+  const company_id = req.user.company_id;
 
   const result = await pool.query(
-    `SELECT id, name
+    `SELECT id, name, is_active
      FROM line
-     WHERE plant_id = $1
+     WHERE company_id = $1
      ORDER BY name`,
-    [plant_id]
+    [company_id]
   );
 
   return result.rows;
@@ -37,14 +36,36 @@ exports.getLines = async (req) => {
 /* UPDATE LINE */
 exports.updateLine = async (req) => {
   const { id } = req.params;
-  const { name } = req.body;
+  const { name, is_active } = req.body;
+  const company_id = req.user.company_id;
+
+  const updates = [];
+  const values = [];
+  let paramCount = 1;
+
+  if (name !== undefined) {
+    updates.push(`name = $${paramCount++}`);
+    values.push(name);
+  }
+
+  if (is_active !== undefined) {
+    updates.push(`is_active = $${paramCount++}`);
+    values.push(is_active);
+  }
+
+  if (updates.length === 0) {
+    throw new Error('No fields to update');
+  }
+
+  values.push(id);
+  values.push(company_id);
 
   const result = await pool.query(
     `UPDATE line
-     SET name = $1
-     WHERE id = $2
+     SET ${updates.join(', ')}
+     WHERE id = $${paramCount++} AND company_id = $${paramCount++}
      RETURNING *`,
-    [name, id]
+    values
   );
 
   if (result.rowCount === 0) {
@@ -70,5 +91,5 @@ exports.deleteLine = async (req) => {
     throw new Error('Cannot delete line. Machines are assigned.');
   }
 
-  await pool.query(`DELETE FROM line WHERE id = $1`, [id]);
+  await pool.query(`DELETE FROM line WHERE id = $1 AND company_id = $2`, [id, req.user.company_id]);
 };

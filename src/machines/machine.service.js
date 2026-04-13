@@ -30,6 +30,7 @@ exports.createMachine = async (req) => {
     `
     INSERT INTO machines (
       plant_id,
+      company_id,
       line_id,
       machine_serial_no,
       x_axis,
@@ -47,12 +48,13 @@ exports.createMachine = async (req) => {
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
     )
     RETURNING id, machine_serial_no, api_key
     `,
     [
       req.user.plant_id,
+      req.user.company_id,
       line_id || null,
       machine_serial_no,
       x_axis,
@@ -73,15 +75,15 @@ exports.createMachine = async (req) => {
 
   const newMachineId = result.rows[0].id;
 
-  // Auto link machine to all shifts
+  // Auto link machine to all shifts in same company
   await pool.query(
     `
     INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
     SELECT $1, $2, id
     FROM shifts
-    WHERE plant_id = $1
+    WHERE company_id = $3
     `,
-    [req.user.plant_id, newMachineId]
+    [req.user.plant_id, newMachineId, req.user.company_id]
   );
 
   return result.rows[0];
@@ -98,7 +100,7 @@ exports.getMachines = async (req) => {
     sortDir = 'desc'
   } = req.query;
 
-  const plantId = req.user.plant_id;
+  const companyId = req.user.company_id;
   const offset = (page - 1) * limit;
 
   const sortableColumns = [
@@ -118,8 +120,8 @@ exports.getMachines = async (req) => {
   const orderDirection =
     sortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
-  let whereSQL = `WHERE m.plant_id = $1`;
-  const values = [plantId];
+  let whereSQL = `WHERE m.company_id = $1`;
+  const values = [companyId];
 
   if (search) {
     values.push(`%${search}%`);
@@ -187,8 +189,8 @@ exports.toggleMachineStatus = async (req) => {
   await pool.query(
     `UPDATE machines
      SET is_active = NOT is_active
-     WHERE id = $1 AND plant_id = $2`,
-    [id, req.user.plant_id]
+     WHERE id = $1 AND company_id = $2`,
+    [id, req.user.company_id]
   );
 };
 
@@ -200,8 +202,8 @@ exports.regenerateApiKey = async (req) => {
   await pool.query(
     `UPDATE machines
      SET api_key = $1
-     WHERE id = $2 AND plant_id = $3`,
-    [newKey, id, req.user.plant_id]
+     WHERE id = $2 AND company_id = $3`,
+    [newKey, id, req.user.company_id]
   );
 
   return newKey;
@@ -214,9 +216,9 @@ exports.deleteMachine = async (req) => {
 
   const result = await pool.query(
     `DELETE FROM machines
-     WHERE id = $1 AND plant_id = $2
+     WHERE id = $1 AND company_id = $2
      RETURNING id`,
-    [id, req.user.plant_id]
+    [id, req.user.company_id]
   );
 
   if (result.rowCount === 0) {
@@ -228,7 +230,7 @@ exports.deleteMachine = async (req) => {
 exports.updateMachine = async (req) => {
 
   const { id } = req.params;
-  const plantId = req.user.plant_id;
+  const companyId = req.user.company_id;
 
   const allowedFields = [
     'machine_serial_no',
@@ -267,11 +269,11 @@ exports.updateMachine = async (req) => {
     UPDATE machines
     SET ${fields.join(', ')}
     WHERE id = $${index}
-      AND plant_id = $${index + 1}
+      AND company_id = $${index + 1}
     RETURNING *
   `;
 
-  values.push(id, plantId);
+  values.push(id, companyId);
 
   const result = await pool.query(query, values);
 

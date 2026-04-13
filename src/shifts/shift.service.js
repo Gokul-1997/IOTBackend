@@ -38,15 +38,15 @@ function validateShiftInput(start_time, end_time, breakMin) {
   return { startMin, endMin, duration };
 }
 
-async function validateOverlap(plant_id, startMin, duration, ignoreId = null) {
+async function validateOverlap(company_id, startMin, duration, ignoreId = null) {
 
   const existing = await pool.query(`
     SELECT id, start_time, end_time
     FROM shifts
-    WHERE plant_id = $1
+    WHERE company_id = $1
       AND is_active = TRUE
       ${ignoreId ? 'AND id != $2' : ''}
-  `, ignoreId ? [plant_id, ignoreId] : [plant_id]);
+  `, ignoreId ? [company_id, ignoreId] : [company_id]);
 
   const newStart = startMin;
   const newEnd = startMin + duration;
@@ -86,9 +86,9 @@ exports.getShifts = async (req) => {
       break_minutes,
       is_active
     FROM shifts
-    WHERE plant_id = $1
+    WHERE company_id = $1
     ORDER BY start_time
-  `, [req.user.plant_id]);
+  `, [req.user.company_id]);
 
   return result.rows;
 };
@@ -116,15 +116,16 @@ exports.createShift = async (req) => {
   const { startMin, duration } =
     validateShiftInput(start_time, end_time, breakMin);
 
-  await validateOverlap(req.user.plant_id, startMin, duration);
+  await validateOverlap(req.user.company_id, startMin, duration);
 
   const result = await pool.query(`
     INSERT INTO shifts
-    (plant_id, shift_code, shift_name, start_time, end_time, break_minutes)
-    VALUES ($1,$2,$3,$4,$5,$6)
+    (plant_id, company_id, shift_code, shift_name, start_time, end_time, break_minutes)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
     RETURNING id
   `, [
     req.user.plant_id,
+    req.user.company_id,
     shift_code,
     shift_name || null,
     start_time,
@@ -138,8 +139,8 @@ exports.createShift = async (req) => {
     INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
     SELECT $1, id, $2
     FROM machines
-    WHERE plant_id = $1
-  `, [req.user.plant_id, newShiftId]);
+    WHERE company_id = $3
+  `, [req.user.plant_id, newShiftId, req.user.company_id]);
 
   return { message: 'Shift created successfully' };
 };
@@ -148,12 +149,12 @@ exports.createShift = async (req) => {
    UPDATE SHIFT
 ===================================================== */
 
-exports.updateShift = async (id, data, plant_id) => {
+exports.updateShift = async (id, data, company_id) => {
 
   const existing = await pool.query(`
     SELECT * FROM shifts
-    WHERE id = $1 AND plant_id = $2
-  `, [id, plant_id]);
+    WHERE id = $1 AND company_id = $2
+  `, [id, company_id]);
 
   if (!existing.rowCount) {
     throw new Error('Shift not found');
@@ -168,7 +169,7 @@ exports.updateShift = async (id, data, plant_id) => {
   const { startMin, duration } =
     validateShiftInput(start_time, end_time, breakMin);
 
-  await validateOverlap(plant_id, startMin, duration, id);
+  await validateOverlap(company_id, startMin, duration, id);
 
   const result = await pool.query(`
     UPDATE shifts
@@ -177,7 +178,7 @@ exports.updateShift = async (id, data, plant_id) => {
         start_time = $3,
         end_time = $4,
         break_minutes = $5
-    WHERE id = $6 AND plant_id = $7
+    WHERE id = $6 AND company_id = $7
     RETURNING *
   `, [
     data.shift_code ?? current.shift_code,
@@ -186,7 +187,7 @@ exports.updateShift = async (id, data, plant_id) => {
     end_time,
     breakMin,
     id,
-    plant_id
+    company_id
   ]);
 
   return result.rows[0];
@@ -196,10 +197,10 @@ exports.updateShift = async (id, data, plant_id) => {
    DELETE SHIFT
 ===================================================== */
 
-exports.deleteShift = async (id, plant_id) => {
+exports.deleteShift = async (id, company_id) => {
   const existing = await pool.query(`
-    SELECT id FROM shifts WHERE id = $1 AND plant_id = $2
-  `, [id, plant_id]);
+    SELECT id FROM shifts WHERE id = $1 AND company_id = $2
+  `, [id, company_id]);
 
   if (!existing.rowCount) {
     throw new Error('Shift not found');
@@ -211,7 +212,7 @@ exports.deleteShift = async (id, plant_id) => {
   await pool.query(`DELETE FROM production_hourly WHERE shift_id = $1`, [id]);
   await pool.query(`UPDATE quality_entries SET shift_id = NULL WHERE shift_id = $1`, [id]);
   await pool.query(`DELETE FROM machine_shift_config WHERE shift_id = $1`, [id]);
-  await pool.query(`DELETE FROM shifts WHERE id = $1 AND plant_id = $2`, [id, plant_id]);
+  await pool.query(`DELETE FROM shifts WHERE id = $1 AND company_id = $2`, [id, company_id]);
 };
 
 /* =====================================================
@@ -226,7 +227,7 @@ exports.toggleShift = async (req) => {
   await pool.query(`
     UPDATE shifts
     SET is_active = $1
-    WHERE id = $2 AND plant_id = $3
-  `, [is_active, id, req.user.plant_id]);
+    WHERE id = $2 AND company_id = $3
+  `, [is_active, id, req.user.company_id]);
 
 };

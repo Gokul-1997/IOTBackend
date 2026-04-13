@@ -44,6 +44,12 @@ app.use(standardLimiter);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// 🌱 Seed permissions and roles on startup
+const roleService = require('./roles/role.service');
+roleService.seedPagePermissions()
+  .then(result => console.log('✅ Permissions seeded:', result))
+  .catch(err => console.error('⚠️ Permission seed warning:', err.message));
+
 app.use('/auth', authLimiter);
 
 require('./routes')(app);

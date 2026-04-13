@@ -8,30 +8,27 @@ const db = require('../db');
 /* ===============================================
    GET META (Machines, Shifts, Lines)
    =============================================== */
-exports.getMeta = async (plantId) => {
+exports.getMeta = async (plantId, companyId) => {
 
   try {
 
-    if (!plantId) {
-      throw new Error('Plant ID is required');
+    if (!companyId && !plantId) {
+      throw new Error('Company ID is required');
     }
 
-    console.log(`📊 Loading OEE meta for plant ${plantId}`);
+    const filterVal = companyId || plantId;
 
-    // ✅ Get LINES (from line table, joined with plant)
+    // Get LINES
     const linesQuery = await db.query(`
       SELECT DISTINCT
         l.id,
         l.name
       FROM line l
-      WHERE l.plant_id = $1
+      WHERE l.company_id = $1
       ORDER BY l.name ASC
-    `, [plantId]);
+    `, [filterVal]);
 
-    console.log(`✅ Loaded ${linesQuery.rows.length} lines`);
-
-    // FIX: was LEFT JOIN line l ON m.plant_id = l.plant_id (Cartesian product)
-    // corrected to join on m.line_id = l.id
+    // Get MACHINES
     const machinesQuery = await db.query(`
       SELECT
         m.id,
@@ -40,24 +37,22 @@ exports.getMeta = async (plantId) => {
         l.name as line_name
       FROM machines m
       LEFT JOIN line l ON l.id = m.line_id
-      WHERE m.plant_id = $1 AND m.is_active = TRUE
+      WHERE m.company_id = $1 AND m.is_active = TRUE
       ORDER BY m.machine_serial_no ASC
-    `, [plantId]);
+    `, [filterVal]);
 
-    console.log(`✅ Loaded ${machinesQuery.rows.length} machines`);
-
-    // ✅ Get SHIFTS (with shift details)
+    // Get SHIFTS
     const shiftsQuery = await db.query(`
-      SELECT 
+      SELECT
         s.id,
         s.shift_code,
         s.shift_name,
         s.start_time,
         s.end_time
       FROM shifts s
-      WHERE s.plant_id = $1 AND s.is_active = TRUE
+      WHERE s.company_id = $1 AND s.is_active = TRUE
       ORDER BY s.start_time ASC
-    `, [plantId]);
+    `, [filterVal]);
 
     console.log(`✅ Loaded ${shiftsQuery.rows.length} shifts`);
 
@@ -77,7 +72,7 @@ exports.getMeta = async (plantId) => {
 /* ===============================================
    GET REPORTS (With filters and pagination)
    =============================================== */
-exports.getReports = async (query, plantId) => {
+exports.getReports = async (query, plantId, companyId) => {
 
   try {
 
@@ -121,9 +116,9 @@ exports.getReports = async (query, plantId) => {
     const params = [];
     let paramIndex = 1;
 
-    // Plant filter (ALWAYS)
-    where.push(`m.plant_id = $${paramIndex++}`);
-    params.push(plantId);
+    // Company filter (ALWAYS)
+    where.push(`m.company_id = $${paramIndex++}`);
+    params.push(companyId || plantId);
 
     // Line filter (optional)
     if (line_id && line_id !== 'null' && line_id !== '') {
@@ -246,7 +241,7 @@ exports.getReports = async (query, plantId) => {
 /* ===============================================
    EXPORT TO CSV
    =============================================== */
-exports.exportCSV = async (query, plantId) => {
+exports.exportCSV = async (query, plantId, companyId) => {
 
   try {
 

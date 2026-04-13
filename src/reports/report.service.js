@@ -30,37 +30,37 @@ const OPERATOR_CTE = `
    DROPDOWNS
 ───────────────────────────────────────────────────────── */
 
-exports.getMachines = async (plant_id) => {
+exports.getMachines = async (company_id) => {
   const { rows } = await db.query(
     `SELECT id, machine_serial_no AS name
      FROM machines
-     WHERE plant_id = $1 AND is_active = TRUE
+     WHERE company_id = $1 AND is_active = TRUE
      ORDER BY machine_serial_no`,
-    [plant_id]
+    [company_id]
   );
   return rows;
 };
 
-exports.getShifts = async (plant_id) => {
+exports.getShifts = async (company_id) => {
   const { rows } = await db.query(
     `SELECT id, shift_code AS name
      FROM shifts
-     WHERE plant_id = $1 AND is_active = TRUE
+     WHERE company_id = $1 AND is_active = TRUE
      ORDER BY start_time`,
-    [plant_id]
+    [company_id]
   );
   return rows;
 };
 
-exports.getOperators = async (plant_id) => {
+exports.getOperators = async (company_id) => {
   const { rows } = await db.query(
     `SELECT DISTINCT o.id, o.operator_name AS name
      FROM operators o
      JOIN operator_machine_assignments oma ON oma.operator_id = o.id AND oma.is_active = TRUE
-     JOIN machines m ON m.id = oma.machine_id AND m.plant_id = $1 AND m.is_active = TRUE
+     JOIN machines m ON m.id = oma.machine_id AND m.company_id = $1 AND m.is_active = TRUE
      WHERE o.is_active = TRUE
      ORDER BY o.operator_name`,
-    [plant_id]
+    [company_id]
   );
   return rows;
 };
@@ -69,8 +69,8 @@ exports.getOperators = async (plant_id) => {
    PRODUCTION REPORT  (JSON)
 ───────────────────────────────────────────────────────── */
 
-exports.productionData = async (plant_id, date_from, date_to, machine_id, shift_id, operator_id) => {
-  const params = [plant_id, date_from, date_to];
+exports.productionData = async (company_id, date_from, date_to, machine_id, shift_id, operator_id) => {
+  const params = [company_id, date_from, date_to];
   const conds  = [];
 
   if (machine_id)  { params.push(machine_id);  conds.push(`p.machine_id       = $${params.length}`); }
@@ -96,7 +96,7 @@ exports.productionData = async (plant_id, date_from, date_to, machine_id, shift_
     JOIN machines m ON m.id = p.machine_id
     LEFT JOIN shifts   s    ON s.id = p.shift_id
     LEFT JOIN op_map   op   ON op.machine_id = p.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND CASE
             WHEN s.start_time IS NOT NULL
              AND (p.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
@@ -136,8 +136,8 @@ exports.productionData = async (plant_id, date_from, date_to, machine_id, shift_
    OEE HOURLY REPORT  (JSON)
 ───────────────────────────────────────────────────────── */
 
-exports.oeeHourlyData = async (plant_id, date_from, date_to, machine_id, shift_id, operator_id) => {
-  const params = [plant_id, date_from, date_to];
+exports.oeeHourlyData = async (company_id, date_from, date_to, machine_id, shift_id, operator_id) => {
+  const params = [company_id, date_from, date_to];
   const conds  = [];
 
   if (machine_id)  { params.push(machine_id);  conds.push(`o.machine_id   = $${params.length}`); }
@@ -160,7 +160,7 @@ exports.oeeHourlyData = async (plant_id, date_from, date_to, machine_id, shift_i
     JOIN machines m ON m.id = o.machine_id
     LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND CASE
             WHEN s.start_time IS NOT NULL
              AND (o.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
@@ -192,8 +192,8 @@ exports.oeeHourlyData = async (plant_id, date_from, date_to, machine_id, shift_i
    SHIFT OEE REPORT  (JSON)
 ───────────────────────────────────────────────────────── */
 
-exports.shiftOeeData = async (plant_id, date_from, date_to, machine_id, shift_id, operator_id) => {
-  const params = [plant_id, date_from, date_to];
+exports.shiftOeeData = async (company_id, date_from, date_to, machine_id, shift_id, operator_id) => {
+  const params = [company_id, date_from, date_to];
   const conds  = [];
 
   if (machine_id)  { params.push(machine_id);  conds.push(`o.machine_id   = $${params.length}`); }
@@ -217,7 +217,7 @@ exports.shiftOeeData = async (plant_id, date_from, date_to, machine_id, shift_id
     JOIN machines m ON m.id = o.machine_id
     JOIN shifts   s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND o.shift_date BETWEEN $2 AND $3
       ${extra}
     ORDER BY o.shift_date DESC, s.shift_code, m.machine_serial_no
@@ -242,7 +242,7 @@ exports.shiftOeeData = async (plant_id, date_from, date_to, machine_id, shift_id
    LEGACY EXCEL helpers
 ───────────────────────────────────────────────────────── */
 
-exports.hourlyOee = async (plant_id, date) => {
+exports.hourlyOee = async (company_id, date) => {
   const { rows } = await db.query(`
     WITH ${OPERATOR_CTE}
     SELECT
@@ -257,7 +257,7 @@ exports.hourlyOee = async (plant_id, date) => {
     JOIN machines m ON m.id = o.machine_id
     LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND CASE
             WHEN s.start_time IS NOT NULL
              AND (o.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
@@ -267,11 +267,11 @@ exports.hourlyOee = async (plant_id, date) => {
             ELSE DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
           END = $2::date
     ORDER BY m.machine_serial_no, o.hour_start
-  `, [plant_id, date]);
+  `, [company_id, date]);
   return rows;
 };
 
-exports.shiftOee = async (plant_id, date) => {
+exports.shiftOee = async (company_id, date) => {
   const { rows } = await db.query(`
     WITH ${OPERATOR_CTE}
     SELECT
@@ -287,14 +287,14 @@ exports.shiftOee = async (plant_id, date) => {
     JOIN machines m ON m.id = o.machine_id
     JOIN shifts   s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND o.shift_date = $2
     ORDER BY s.shift_code, m.machine_serial_no
-  `, [plant_id, date]);
+  `, [company_id, date]);
   return rows;
 };
 
-exports.production = async (plant_id, date) => {
+exports.production = async (company_id, date) => {
   const { rows } = await db.query(`
     WITH ${OPERATOR_CTE}
     SELECT
@@ -312,7 +312,7 @@ exports.production = async (plant_id, date) => {
     JOIN machines m ON m.id = p.machine_id
     LEFT JOIN shifts   s  ON s.id = p.shift_id
     LEFT JOIN op_map   op ON op.machine_id = p.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND CASE
             WHEN s.start_time IS NOT NULL
              AND (p.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
@@ -322,6 +322,6 @@ exports.production = async (plant_id, date) => {
             ELSE DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
           END = $2::date
     ORDER BY m.machine_serial_no, p.hour_start
-  `, [plant_id, date]);
+  `, [company_id, date]);
   return rows;
 };

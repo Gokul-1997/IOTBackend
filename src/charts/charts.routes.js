@@ -6,7 +6,7 @@ const svc        = require('./charts.service');
 /* GET /api/charts/meta */
 router.get('/meta', auth, async (req, res) => {
   try {
-    const data = await svc.getMeta(req.user.plant_id);
+    const data = await svc.getMeta(req.user.plant_id, req.user.company_id);
     res.json({ success: true, data });
   } catch (err) {
     console.error('charts/meta error:', err);
@@ -22,6 +22,7 @@ router.get('/data', auth, async (req, res) => {
 
     const data = await svc.getChartData({
       plantId:   req.user.plant_id,
+      companyId: req.user.company_id,
       machineId: machine_id || null,
       shiftId:   shift_id   || null,
       date:      date       || today

@@ -12,7 +12,7 @@ exports.getMeta = async (req, res) => {
 
   try {
 
-    const data = await OeeService.getMeta(req.user.plant_id);
+    const data = await OeeService.getMeta(req.user.plant_id, req.user.company_id);
 
     return res.json({
       status: 'success',
@@ -40,7 +40,7 @@ exports.getReports = async (req, res) => {
 
   try {
 
-    const result = await OeeService.getReports(req.query, req.user.plant_id);
+    const result = await OeeService.getReports(req.query, req.user.plant_id, req.user.company_id);
 
     return res.json({
       status: 'success',
@@ -68,7 +68,7 @@ exports.exportCSV = async (req, res) => {
 
   try {
 
-    const result = await OeeService.exportCSV(req.query, req.user.plant_id);
+    const result = await OeeService.exportCSV(req.query, req.user.plant_id, req.user.company_id);
 
     // Set CSV headers
     res.setHeader('Content-Type', 'text/csv');

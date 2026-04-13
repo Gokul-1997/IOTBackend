@@ -4,6 +4,7 @@ exports.startJob = async (req) => {
 
   const { machine_id, component_id, job_start } = req.body;
   const plant_id = req.user.plant_id;
+  const company_id = req.user.company_id;
 
   if (!job_start) throw new Error("job_start (date & time) is required");
 
@@ -12,8 +13,8 @@ exports.startJob = async (req) => {
     SELECT j.id, j.part_name
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
-    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.plant_id = $2
-  `, [machine_id, plant_id]);
+    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.company_id = $2
+  `, [machine_id, company_id]);
 
   if (existing.length > 0) {
     throw new Error(`Machine already has an active job (${existing[0].part_name}). Stop it before starting a new one.`);
@@ -33,10 +34,11 @@ exports.startJob = async (req) => {
 
   await db.query(`
     INSERT INTO machine_current_job
-    (plant_id,machine_id,component_id,part_name,target_qty,started_at)
-    VALUES ($1,$2,$3,$4,$5,$6)
+    (plant_id,company_id,machine_id,component_id,part_name,target_qty,started_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
   `,[
     plant_id,
+    company_id,
     machine_id,
     component_id,
     component.part_name,
@@ -48,15 +50,15 @@ exports.startJob = async (req) => {
 
 
 
-exports.stopJob = async (machine_id, plant_id) => {
+exports.stopJob = async (machine_id, company_id) => {
 
   // Guard: no active job means nothing to stop
   const { rows: active } = await db.query(`
     SELECT j.id, j.part_name
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
-    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.plant_id = $2
-  `, [machine_id, plant_id]);
+    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.company_id = $2
+  `, [machine_id, company_id]);
 
   if (active.length === 0) {
     throw new Error('No active job found for this machine.');
@@ -77,22 +79,22 @@ exports.stopJob = async (machine_id, plant_id) => {
 
 
 
-exports.getAvailableMachines = async (plant_id) => {
+exports.getAvailableMachines = async (company_id) => {
   const { rows } = await db.query(`
     SELECT m.id, m.machine_serial_no
     FROM machines m
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND m.is_active = TRUE
       AND NOT EXISTS (
         SELECT 1 FROM machine_current_job j
         WHERE j.machine_id = m.id AND j.is_active = TRUE
       )
     ORDER BY m.machine_serial_no
-  `, [plant_id]);
+  `, [company_id]);
   return rows;
 };
 
-exports.getCurrentJobs = async (plant_id) => {
+exports.getCurrentJobs = async (company_id) => {
 
   const { rows } = await db.query(`
     SELECT
@@ -104,17 +106,17 @@ exports.getCurrentJobs = async (plant_id) => {
       j.started_at
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
       AND m.is_active = TRUE
       AND j.is_active = TRUE
     ORDER BY j.started_at DESC
-  `,[plant_id]);
+  `,[company_id]);
 
   return rows;
 
 };
 
-exports.getJobHistory = async (plant_id) => {
+exports.getJobHistory = async (company_id) => {
 
   const { rows } = await db.query(`
     SELECT
@@ -126,10 +128,10 @@ exports.getJobHistory = async (plant_id) => {
       j.is_active
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
-    WHERE m.plant_id = $1
+    WHERE m.company_id = $1
     ORDER BY j.started_at DESC
     LIMIT 200
-  `,[plant_id]);
+  `,[company_id]);
 
   return rows;
 

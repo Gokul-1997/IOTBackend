@@ -19,7 +19,7 @@ function formatDuration(totalSeconds) {
   return `${h}:${m}:${s}`;
 }
 
-exports.dashboard = async (plant_id) => {
+exports.dashboard = async (plant_id, company_id) => {
 
   const now = new Date();
   const currentTime = now.toTimeString().slice(0, 8); // local time (IST when TZ=Asia/Kolkata)
@@ -29,7 +29,7 @@ exports.dashboard = async (plant_id) => {
   const { rows: shiftRows } = await db.query(`
     SELECT id,shift_code,start_time,end_time,break_minutes
     FROM shifts
-    WHERE plant_id=$1
+    WHERE company_id=$1
       AND (
         (start_time<=end_time AND $2 BETWEEN start_time AND end_time)
         OR
@@ -37,7 +37,7 @@ exports.dashboard = async (plant_id) => {
       )
       AND is_active=TRUE
     LIMIT 1
-  `, [plant_id, currentTime]);
+  `, [company_id, currentTime]);
 
   const shift = shiftRows[0];
 
@@ -93,10 +93,10 @@ exports.dashboard = async (plant_id) => {
   const { rows: machines } = await db.query(`
     SELECT id,machine_serial_no,image_url
     FROM machines
-    WHERE plant_id=$1
+    WHERE company_id=$1
     AND is_active=TRUE
     ORDER BY id
-  `, [plant_id]);
+  `, [company_id]);
 
   const machineIds = machines.map(m => m.id);
 
@@ -466,17 +466,17 @@ exports.dashboard = async (plant_id) => {
   };
 };
 
-exports.machineDetail = async (plantId, machineId) => {
- 
+exports.machineDetail = async (plantId, machineId, companyId) => {
+
   try {
- 
+
     /* ================= MACHINE ================= */
- 
+
     const { rows: machineRows } = await db.query(`
       SELECT id, machine_serial_no, image_url
       FROM machines
-      WHERE id = $1 AND plant_id = $2
-    `, [machineId, plantId]);
+      WHERE id = $1 AND company_id = $2
+    `, [machineId, companyId]);
  
     if (!machineRows.length) return null;
  
@@ -487,7 +487,7 @@ exports.machineDetail = async (plantId, machineId) => {
     const { rows: shiftRows } = await db.query(`
       SELECT id, shift_code, start_time, end_time
       FROM shifts
-      WHERE plant_id = $1
+      WHERE company_id = $1
       AND is_active = true
       AND (
         (start_time <= end_time AND
@@ -502,8 +502,8 @@ exports.machineDetail = async (plantId, machineId) => {
          ))
       )
       LIMIT 1
-    `, [plantId]);
- 
+    `, [companyId]);
+
     const shift = shiftRows[0] || null;
  
     /* ── Compute shiftStart / shiftEnd for date-scoped queries ── */

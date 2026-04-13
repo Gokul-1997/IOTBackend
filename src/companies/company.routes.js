@@ -13,5 +13,6 @@ router.get('/:id/plan-features',      auth,          ctrl.getPlanFeatures);
 router.get('/:id/permissions',        auth,          ctrl.getCompanyPermissions);
 router.put('/:id/permissions',        auth, isSNT,  ctrl.assignCompanyPermissions);
 router.delete('/:id',                 auth, isSNT,  ctrl.remove);
+router.delete('/:id/permanent',       auth, isSNT,  ctrl.permanentDelete);
 
 module.exports = router;

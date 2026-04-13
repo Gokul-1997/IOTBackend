@@ -6,17 +6,17 @@ const excel = require('./excel.util');
 ───────────────────────────────────────────────────────── */
 
 exports.getMachines = async (req, res, next) => {
-  try { res.json({ status: 'success', data: await svc.getMachines(req.user.plant_id) }); }
+  try { res.json({ status: 'success', data: await svc.getMachines(req.user.company_id) }); }
   catch (err) { next(err); }
 };
 
 exports.getShifts = async (req, res, next) => {
-  try { res.json({ status: 'success', data: await svc.getShifts(req.user.plant_id) }); }
+  try { res.json({ status: 'success', data: await svc.getShifts(req.user.company_id) }); }
   catch (err) { next(err); }
 };
 
 exports.getOperators = async (req, res, next) => {
-  try { res.json({ status: 'success', data: await svc.getOperators(req.user.plant_id) }); }
+  try { res.json({ status: 'success', data: await svc.getOperators(req.user.company_id) }); }
   catch (err) { next(err); }
 };
 
@@ -30,7 +30,7 @@ exports.productionData = async (req, res, next) => {
     res.json({
       status: 'success',
       data: await svc.productionData(
-        req.user.plant_id, date_from, date_to || date_from,
+        req.user.company_id, date_from, date_to || date_from,
         machine_id || null, shift_id || null, operator_id || null
       )
     });
@@ -43,7 +43,7 @@ exports.oeeHourlyData = async (req, res, next) => {
     res.json({
       status: 'success',
       data: await svc.oeeHourlyData(
-        req.user.plant_id, date_from, date_to || date_from,
+        req.user.company_id, date_from, date_to || date_from,
         machine_id || null, shift_id || null, operator_id || null
       )
     });
@@ -56,7 +56,7 @@ exports.shiftOeeData = async (req, res, next) => {
     res.json({
       status: 'success',
       data: await svc.shiftOeeData(
-        req.user.plant_id, date_from, date_to || date_from,
+        req.user.company_id, date_from, date_to || date_from,
         machine_id || null, shift_id || null, operator_id || null
       )
     });
@@ -69,7 +69,7 @@ exports.shiftOeeData = async (req, res, next) => {
 
 exports.hourlyOeeExcel = async (req, res, next) => {
   try {
-    const data = await svc.hourlyOee(req.user.plant_id, req.query.date);
+    const data = await svc.hourlyOee(req.user.company_id, req.query.date);
     const file = excel.createExcel('Hourly OEE', data);
     res.setHeader('Content-Disposition', `attachment; filename=hourly_oee_${req.query.date}.xlsx`);
     res.send(file);
@@ -78,7 +78,7 @@ exports.hourlyOeeExcel = async (req, res, next) => {
 
 exports.shiftOeeExcel = async (req, res, next) => {
   try {
-    const data = await svc.shiftOee(req.user.plant_id, req.query.date);
+    const data = await svc.shiftOee(req.user.company_id, req.query.date);
     const file = excel.createExcel('Shift OEE', data);
     res.setHeader('Content-Disposition', `attachment; filename=shift_oee_${req.query.date}.xlsx`);
     res.send(file);
@@ -87,7 +87,7 @@ exports.shiftOeeExcel = async (req, res, next) => {
 
 exports.productionExcel = async (req, res, next) => {
   try {
-    const data = await svc.production(req.user.plant_id, req.query.date);
+    const data = await svc.production(req.user.company_id, req.query.date);
     const file = excel.createExcel('Production', data);
     res.setHeader('Content-Disposition', `attachment; filename=production_${req.query.date}.xlsx`);
     res.send(file);
