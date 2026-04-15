@@ -60,7 +60,7 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
     const hash = await bcrypt.hash(admin_password, 10);
     const userRes = await client.query(
       `INSERT INTO users (username, email, password_hash, plant_id, company_id, user_type, is_active)
-       VALUES ($1, $2, $3, 1, $4, 'company_user', true)
+       VALUES ($1, $2, $3, NULL, $4, 'company_user', true)
        RETURNING id, username, email`,
       [admin_username, admin_email, hash, company.id]
     );
@@ -127,8 +127,11 @@ exports.list = async () => {
   const { rows } = await db.query(
     `SELECT c.id, c.company_code, c.company_name, c.contact_email,
             c.contact_phone, c.is_active, c.created_at,
-            p.plan_name, p.plan_code, p.tier,
-            cp.max_users, cp.max_plants, cp.max_machines, cp.expires_at
+            p.id AS plan_id, p.plan_name, p.plan_code, p.tier,
+            COALESCE(cp.max_users,    p.max_users)    AS max_users,
+            COALESCE(cp.max_plants,   p.max_plants)   AS max_plants,
+            COALESCE(cp.max_machines, p.max_machines) AS max_machines,
+            cp.expires_at
      FROM companies c
      LEFT JOIN company_plans cp ON cp.company_id = c.id AND cp.is_active = true
      LEFT JOIN plans p ON p.id = cp.plan_id
@@ -159,13 +162,15 @@ exports.getById = async (id) => {
 
   const company = rows[0];
 
-  // Count current users & plants
-  const [usersRes, plantsRes] = await Promise.all([
-    db.query(`SELECT COUNT(*) FROM users WHERE company_id = $1 AND is_active = true`, [id]),
-    db.query(`SELECT COUNT(*) FROM plants WHERE company_id = $1 AND is_active = true`, [id])
+  // Count current users, plants & machines
+  const [usersRes, plantsRes, machinesRes] = await Promise.all([
+    db.query(`SELECT COUNT(*) FROM users    WHERE company_id = $1 AND is_active = true`, [id]),
+    db.query(`SELECT COUNT(*) FROM plants   WHERE company_id = $1 AND is_active = true`, [id]),
+    db.query(`SELECT COUNT(*) FROM machines WHERE company_id = $1 AND is_active = true`, [id])
   ]);
-  company.current_users  = parseInt(usersRes.rows[0].count, 10);
-  company.current_plants = parseInt(plantsRes.rows[0].count, 10);
+  company.current_users    = parseInt(usersRes.rows[0].count,    10);
+  company.current_plants   = parseInt(plantsRes.rows[0].count,   10);
+  company.current_machines = parseInt(machinesRes.rows[0].count, 10);
 
   return company;
 };

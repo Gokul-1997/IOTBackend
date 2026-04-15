@@ -16,7 +16,10 @@ exports.getShifts = async (req, res, next) => {
 };
 
 exports.getOperators = async (req, res, next) => {
-  try { res.json({ status: 'success', data: await svc.getOperators(req.user.company_id) }); }
+  try {
+    const machine_id = req.query.machine_id || null;
+    res.json({ status: 'success', data: await svc.getOperators(req.user.company_id, machine_id) });
+  }
   catch (err) { next(err); }
 };
 

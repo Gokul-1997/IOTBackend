@@ -8,13 +8,35 @@ exports.create = async (data, reqUser) => {
 
   // SNT_SUPER must specify company_id; company admin uses own company
   let company_id = null;
-  let plant_id = reqUser.plant_id || 1;
+  let plant_id   = null;
 
   if (reqUser.is_snt_super) {
     if (!data.company_id) throw { status: 400, message: 'Company is required when creating a user' };
     company_id = data.company_id;
+    // SNT_SUPER can optionally assign a plant
+    plant_id   = data.plant_id || null;
   } else {
     company_id = reqUser.company_id;
+
+    // COMPANY_ADMIN (plant_id = NULL) can assign user to any plant in their company.
+    // PLANT_ADMIN can only assign to their own plant.
+    if (data.plant_id) {
+      if (reqUser.plant_id && Number(reqUser.plant_id) !== Number(data.plant_id)) {
+        throw { status: 403, message: 'You can only assign users to your own plant' };
+      }
+      // Validate the plant belongs to this company
+      const plantCheck = await db.query(
+        `SELECT id FROM plants WHERE id = $1 AND company_id = $2 AND is_active = true`,
+        [data.plant_id, company_id]
+      );
+      if (!plantCheck.rowCount) {
+        throw { status: 400, message: 'Invalid plant — plant does not exist or does not belong to your company' };
+      }
+      plant_id = data.plant_id;
+    } else {
+      // No plant specified — inherit from creator (NULL for company admin, their plant for plant admin)
+      plant_id = reqUser.plant_id || null;
+    }
   }
 
   const hash = await pwd.hash(data.password);
@@ -156,6 +178,27 @@ exports.update = async (userId, reqUser, data) => {
     if (data.is_active !== undefined) { updates.push(`is_active = $${paramIndex++}`); params.push(data.is_active); }
     if (data.company_id !== undefined && reqUser.is_snt_super) {
       updates.push(`company_id = $${paramIndex++}`); params.push(data.company_id);
+    }
+    // COMPANY_ADMIN can reassign a user to a different plant within their company
+    if (data.plant_id !== undefined && !reqUser.is_snt_super) {
+      if (data.plant_id === null || data.plant_id === '') {
+        // Allow setting plant_id to NULL (company-wide scope)
+        updates.push(`plant_id = $${paramIndex++}`); params.push(null);
+      } else {
+        // Validate plant belongs to same company
+        const plantCheck = await client.query(
+          `SELECT id FROM plants WHERE id = $1 AND company_id = $2 AND is_active = true`,
+          [data.plant_id, reqUser.company_id]
+        );
+        if (!plantCheck.rowCount) {
+          await client.query('ROLLBACK');
+          throw { status: 400, message: 'Invalid plant — plant does not exist or does not belong to your company' };
+        }
+        updates.push(`plant_id = $${paramIndex++}`); params.push(data.plant_id);
+      }
+    }
+    if (data.plant_id !== undefined && reqUser.is_snt_super) {
+      updates.push(`plant_id = $${paramIndex++}`); params.push(data.plant_id || null);
     }
 
     if (!updates.length) {

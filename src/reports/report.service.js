@@ -52,15 +52,21 @@ exports.getShifts = async (company_id) => {
   return rows;
 };
 
-exports.getOperators = async (company_id) => {
+exports.getOperators = async (company_id, machine_id) => {
+  const params = [company_id];
+  const machineFilter = machine_id
+    ? `AND oma.machine_id = $${params.push(machine_id)}`
+    : '';
+
   const { rows } = await db.query(
     `SELECT DISTINCT o.id, o.operator_name AS name
      FROM operators o
      JOIN operator_machine_assignments oma ON oma.operator_id = o.id AND oma.is_active = TRUE
      JOIN machines m ON m.id = oma.machine_id AND m.company_id = $1 AND m.is_active = TRUE
      WHERE o.is_active = TRUE
+     ${machineFilter}
      ORDER BY o.operator_name`,
-    [company_id]
+    params
   );
   return rows;
 };
