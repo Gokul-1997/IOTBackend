@@ -1,4 +1,6 @@
-const svc = require('./company.service');
+const svc      = require('./company.service');
+const plantSvc = require('../plants/plant.service');
+const checkQuota = require('../middleware/quota.middleware');
 
 exports.create = async (req, res, next) => {
   try {
@@ -60,5 +62,41 @@ exports.permanentDelete = async (req, res, next) => {
   try {
     await svc.permanentDelete(req.params.id);
     res.json({ message: 'Company permanently deleted' });
+  } catch (e) { next(e); }
+};
+
+/* ─────────────────────────────────────────────────────────
+   PLANT MANAGEMENT under a company (SNT_SUPER only)
+   GET    /companies/:id/plants
+   POST   /companies/:id/plants
+   PUT    /companies/:id/plants/:plant_id
+   PATCH  /companies/:id/plants/:plant_id/status
+───────────────────────────────────────────────────────── */
+
+exports.getCompanyPlants = async (req, res, next) => {
+  try {
+    const result = await plantSvc.getPlants(req.params.id, req.query);
+    res.json(result);
+  } catch (e) { next(e); }
+};
+
+exports.createCompanyPlant = async (req, res, next) => {
+  try {
+    const plant = await plantSvc.createPlant(req.body, req.params.id);
+    res.status(201).json({ message: 'Plant created', plant });
+  } catch (e) { next(e); }
+};
+
+exports.updateCompanyPlant = async (req, res, next) => {
+  try {
+    const plant = await plantSvc.updatePlant(req.params.plant_id, req.body, req.params.id);
+    res.json({ message: 'Plant updated', plant });
+  } catch (e) { next(e); }
+};
+
+exports.toggleCompanyPlantStatus = async (req, res, next) => {
+  try {
+    await plantSvc.togglePlantStatus(req.params.plant_id, req.body.is_active, req.params.id);
+    res.json({ message: 'Status updated' });
   } catch (e) { next(e); }
 };

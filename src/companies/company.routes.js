@@ -1,7 +1,9 @@
-const router = require('express').Router();
-const auth   = require('../middleware/auth.middleware');
-const isSNT  = require('../middleware/snt.middleware');
-const ctrl   = require('./company.controller');
+const router     = require('express').Router();
+const auth       = require('../middleware/auth.middleware');
+const isSNT      = require('../middleware/snt.middleware');
+const ctrl       = require('./company.controller');
+const checkQuota = require('../middleware/quota.middleware');
+const validate   = require('../middleware/validate.middleware');
 
 // All company management is SNT_SUPER only (except GET own company)
 router.post('/',                      auth, isSNT,  ctrl.create);
@@ -14,5 +16,30 @@ router.get('/:id/permissions',        auth,          ctrl.getCompanyPermissions)
 router.put('/:id/permissions',        auth, isSNT,  ctrl.assignCompanyPermissions);
 router.delete('/:id',                 auth, isSNT,  ctrl.remove);
 router.delete('/:id/permanent',       auth, isSNT,  ctrl.permanentDelete);
+
+/* ── Plant management under a company (SNT_SUPER only) ── */
+
+// Inject target company_id so checkQuota works correctly for SNT_SUPER
+const injectCompanyId = (req, res, next) => {
+  req.user.company_id = req.params.id;
+  next();
+};
+
+router.get('/:id/plants',
+  auth, isSNT, ctrl.getCompanyPlants);
+
+router.post('/:id/plants',
+  auth, isSNT, injectCompanyId, checkQuota('plants'),
+  validate({
+    plant_code: { required: true, maxLength: 20,  label: 'Plant code' },
+    plant_name: { required: true, maxLength: 100, label: 'Plant name' }
+  }),
+  ctrl.createCompanyPlant);
+
+router.put('/:id/plants/:plant_id',
+  auth, isSNT, ctrl.updateCompanyPlant);
+
+router.patch('/:id/plants/:plant_id/status',
+  auth, isSNT, ctrl.toggleCompanyPlantStatus);
 
 module.exports = router;
