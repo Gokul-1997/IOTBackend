@@ -13,7 +13,7 @@ router.post('/', auth, validate({
   machine_id:   { required: true, label: 'Machine' },
   part_name:    { required: true, maxLength: 100, label: 'Part name' },
   part_number:  { required: true, maxLength: 50,  label: 'Part number' },
-  cycle_time:   { required: true, type: 'number', min: 0, label: 'Cycle time' },
+  cycle_time:   { required: true, type: 'string', time_hms: true, label: 'Cycle time' },
   target:       { required: true, type: 'number', min: 1, label: 'Target' }
 }), ctrl.create);
 router.get('/', auth, ctrl.list);

@@ -1,5 +1,6 @@
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
+const EMAIL_REGEX    = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const TIME_REGEX     = /^([01]\d|2[0-3]):[0-5]\d$/;
+const TIME_HMS_REGEX = /^([0-1]\d|2[0-3]):([0-5]\d):([0-5]\d)$/;
 
 /**
  * Body validation middleware factory.
@@ -79,6 +80,9 @@ const validate = (schema) => (req, res, next) => {
 
       if (rules.time && !TIME_REGEX.test(trimmed))
         errors.push(`${label} must be in HH:MM format (e.g. 08:00)`);
+
+      if (rules.time_hms && !TIME_HMS_REGEX.test(trimmed))
+        errors.push(`${label} must be in HH:MM:SS format (e.g. 00:01:30)`);
     }
   }
 
