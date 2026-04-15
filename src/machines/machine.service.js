@@ -24,6 +24,34 @@ exports.createMachine = async (req) => {
     throw new Error("Machine serial number is required");
   }
 
+  // ── Plan enforcement: max_machines per company ──
+  const limitRes = await pool.query(
+    `SELECT COALESCE(cp.max_machines, p.max_machines) AS max_machines
+     FROM company_plans cp
+     LEFT JOIN plans p ON p.id = cp.plan_id
+     WHERE cp.company_id = $1 AND cp.is_active = true
+     LIMIT 1`,
+    [req.user.company_id]
+  );
+
+  const maxMachines = limitRes.rows[0]?.max_machines ?? null;
+
+  if (maxMachines != null) {
+    const countRes = await pool.query(
+      `SELECT COUNT(*)::int AS n
+       FROM machines
+       WHERE company_id = $1 AND is_active = true`,
+      [req.user.company_id]
+    );
+    if (countRes.rows[0].n >= maxMachines) {
+      const err = new Error(
+        `Machine limit reached for this plan (${countRes.rows[0].n}/${maxMachines}). Upgrade plan to add more.`
+      );
+      err.status = 402;
+      throw err;
+    }
+  }
+
   const apiKey = crypto.randomBytes(16).toString("hex");
 
   const result = await pool.query(
