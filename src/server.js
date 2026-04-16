@@ -57,14 +57,14 @@ io.use((socket, next) => {
    🔄 Socket Connection
 ================================ */
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+  // intentionally silent — fires on every browser tab open; too noisy for production
 
   socket.on('joinPlant', (plantId) => {
     socket.join(`plant:${plantId}`);
   });
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    // intentionally silent — fires on every browser tab close; too noisy for production
   });
 });
 
@@ -93,9 +93,9 @@ subscriber.subscribe('machine_updates', (err) => {
 // Listen for messages
 subscriber.on('message', (channel, message) => {
   if (channel === 'machine_updates') {
-    console.log('🔥 REDIS RECEIVED:', message);
+    // NOTE: do NOT log message here — fires on every machine packet (hot path).
+    // With N machines × 1 msg/sec × PM2 cluster workers this fills disk rapidly.
 
-    // FIX: added try/catch — malformed Redis message would crash the message handler
     let data;
     try {
       data = JSON.parse(message);
@@ -103,8 +103,6 @@ subscriber.on('message', (channel, message) => {
       console.error('❌ Invalid JSON from Redis:', parseErr.message);
       return;
     }
-
-    console.log('🔥 EMITTING TO ROOM:', `plant:${data.plant_id}`);
 
     io.to(`plant:${data.plant_id}`).emit('machineUpdate', data);
   }

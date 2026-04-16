@@ -19,7 +19,15 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+// In production: skip all 2xx/3xx requests — only log errors (4xx/5xx).
+// Avoids logging the 30s dashboard API polls from every user, which floods logs.
+if (process.env.NODE_ENV === 'production') {
+  app.use(morgan('short', {
+    skip: (req, res) => res.statusCode < 400
+  }));
+} else {
+  app.use(morgan('dev'));
+}
 
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')

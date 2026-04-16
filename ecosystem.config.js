@@ -2,9 +2,15 @@ module.exports = {
   apps: [
     {
       name: "iot-app",
-      script: "src/server.js",        
-      instances: "max",
-      exec_mode: "cluster",
+      script: "src/server.js",
+
+      // WARNING: Do NOT use instances > 1 with the current Redis pub/sub design.
+      // Each worker creates its own Redis subscriber, so every machine MQTT packet
+      // is received and processed by ALL workers simultaneously — multiplying log
+      // volume, CPU usage, and Socket.IO emits by the instance count.
+      // Use a single instance until a Redis adapter (e.g. socket.io-redis) is added.
+      instances: 1,
+      exec_mode: "fork",
 
       // Better restarts / stability
       max_restarts: 10,
@@ -15,9 +21,15 @@ module.exports = {
       kill_timeout: 10000,
       listen_timeout: 10000,
 
-      // Logs
+      // Logs — rotate at 50 MB, keep last 7 files
+      // Run once after deploy: pm2 install pm2-logrotate
+      //   pm2 set pm2-logrotate:max_size 50M
+      //   pm2 set pm2-logrotate:retain 7
+      //   pm2 set pm2-logrotate:compress true
       merge_logs: true,
       time: true,
+      out_file: './logs/out.log',
+      error_file: './logs/error.log',
 
       env_production: {
         NODE_ENV: "production",
