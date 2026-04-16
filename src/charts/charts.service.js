@@ -154,6 +154,21 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxP
       WHERE prev_parts IS NOT NULL
         AND parts_count > prev_parts
         AND parts_count > 0
+    ),
+    -- Extend the last part's window to shift end (or now for live shifts).
+    -- Without this, any run/idle time AFTER the final part completion is
+    -- silently dropped — causing the sum of all bars to be less than the
+    -- shift total shown on the dashboard.
+    part_windows AS (
+      SELECT
+        CASE
+          WHEN ROW_NUMBER() OVER (ORDER BY completed_at DESC) = 1
+          THEN to_timestamp($3)   -- last part: extend window to effectiveEnd
+          ELSE completed_at
+        END AS completed_at,
+        started_at,
+        increment
+      FROM part_events
     )
     SELECT
       pe.completed_at,
@@ -167,7 +182,7 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxP
         CASE WHEN UPPER(o.machine_status) NOT IN ('RUN','RUNNING','CUTTING')
              THEN COALESCE(o.interval_sec, 0) ELSE 0 END
       ))::int AS idle_seconds
-    FROM part_events pe
+    FROM part_windows pe
     JOIN ordered o
       ON o.received_at >  pe.started_at
      AND o.received_at <= pe.completed_at
