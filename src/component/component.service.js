@@ -8,10 +8,9 @@ exports.create = async (data, plant_id, company_id) => {
     (plant_id, company_id, machine_id, part_name, part_number,
      operation_number, cycle_time, target,
      multiplication_factor)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8)
     RETURNING *
   `, [
-    plant_id,
     company_id,
     data.machine_id,
     data.part_name,

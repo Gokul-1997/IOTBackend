@@ -322,7 +322,7 @@ exports.dashboard = async (plant_id, company_id) => {
       ? Math.floor(new Date(live.received_at).getTime() / 1000)
       : 0;
 
-    const OFFLINE_THRESHOLD = 10;
+    const OFFLINE_THRESHOLD = 60; // 60s — tolerate brief network gaps in industrial environments
     const freshDiff = receivedAtSec ? (nowSec - receivedAtSec) : null;
 
     let status = 'OFFLINE';
@@ -777,7 +777,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const nowSecRT       = Math.floor(Date.now() / 1000);
     const freshDiffRT    = receivedAtRT ? (nowSecRT - receivedAtRT) : null;
 
-    const OFFLINE_THRESHOLD_RT = 10; // seconds — same as dashboard
+    const OFFLINE_THRESHOLD_RT = 60; // seconds — same as dashboard
 
     const rawStatus  = (live.machine_status || '').toUpperCase();
     const isOnline   = receivedAtRT && freshDiffRT !== null && freshDiffRT <= OFFLINE_THRESHOLD_RT;

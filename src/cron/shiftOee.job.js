@@ -14,29 +14,28 @@ module.exports = async () => {
   const now = new Date();
 
   try {
-    const { rows: plants } = await db.query(
-      `SELECT id FROM plants WHERE is_active = TRUE`
+    // Iterate companies (shifts are company-scoped, not plant-scoped)
+    const { rows: companies } = await db.query(
+      `SELECT id FROM companies WHERE is_active = TRUE`
     );
 
-    for (const plant of plants) {
+    for (const company of companies) {
       // Find shifts that ended within the last 10 minutes
       const { rows: endedShifts } = await db.query(
         `SELECT s.*
          FROM shifts s
-         WHERE s.plant_id = $1
+         WHERE s.company_id = $1
            AND s.is_active = TRUE
            AND (
-             -- Normal shift: end_time crossed in last 10 min
              (s.start_time < s.end_time
                AND (NOW() AT TIME ZONE 'Asia/Kolkata')::time
                  BETWEEN s.end_time AND (s.end_time + INTERVAL '10 minutes')::time)
              OR
-             -- Overnight shift: end_time crossed in last 10 min (early morning)
              (s.start_time > s.end_time
                AND (NOW() AT TIME ZONE 'Asia/Kolkata')::time
                  BETWEEN s.end_time AND (s.end_time + INTERVAL '10 minutes')::time)
            )`,
-        [plant.id]
+        [company.id]
       );
 
       for (const shift of endedShifts) {
@@ -61,10 +60,10 @@ module.exports = async () => {
         const shiftDurationMinutes = getShiftDurationMinutes(shift);
         const plannedSeconds = shiftDurationMinutes * 60;
 
-        // Get all machines for this plant
+        // Get all machines for this company
         const { rows: machines } = await db.query(
-          `SELECT id FROM machines WHERE plant_id = $1 AND is_active = TRUE`,
-          [plant.id]
+          `SELECT id FROM machines WHERE company_id = $1 AND is_active = TRUE`,
+          [company.id]
         );
 
         for (const machine of machines) {
@@ -146,7 +145,7 @@ module.exports = async () => {
           );
         }
 
-        console.log(`Shift OEE rollup done: plant=${plant.id} shift=${shift.shift_code} date=${shiftDate}`);
+        console.log(`Shift OEE rollup done: company=${company.id} shift=${shift.shift_code} date=${shiftDate}`);
       }
     }
   } catch (err) {

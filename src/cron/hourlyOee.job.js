@@ -29,19 +29,19 @@ module.exports = async () => {
   hourStart.setUTCHours(hourEnd.getUTCHours() - 1);
 
   try {
-    const { rows: plants } = await db.query(
-      `SELECT id FROM plants WHERE is_active = TRUE`
+    // Iterate companies (shifts are company-scoped, not plant-scoped)
+    const { rows: companies } = await db.query(
+      `SELECT id FROM companies WHERE is_active = TRUE`
     );
 
-    for (const plant of plants) {
-      const shift = await getCurrentShift(plant.id, hourStart);
+    for (const company of companies) {
+      const shift = await getCurrentShift(company.id, hourStart);
       if (!shift) continue;
 
       // FIX: hourly availability must use 3600s (1 hour), not full shift duration.
-      // Full shift duration (e.g. 28800s for 8h) caused max availability of 12.5% per hour.
       const plannedSeconds = 3600;
 
-      // Get production_hourly rows for this plant's machines in this hour
+      // Get production_hourly rows for this company's machines in this hour
       const { rows: prodRows } = await db.query(
         `SELECT
            ph.machine_id,
@@ -50,13 +50,13 @@ module.exports = async () => {
            EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0'))::int AS cycle_time_seconds,
            COALESCE(c.multiplication_factor, 1) AS multiplication_factor
          FROM production_hourly ph
-         JOIN machines m ON m.id = ph.machine_id AND m.plant_id = $1
+         JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
          LEFT JOIN machine_current_job mcj
            ON mcj.machine_id = ph.machine_id AND mcj.is_active = TRUE
          LEFT JOIN components c ON c.id = mcj.component_id
          WHERE ph.shift_id   = $2
            AND ph.hour_start = $3`,
-        [plant.id, shift.id, hourStart]
+        [company.id, shift.id, hourStart]
       );
 
       for (const row of prodRows) {

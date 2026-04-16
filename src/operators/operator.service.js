@@ -12,26 +12,26 @@ exports.create = async (data, plant_id, company_id) => {
     const { rows } = await client.query(
       `INSERT INTO operators
        (plant_id, company_id, operator_code, operator_name, skill_level)
-       VALUES ($1,$2,$3,$4,$5)
+       VALUES (NULL,$1,$2,$3,$4)
        RETURNING id`,
-      [plant_id, company_id, data.operator_code, data.operator_name, data.skill_level]
+      [company_id, data.operator_code, data.operator_name, data.skill_level]
     );
 
     const operatorId = rows[0].id;
 
     await client.query(
       `INSERT INTO operator_shift_assignments
-       (plant_id, operator_id, shift_id, effective_from)
+       (company_id, operator_id, shift_id, effective_from)
        VALUES ($1,$2,$3,CURRENT_DATE)`,
-      [plant_id, operatorId, data.shift_id]
+      [company_id, operatorId, data.shift_id]
     );
 
     for (const m of data.machine_ids || []) {
       await client.query(
         `INSERT INTO operator_machine_assignments
-         (plant_id, operator_id, machine_id, assigned_from)
+         (company_id, operator_id, machine_id, assigned_from)
          VALUES ($1,$2,$3,CURRENT_DATE)`,
-        [plant_id, operatorId, m]
+        [company_id, operatorId, m]
       );
     }
 
@@ -183,10 +183,10 @@ exports.update = async (id, data, plant_id, company_id) => {
       await client.query(
         `
         INSERT INTO operator_shift_assignments
-        (plant_id, operator_id, shift_id, effective_from)
+        (company_id, operator_id, shift_id, effective_from)
         VALUES ($1,$2,$3,CURRENT_DATE)
         `,
-        [plant_id, id, data.shift_id]
+        [company_id, id, data.shift_id]
       );
     }
 
@@ -205,10 +205,10 @@ exports.update = async (id, data, plant_id, company_id) => {
         await client.query(
           `
           INSERT INTO operator_machine_assignments
-          (plant_id, operator_id, machine_id, assigned_from)
+          (company_id, operator_id, machine_id, assigned_from)
           VALUES ($1,$2,$3,CURRENT_DATE)
           `,
-          [plant_id, id, m]
+          [company_id, id, m]
         );
       }
     }

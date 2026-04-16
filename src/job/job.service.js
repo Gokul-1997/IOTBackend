@@ -3,7 +3,6 @@ const db = require('../db');
 exports.startJob = async (req) => {
 
   const { machine_id, component_id, job_start } = req.body;
-  const plant_id = req.user.plant_id;
   const company_id = req.user.company_id;
 
   if (!job_start) throw new Error("job_start (date & time) is required");
@@ -35,9 +34,8 @@ exports.startJob = async (req) => {
   await db.query(`
     INSERT INTO machine_current_job
     (plant_id,company_id,machine_id,component_id,part_name,target_qty,started_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    VALUES (NULL,$1,$2,$3,$4,$5,$6)
   `,[
-    plant_id,
     company_id,
     machine_id,
     component_id,

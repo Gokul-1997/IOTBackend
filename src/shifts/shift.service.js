@@ -121,10 +121,9 @@ exports.createShift = async (req) => {
   const result = await pool.query(`
     INSERT INTO shifts
     (plant_id, company_id, shift_code, shift_name, start_time, end_time, break_minutes)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    VALUES (NULL,$1,$2,$3,$4,$5,$6)
     RETURNING id
   `, [
-    req.user.plant_id,
     req.user.company_id,
     shift_code,
     shift_name || null,
@@ -137,10 +136,10 @@ exports.createShift = async (req) => {
 
   await pool.query(`
     INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
-    SELECT $1, id, $2
+    SELECT NULL, id, $1
     FROM machines
-    WHERE company_id = $3
-  `, [req.user.plant_id, newShiftId, req.user.company_id]);
+    WHERE company_id = $2
+  `, [newShiftId, req.user.company_id]);
 
   return { message: 'Shift created successfully' };
 };

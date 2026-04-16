@@ -251,8 +251,8 @@ exports.exportCSV = async (query, plantId, companyId) => {
     const params = [];
     let paramIndex = 1;
 
-    where.push(`m.plant_id = $${paramIndex++}`);
-    params.push(plantId);
+    where.push(`m.company_id = $${paramIndex++}`);
+    params.push(companyId || plantId);
 
     if (line_id && line_id !== 'null') {
       where.push(`l.id = $${paramIndex++}`);

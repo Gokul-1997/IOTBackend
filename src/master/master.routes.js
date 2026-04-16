@@ -22,7 +22,7 @@ router.post('/test-multi', auth, async (req, res) => {
       rpm: m.rpm || 1000,
       feed_rate: m.feed_rate || 200,
       parts_count: m.parts_count || 5,
-      received_at: Date.now()
+      received_at: Math.floor(Date.now() / 1000)  // epoch seconds, consistent with real MQTT telemetry
     };
 
     await redis.multi()

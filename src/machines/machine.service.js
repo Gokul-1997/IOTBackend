@@ -81,7 +81,7 @@ exports.createMachine = async (req) => {
     RETURNING id, machine_serial_no, api_key
     `,
     [
-      req.user.plant_id,
+      null,                  // plant_id — nullable; COMPANY_ADMIN has no plant scope
       req.user.company_id,
       line_id || null,
       machine_serial_no,
@@ -107,11 +107,11 @@ exports.createMachine = async (req) => {
   await pool.query(
     `
     INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
-    SELECT $1, $2, id
+    SELECT NULL, $1, id
     FROM shifts
-    WHERE company_id = $3
+    WHERE company_id = $2
     `,
-    [req.user.plant_id, newMachineId, req.user.company_id]
+    [newMachineId, req.user.company_id]
   );
 
   return result.rows[0];

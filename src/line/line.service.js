@@ -3,16 +3,15 @@ const pool = require('../db');
 /* CREATE LINE */
 exports.createLine = async (req) => {
   const { name, is_active } = req.body;
-  const plant_id = req.user.plant_id;
   const company_id = req.user.company_id;
 
   if (!name) throw new Error('Line name required');
 
   const result = await pool.query(
     `INSERT INTO line (plant_id, company_id, name, is_active)
-     VALUES ($1, $2, $3, $4)
+     VALUES (NULL, $1, $2, $3)
      RETURNING *`,
-    [plant_id, company_id, name, is_active !== false]
+    [company_id, name, is_active !== false]
   );
 
   return result.rows[0];
