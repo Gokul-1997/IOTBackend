@@ -10,7 +10,14 @@ const db = require('../db');
  * Now computes OEE from raw totals in production_hourly + quality_entries.
  */
 
+let running = false;
+
 module.exports = async () => {
+  if (running) {
+    console.warn('[shiftOee] previous run still in progress — skipping this tick');
+    return;
+  }
+  running = true;
   const now = new Date();
 
   try {
@@ -66,82 +73,92 @@ module.exports = async () => {
           [company.id]
         );
 
-        for (const machine of machines) {
-          // FIX: compute OEE from raw totals, not AVG of hourly OEE percentages
-          // Get production totals for this machine + shift + date from production_hourly
-          const { rows: prodRows } = await db.query(
-            `SELECT
-               SUM(ph.run_seconds)::int  AS total_run_seconds,
-               SUM(ph.produced_qty)::int AS total_produced_qty,
-               EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0 seconds'))::int AS cycle_time_seconds
-             FROM production_hourly ph
-             LEFT JOIN machine_current_job mcj
-               ON mcj.machine_id = ph.machine_id AND mcj.is_active = TRUE
-             LEFT JOIN components c ON c.id = mcj.component_id
-             WHERE ph.machine_id = $1
-               AND ph.shift_id   = $2
-               AND ph.hour_start::date = $3::date
-             GROUP BY c.cycle_time`,
-            [machine.id, shift.id, shiftDate]
-          );
+        const machineIds = machines.map(m => m.id);
 
-          const prod = prodRows[0];
-          if (!prod || prod.total_run_seconds === null) continue;
+        // Batch query: production totals for all machines in one round-trip
+        const { rows: allProdRows } = await db.query(
+          `SELECT
+             ph.machine_id,
+             SUM(ph.run_seconds)::int  AS total_run_seconds,
+             SUM(ph.produced_qty)::int AS total_produced_qty,
+             EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0 seconds'))::int AS cycle_time_seconds
+           FROM production_hourly ph
+           LEFT JOIN machine_current_job mcj
+             ON mcj.machine_id = ph.machine_id AND mcj.is_active = TRUE
+           LEFT JOIN components c ON c.id = mcj.component_id
+           WHERE ph.machine_id = ANY($1)
+             AND ph.shift_id   = $2
+             AND ph.hour_start::date = $3::date
+           GROUP BY ph.machine_id, c.cycle_time`,
+          [machineIds, shift.id, shiftDate]
+        );
+
+        // Batch query: quality totals for all machines in one round-trip
+        const { rows: allQRows } = await db.query(
+          `SELECT
+             machine_id,
+             COALESCE(SUM(reject_qty), 0) AS reject,
+             COALESCE(SUM(rework_qty), 0) AS rework
+           FROM quality_entries
+           WHERE machine_id = ANY($1)
+             AND shift_id   = $2
+             AND created_at::date = $3::date
+           GROUP BY machine_id`,
+          [machineIds, shift.id, shiftDate]
+        );
+
+        const qualityMap = {};
+        for (const q of allQRows) qualityMap[q.machine_id] = q;
+
+        // Build upsert values for all machines in one query
+        const upsertValues = [];
+        const upsertParams = [];
+        let   paramIdx     = 1;
+
+        for (const prod of allProdRows) {
+          if (prod.total_run_seconds === null) continue;
 
           const totalRun     = Number(prod.total_run_seconds || 0);
           const totalQty     = Number(prod.total_produced_qty || 0);
           const cycleTimeSec = Number(prod.cycle_time_seconds || 0);
-
-          // Quality: get reject + rework for this machine + shift + date
-          const { rows: qRows } = await db.query(
-            `SELECT
-               COALESCE(SUM(reject_qty), 0) AS reject,
-               COALESCE(SUM(rework_qty), 0) AS rework
-             FROM quality_entries
-             WHERE machine_id = $1
-               AND shift_id   = $2
-               AND created_at::date = $3::date`,
-            [machine.id, shift.id, shiftDate]
-          );
-
-          const reject   = Number(qRows[0]?.reject || 0);
-          const rework   = Number(qRows[0]?.rework || 0);
-          const accepted = Math.max(0, totalQty - reject - rework);
+          const q            = qualityMap[prod.machine_id] || {};
+          const reject       = Number(q.reject || 0);
+          const rework       = Number(q.rework || 0);
+          const accepted     = Math.max(0, totalQty - reject - rework);
 
           const availability = plannedSeconds > 0
-            ? Math.min(100, (totalRun / plannedSeconds) * 100)
-            : 0;
+            ? Math.min(100, (totalRun / plannedSeconds) * 100) : 0;
+          const idealQty     = cycleTimeSec > 0 ? totalRun / cycleTimeSec : 0;
+          const performance  = idealQty > 0
+            ? Math.min(100, (totalQty / idealQty) * 100) : 0;
+          const quality      = totalQty > 0
+            ? Math.min(100, (accepted / totalQty) * 100) : 0;
+          const oee          = (availability / 100) * (performance / 100) * (quality / 100) * 100;
 
-          const idealQty = cycleTimeSec > 0 ? totalRun / cycleTimeSec : 0;
-          const performance = idealQty > 0
-            ? Math.min(100, (totalQty / idealQty) * 100)
-            : 0;
+          upsertValues.push(
+            `($${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++})`
+          );
+          upsertParams.push(
+            prod.machine_id, shift.id, shiftDate,
+            Number(availability.toFixed(2)),
+            Number(performance.toFixed(2)),
+            Number(quality.toFixed(2)),
+            Number(oee.toFixed(2))
+          );
+        }
 
-          const quality = totalQty > 0
-            ? Math.min(100, (accepted / totalQty) * 100)
-            : 0;
-
-          const oee = (availability / 100) * (performance / 100) * (quality / 100) * 100;
-
+        if (upsertValues.length > 0) {
           await db.query(
             `INSERT INTO oee_shift_summary
                (machine_id, shift_id, shift_date, availability, performance, quality, oee)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             VALUES ${upsertValues.join(',')}
              ON CONFLICT (machine_id, shift_id, shift_date)
              DO UPDATE SET
                availability = EXCLUDED.availability,
                performance  = EXCLUDED.performance,
                quality      = EXCLUDED.quality,
                oee          = EXCLUDED.oee`,
-            [
-              machine.id,
-              shift.id,
-              shiftDate,
-              Number(availability.toFixed(2)),
-              Number(performance.toFixed(2)),
-              Number(quality.toFixed(2)),
-              Number(oee.toFixed(2))
-            ]
+            upsertParams
           );
         }
 
@@ -150,6 +167,8 @@ module.exports = async () => {
     }
   } catch (err) {
     console.error('shiftOee.job error:', err.message);
+  } finally {
+    running = false;
   }
 };
 

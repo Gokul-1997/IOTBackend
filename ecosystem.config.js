@@ -34,6 +34,12 @@ module.exports = {
       env_production: {
         NODE_ENV: "production",
         PORT: 8000,
+        // CRITICAL: without TZ=Asia/Kolkata the server runs in UTC.
+        // All new Date() operations (shiftStart, today, currentTime) produce
+        // UTC values, so shiftStartEpoch ends up 5.5 hours late — causing
+        // first_count to find no rows → adjusted_parts_count shows raw
+        // cumulative counter (e.g. 16331) instead of shift-scoped value.
+        TZ: "Asia/Kolkata",
         // REDIS_URL: "redis://localhost:6379/0",
         // DATABASE_URL: "...",
       }

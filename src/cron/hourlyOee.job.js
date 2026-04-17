@@ -17,7 +17,14 @@ const { getCurrentShift } = require('../utils/shift.util');
  *       If no cycle_time is set, performance defaults to 0.
  */
 
+let running = false;
+
 module.exports = async () => {
+  if (running) {
+    console.warn('[hourlyOee] previous run still in progress — skipping this tick');
+    return;
+  }
+  running = true;
   const now = new Date();
 
   // Previous hour window — use UTC methods so the IST +5:30 offset
@@ -129,6 +136,8 @@ module.exports = async () => {
     console.log('Hourly OEE calculated:', hourStart.toISOString());
   } catch (err) {
     console.error('hourlyOee.job error:', err.message);
+  } finally {
+    running = false;
   }
 };
 

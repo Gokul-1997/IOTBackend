@@ -129,11 +129,19 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxP
         parts_count,
         machine_status,
         received_at,
-        LAG(parts_count) OVER (ORDER BY received_at)  AS prev_parts,
-        LAG(received_at) OVER (ORDER BY received_at)  AS prev_time,
-        EXTRACT(EPOCH FROM (
-          received_at - LAG(received_at) OVER (ORDER BY received_at)
-        ))::int AS interval_sec
+        device_time,
+        LAG(parts_count)  OVER (ORDER BY received_at) AS prev_parts,
+        LAG(received_at)  OVER (ORDER BY received_at) AS prev_time,
+        -- Use device_time (machine epoch-seconds) for the interval, not received_at.
+        -- buffer.js flushes in 1-second batches: rows flushed together share the same
+        -- received_at → server-time delta = 0 → all intervals collapse to 0.
+        -- device_time advances 1 s/s on the machine clock regardless of flush timing,
+        -- so it gives the correct interval even for batched rows.
+        -- Falls back to received_at delta if device_time is null.
+        COALESCE(
+          (device_time - LAG(device_time) OVER (ORDER BY received_at))::int,
+          EXTRACT(EPOCH FROM (received_at - LAG(received_at) OVER (ORDER BY received_at)))::int
+        ) AS interval_sec
       FROM telemetry_raw
       WHERE machine_id  = $1
         AND received_at >= to_timestamp($2)
@@ -209,5 +217,16 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxP
       });
     }
   }
-  return maxParts ? parts.slice(0, maxParts) : parts;
+  const result = maxParts ? parts.slice(0, maxParts) : parts;
+
+  // Return totals alongside per-part rows so the chart page can display a
+  // summary that should match the dashboard's run/idle time for the same shift.
+  const totalRunMin  = result.reduce((s, p) => s + p.run_min,  0);
+  const totalIdleMin = result.reduce((s, p) => s + p.idle_min, 0);
+
+  return {
+    parts:        result,
+    totalRunMin:  +totalRunMin.toFixed(1),
+    totalIdleMin: +totalIdleMin.toFixed(1)
+  };
 };

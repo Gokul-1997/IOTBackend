@@ -280,11 +280,13 @@ exports.dashboard = async (plant_id, company_id) => {
       l.machine_status,
       l.alarm,
       l.received_at,
-      GREATEST(0,
-        l.parts_count
-        + COALESCE(r.total_offset, 0)
-        - COALESCE(f.first_parts, 0)
-      ) AS adjusted_parts_count,
+      -- If f.first_parts IS NULL the machine has no data in this shift window.
+      -- Use the stale l.parts_count (from a previous shift) in that case would
+      -- show e.g. 1000 parts incorrectly. Return 0 instead.
+      CASE
+        WHEN f.first_parts IS NULL THEN 0
+        ELSE GREATEST(0, l.parts_count + COALESCE(r.total_offset, 0) - f.first_parts)
+      END AS adjusted_parts_count,
       l.parts_count AS raw_parts_count
     FROM latest l
     LEFT JOIN resets      r ON r.machine_id = l.machine_id
@@ -736,11 +738,12 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         l.received_at,
         l.mode,
         l.energy,
-        GREATEST(0,
-          l.parts_count
-          + COALESCE(r.total_offset, 0)
-          - COALESCE(f.first_parts, 0)
-        ) AS parts_count
+        -- Same guard as dashboard: if no data in current shift, return 0
+        -- instead of stale parts_count from a previous shift.
+        CASE
+          WHEN f.first_parts IS NULL THEN 0
+          ELSE GREATEST(0, l.parts_count + COALESCE(r.total_offset, 0) - f.first_parts)
+        END AS parts_count
       FROM latest l, resets r, first_count f
     `, [machineId, detailShiftStartEpoch]);
 
