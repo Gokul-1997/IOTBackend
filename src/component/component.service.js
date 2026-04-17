@@ -21,9 +21,18 @@ exports.create = async (data, plant_id, company_id) => {
     data.multiplication_factor || 1
   ]);
 
+  const newComponent = result.rows[0];
+
+  // Auto-switch: if this machine has an active job, update it to use the new component
+  await db.query(`
+    UPDATE machine_current_job
+    SET component_id = $1, target_qty = $2, part_name = $3
+    WHERE machine_id = $4 AND is_active = TRUE
+  `, [newComponent.id, data.target, data.part_name, data.machine_id]);
+
   return {
     status: 'success',
-    data: result.rows[0]
+    data: newComponent
   };
 };
 
@@ -38,8 +47,15 @@ exports.list = async (plant_id, query, company_id) => {
   const offset = (page - 1) * limit;
   const search = query.search || '';
 
+  const machine_id = query.machine_id || '';
+
   const values = [company_id];
   let where = `WHERE c.company_id = $1`;
+
+  if (machine_id) {
+    values.push(machine_id);
+    where += ` AND c.machine_id = $${values.length}`;
+  }
 
   if (search) {
     values.push(`%${search}%`);
@@ -106,6 +122,13 @@ exports.update = async (id, data, plant_id, company_id) => {
     id,
     company_id
   ]);
+
+  // Cascade: keep active jobs in sync when component target changes
+  await db.query(`
+    UPDATE machine_current_job
+    SET target_qty = $1, part_name = $2
+    WHERE component_id = $3 AND is_active = TRUE
+  `, [data.target, data.part_name, id]);
 
   return {
     status: 'success',

@@ -103,14 +103,18 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
     LEFT JOIN shifts   s    ON s.id = p.shift_id
     LEFT JOIN op_map   op   ON op.machine_id = p.machine_id
     WHERE m.company_id = $1
-      AND CASE
-            WHEN s.start_time IS NOT NULL
-             AND (p.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
-            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
-            WHEN s.start_time IS NOT NULL
-            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
-            ELSE DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
-          END BETWEEN $2::date AND $3::date
+      AND (
+        s.start_time IS NULL
+        OR (
+          p.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+          AND p.hour_start < (
+                CASE WHEN s.start_time > s.end_time
+                     THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                     ELSE ($3::date + s.end_time)
+                END
+              ) AT TIME ZONE 'Asia/Kolkata'
+        )
+      )
       ${extra}
     ORDER BY m.machine_serial_no, p.hour_start
   `, params);
@@ -167,14 +171,18 @@ exports.oeeHourlyData = async (company_id, date_from, date_to, machine_id, shift
     LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
     WHERE m.company_id = $1
-      AND CASE
-            WHEN s.start_time IS NOT NULL
-             AND (o.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
-            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
-            WHEN s.start_time IS NOT NULL
-            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
-            ELSE DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
-          END BETWEEN $2::date AND $3::date
+      AND (
+        s.start_time IS NULL
+        OR (
+          o.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+          AND o.hour_start < (
+                CASE WHEN s.start_time > s.end_time
+                     THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                     ELSE ($3::date + s.end_time)
+                END
+              ) AT TIME ZONE 'Asia/Kolkata'
+        )
+      )
       ${extra}
     ORDER BY m.machine_serial_no, o.hour_start
   `, params);
@@ -264,14 +272,18 @@ exports.hourlyOee = async (company_id, date) => {
     LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
     WHERE m.company_id = $1
-      AND CASE
-            WHEN s.start_time IS NOT NULL
-             AND (o.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
-            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
-            WHEN s.start_time IS NOT NULL
-            THEN DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
-            ELSE DATE(o.hour_start AT TIME ZONE 'Asia/Kolkata')
-          END = $2::date
+      AND (
+        s.start_time IS NULL
+        OR (
+          o.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+          AND o.hour_start < (
+                CASE WHEN s.start_time > s.end_time
+                     THEN ($2::date + INTERVAL '1 day' + s.end_time)
+                     ELSE ($2::date + s.end_time)
+                END
+              ) AT TIME ZONE 'Asia/Kolkata'
+        )
+      )
     ORDER BY m.machine_serial_no, o.hour_start
   `, [company_id, date]);
   return rows;
@@ -319,14 +331,18 @@ exports.production = async (company_id, date) => {
     LEFT JOIN shifts   s  ON s.id = p.shift_id
     LEFT JOIN op_map   op ON op.machine_id = p.machine_id
     WHERE m.company_id = $1
-      AND CASE
-            WHEN s.start_time IS NOT NULL
-             AND (p.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
-            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
-            WHEN s.start_time IS NOT NULL
-            THEN DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
-            ELSE DATE(p.hour_start AT TIME ZONE 'Asia/Kolkata')
-          END = $2::date
+      AND (
+        s.start_time IS NULL
+        OR (
+          p.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+          AND p.hour_start < (
+                CASE WHEN s.start_time > s.end_time
+                     THEN ($2::date + INTERVAL '1 day' + s.end_time)
+                     ELSE ($2::date + s.end_time)
+                END
+              ) AT TIME ZONE 'Asia/Kolkata'
+        )
+      )
     ORDER BY m.machine_serial_no, p.hour_start
   `, [company_id, date]);
   return rows;

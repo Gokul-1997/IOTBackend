@@ -22,13 +22,13 @@ exports.startJob = async (req) => {
   const { rows } = await db.query(`
     SELECT part_name, target
     FROM components
-    WHERE id = $1
-  `,[component_id]);
+    WHERE id = $1 AND machine_id = $2
+  `,[component_id, machine_id]);
 
   const component = rows[0];
 
   if (!component) {
-    throw new Error("Component not found");
+    throw new Error("Component not found or does not belong to this machine");
   }
 
   await db.query(`

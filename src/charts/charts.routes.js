@@ -18,7 +18,7 @@ router.get('/meta', auth, async (req, res) => {
 router.get('/data', auth, async (req, res) => {
   try {
     const { machine_id, shift_id, date } = req.query;
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })).toISOString().split('T')[0];
 
     const data = await svc.getChartData({
       plantId:   req.user.plant_id,

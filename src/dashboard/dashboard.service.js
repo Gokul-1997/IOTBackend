@@ -1,5 +1,15 @@
 const db = require('../db');
 
+/** Return a Date whose .getFullYear/.getHours/… reflect IST, regardless of server TZ */
+function nowIST() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+}
+
+/** Format a JS Date (assumed IST-local) as 'YYYY-MM-DD' */
+function toDateStr(d) {
+  return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+}
+
 function timeToMinutes(t) {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
@@ -21,8 +31,9 @@ function formatDuration(totalSeconds) {
 
 exports.dashboard = async (plant_id, company_id) => {
 
-  const now = new Date();
-  const currentTime = now.toTimeString().slice(0, 8); // local time (IST when TZ=Asia/Kolkata)
+  const realNow     = new Date();                      // real epoch for comparisons
+  const now         = nowIST();                        // IST-local for date/time strings
+  const currentTime = now.toTimeString().slice(0, 8);  // always IST
 
   /* ================= SHIFT ================= */
 
@@ -31,13 +42,19 @@ exports.dashboard = async (plant_id, company_id) => {
     FROM shifts
     WHERE company_id=$1
       AND (
-        (start_time<=end_time AND $2 BETWEEN start_time AND end_time)
+        (start_time<=end_time AND
+         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time
+         BETWEEN start_time AND end_time)
         OR
-        (start_time>end_time AND ($2>=start_time OR $2<=end_time))
+        (start_time>end_time AND (
+           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
+           OR
+           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time <= end_time
+        ))
       )
       AND is_active=TRUE
     LIMIT 1
-  `, [company_id, currentTime]);
+  `, [company_id]);
 
   const shift = shiftRows[0];
 
@@ -51,24 +68,18 @@ exports.dashboard = async (plant_id, company_id) => {
 
   /* ================= SHIFT TIME ================= */
 
-  // Use local date (respects TZ=Asia/Kolkata) — NOT toISOString() which is always UTC
-  const today = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, '0'),
-    String(now.getDate()).padStart(2, '0')
-  ].join('-');
+  const today = toDateStr(now);
   let shiftStart;
 
   if (shift.start_time <= shift.end_time) {
-    shiftStart = new Date(`${today}T${shift.start_time}`);
+    shiftStart = new Date(`${today}T${shift.start_time}+05:30`);
   } else {
     if (currentTime >= shift.start_time) {
-      shiftStart = new Date(`${today}T${shift.start_time}`);
+      shiftStart = new Date(`${today}T${shift.start_time}+05:30`);
     } else {
       const y = new Date(now);
       y.setDate(y.getDate() - 1);
-      const yStr = [y.getFullYear(), String(y.getMonth()+1).padStart(2,'0'), String(y.getDate()).padStart(2,'0')].join('-');
-      shiftStart = new Date(`${yStr}T${shift.start_time}`);
+      shiftStart = new Date(`${toDateStr(y)}T${shift.start_time}+05:30`);
     }
   }
 
@@ -80,7 +91,7 @@ exports.dashboard = async (plant_id, company_id) => {
   const shiftEnd = new Date(shiftStart);
   shiftEnd.setMinutes(shiftEnd.getMinutes() + shiftDurationMinutes);
 
-  const effectiveNow = now > shiftEnd ? shiftEnd : now;
+  const effectiveNow = realNow > shiftEnd ? shiftEnd : realNow;
 
   const shiftElapsedMinutes =
     Math.max(0, Math.floor((effectiveNow - shiftStart) / 60000));
@@ -152,9 +163,9 @@ exports.dashboard = async (plant_id, company_id) => {
   /* ================= COMPONENT TARGET ================= */
 
   const { rows: componentRows } = await db.query(`
-    SELECT j.machine_id, c.target, COALESCE(c.multiplication_factor, 1) AS multiplication_factor
+    SELECT j.machine_id, j.target_qty AS target, COALESCE(c.multiplication_factor, 1) AS multiplication_factor
     FROM machine_current_job j
-    JOIN components c ON c.id=j.component_id
+    LEFT JOIN components c ON c.id=j.component_id
     WHERE j.machine_id=ANY($1)
     AND j.is_active=TRUE
   `, [machineIds]);
@@ -208,97 +219,29 @@ exports.dashboard = async (plant_id, company_id) => {
 
   /* ================= LIVE STATUS ================= */
   /*
-   * Two scenarios for parts_count:
+   * Only need the latest telemetry row per machine for:
+   *   - machine_status  (RUNNING / IDLE)
+   *   - alarm           (boolean)
+   *   - received_at     (freshness → online/offline detection)
    *
-   * 1. Machine resets at shift boundary (normal): parts_count goes 0→N during
-   *    the shift. Use it directly — shiftStart filter handles isolation.
-   *
-   * 2. Machine resets MID-SHIFT (e.g. machine restart): parts_count drops from
-   *    54 → 0 then climbs again. We detect each drop inside the shift window,
-   *    accumulate the pre-reset values as an offset, and add it to the current
-   *    reading: adjusted = offset + current_parts_count → shows 64 not 10.
-   *
-   * received_at is stored as a Unix epoch integer (seconds) in telemetry_raw.
+   * Parts count comes from production_hourly (prodMap) which is
+   * computed by the MQTT processor with proper delta logic that
+   * handles counter resets, connection drops, and stale counters.
+   * telemetry_raw's raw parts_count is unreliable for shift totals
+   * because connection drops cause false resets and inflated counts.
    */
 
-  const shiftStartEpoch = Math.floor(shiftStart.getTime() / 1000);
-
   const { rows: liveRows } = await db.query(`
-    WITH shift_raw AS (
-      SELECT
-        machine_id,
-        parts_count,
-        received_at,
-        LAG(parts_count) OVER (PARTITION BY machine_id ORDER BY received_at) AS prev_count,
-        -- Look ahead up to 10 readings to detect connection-drop recovery.
-        -- A real machine reset: counter stays near 0 for many readings.
-        -- A connection drop: counter immediately recovers to the original high value.
-        GREATEST(
-          COALESCE(LEAD(parts_count, 1)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
-          COALESCE(LEAD(parts_count, 3)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
-          COALESCE(LEAD(parts_count, 5)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
-          COALESCE(LEAD(parts_count, 8)  OVER (PARTITION BY machine_id ORDER BY received_at), 0),
-          COALESCE(LEAD(parts_count, 10) OVER (PARTITION BY machine_id ORDER BY received_at), 0)
-        ) AS max_future_10
-      FROM telemetry_raw
-      WHERE machine_id = ANY($1)
-        AND received_at >= to_timestamp($2)
-    ),
-    -- Baseline: the very first parts_count seen at or after shift start.
-    -- Subtracted so machines that start with a non-zero counter (leftover
-    -- from previous shift) report 0, not the carry-over value.
-    first_count AS (
-      SELECT DISTINCT ON (machine_id)
-        machine_id, parts_count AS first_parts
-      FROM telemetry_raw
-      WHERE machine_id = ANY($1)
-        AND received_at >= to_timestamp($2)
-      ORDER BY machine_id, received_at ASC
-    ),
-    resets AS (
-      SELECT machine_id, COALESCE(SUM(prev_count), 0) AS total_offset
-      FROM shift_raw
-      -- Only a TRUE counter reset (machine power cycle) drops to near zero.
-      -- Any small decrease (e.g. 30→29) is comm noise, NOT a reset.
-      -- Connection drop guard: if the counter recovers back to >50% of the
-      -- pre-drop value within 10 readings, it was a network glitch, not a reset.
-      WHERE prev_count IS NOT NULL
-        AND parts_count <= 2
-        AND prev_count > 2
-        AND max_future_10 < (prev_count * 0.5)
-      GROUP BY machine_id
-    ),
-    latest AS (
-      SELECT DISTINCT ON (machine_id)
-        machine_id, machine_status, alarm, parts_count, received_at
-      FROM telemetry_raw
-      WHERE machine_id = ANY($1)
-      ORDER BY machine_id, received_at DESC
-    )
-    SELECT
-      l.machine_id,
-      l.machine_status,
-      l.alarm,
-      l.received_at,
-      -- If f.first_parts IS NULL the machine has no data in this shift window.
-      -- Use the stale l.parts_count (from a previous shift) in that case would
-      -- show e.g. 1000 parts incorrectly. Return 0 instead.
-      CASE
-        WHEN f.first_parts IS NULL THEN 0
-        ELSE GREATEST(0, l.parts_count + COALESCE(r.total_offset, 0) - f.first_parts)
-      END AS adjusted_parts_count,
-      l.parts_count AS raw_parts_count
-    FROM latest l
-    LEFT JOIN resets      r ON r.machine_id = l.machine_id
-    LEFT JOIN first_count f ON f.machine_id = l.machine_id
-  `, [machineIds, shiftStartEpoch]);
+    SELECT DISTINCT ON (machine_id)
+      machine_id, machine_status, alarm, received_at
+    FROM telemetry_raw
+    WHERE machine_id = ANY($1)
+    ORDER BY machine_id, received_at DESC
+  `, [machineIds]);
 
   const liveMap = {};
   liveRows.forEach(r => {
-    liveMap[r.machine_id] = {
-      ...r,
-      parts_count: Number(r.adjusted_parts_count || 0)
-    };
+    liveMap[r.machine_id] = r;
   });
 
   /* ================= BUILD RESPONSE ================= */
@@ -387,46 +330,31 @@ exports.dashboard = async (plant_id, company_id) => {
      * time-based utilization: runMinutes / plannedMinutes × 100
      */
 
-    const _target   = componentMap[m.id] || 0;
-    const _multFactor = multiFactorMap[m.id] || 1;
-    const _achieved = (status !== 'OFFLINE' && receivedAtSec
-      ? Number(live.parts_count || 0)
-      : Number(prod.produced_qty || 0)) * _multFactor;
+    /* ================= ACHIEVED QTY ================= */
+    /*
+     * Use production_hourly.produced_qty as the single source of truth.
+     * The MQTT processor computes deltas with proper handling for:
+     *   - Counter resets (machine power cycle)
+     *   - Connection drops (stale counter recovery)
+     *   - Absolute counters (non-resetting)
+     *
+     * This matches what charts and reports show — one consistent value.
+     */
+
+    const multFactor = multiFactorMap[m.id] || 1;
+    let achieved = Math.max(0, Number(prod.produced_qty || 0)) * multFactor;
+
+    /* ================= UTILIZATION ================= */
+
+    const _target = componentMap[m.id] || 0;
 
     const _rawUtil = _target > 0
-      ? (_achieved * 100) / _target
+      ? (achieved * 100) / _target
       : plannedMinutes > 0
         ? (Math.min(runSeconds / 60, shiftElapsedMinutes) * 100) / plannedMinutes
         : 0;
 
-    // Cap at 100 — achieved can exceed target but utilization never goes over 100%
     const utilization = Number(Math.min(_rawUtil, 100).toFixed(2));
-
-    /* ================= ACHIEVED QTY ================= */
-    /*
-     * parts_count IS the achieved_qty.
-     * There is no separate achieved_qty column in telemetry_raw.
-     *
-     * The machine sends parts_count as a shift-scoped counter
-     * (resets to 0 at shift start). Use it directly.
-     *
-     * FALLBACK: machine OFFLINE → use production_hourly.produced_qty
-     */
-
-    let achieved = 0;
-    const multFactor = multiFactorMap[m.id] || 1;
-
-    if (status !== 'OFFLINE' && receivedAtSec) {
-      // PRIMARY: parts_count is the shift-scoped counter from machine (reset-adjusted, baseline-subtracted)
-      achieved = Number(live.parts_count || 0) * multFactor;
-    } else {
-      // FALLBACK: machine offline — use production_hourly but only rows
-      // within the current shift window (same filter as the hourly chart)
-      // so the count matches the online telemetry value.
-      achieved = Number(prod.produced_qty || 0) * multFactor;
-    }
-
-    if (achieved < 0) achieved = 0;
 
     machinesList.push({
       machine_id:        m.id,
@@ -513,20 +441,19 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     let detailShiftEnd   = null;
  
     if (shift) {
-      const nowD         = new Date();
-      const todayD       = [nowD.getFullYear(), String(nowD.getMonth()+1).padStart(2,'0'), String(nowD.getDate()).padStart(2,'0')].join('-'); // local IST date
+      const nowD         = nowIST();
+      const todayD       = toDateStr(nowD);
       const currentTimeD = nowD.toTimeString().slice(0, 8);
  
       if (shift.start_time <= shift.end_time) {
-        detailShiftStart = new Date(`${todayD}T${shift.start_time}`);
+        detailShiftStart = new Date(`${todayD}T${shift.start_time}+05:30`);
       } else {
         if (currentTimeD >= shift.start_time) {
-          detailShiftStart = new Date(`${todayD}T${shift.start_time}`);
+          detailShiftStart = new Date(`${todayD}T${shift.start_time}+05:30`);
         } else {
           const yd = new Date(nowD);
           yd.setDate(yd.getDate() - 1);
-          const ydStr = [yd.getFullYear(), String(yd.getMonth()+1).padStart(2,'0'), String(yd.getDate()).padStart(2,'0')].join('-');
-          detailShiftStart = new Date(`${ydStr}T${shift.start_time}`);
+          detailShiftStart = new Date(`${toDateStr(yd)}T${shift.start_time}+05:30`);
         }
       }
  
@@ -571,7 +498,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         j.component_id,
         c.part_number,
         c.cycle_time,
-        c.target,
+        j.target_qty AS target,
         COALESCE(c.multiplication_factor, 1) AS multiplication_factor
       FROM machine_current_job j
       LEFT JOIN components c ON c.id = j.component_id
@@ -647,8 +574,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const quality = qualityRows[0] || {};
     const qualityRejected = Number(quality.rejected || 0);
     const qualityRework   = Number(quality.rework   || 0);
-    // qualityAccepted is computed AFTER the live query
-    // so we can use live.parts_count (reset-adjusted) as the base
+    // qualityAccepted is computed after production_hourly totals are known
  
     /* ================= OEE ================= */
  
@@ -656,9 +582,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     // Without this, a newly-started shift shows the previous shift's OEE.
     // If the cron hasn't written a row yet for this shift, return zeros.
     const shiftDateForOee = detailShiftStart
-      ? [detailShiftStart.getFullYear(),
-         String(detailShiftStart.getMonth() + 1).padStart(2, '0'),
-         String(detailShiftStart.getDate()).padStart(2, '0')].join('-')
+      ? toDateStr(new Date(detailShiftStart.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })))
       : null;
 
     let oee = {};
@@ -674,89 +598,27 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       oee = oeeRows[0] || {};
     }
  
-    /* ================= LIVE + ADJUSTED PARTS COUNT ================= */
+    /* ================= LIVE STATUS ================= */
     /*
-     * Apply the same reset-offset logic used in the dashboard query.
-     * Without this, machineDetail returns raw parts_count (e.g. 29)
-     * while the dashboard card shows adjusted (e.g. 59) — inconsistent.
+     * Only need the latest telemetry for status, spindle, feed, alarm, energy.
+     * Parts count comes from production_hourly (producedQty) — same as dashboard.
      */
 
-    const detailShiftStartEpoch = detailShiftStart
-      ? Math.floor(detailShiftStart.getTime() / 1000)
-      : 0;
-
     const { rows: liveRows } = await db.query(`
-      WITH shift_raw AS (
-        SELECT
-          parts_count,
-          received_at,
-          LAG(parts_count) OVER (ORDER BY received_at) AS prev_count,
-          -- Connection-drop guard: look ahead 10 readings.
-          -- If counter recovers to >50% of pre-drop value, it was a network glitch.
-          GREATEST(
-            COALESCE(LEAD(parts_count, 1)  OVER (ORDER BY received_at), 0),
-            COALESCE(LEAD(parts_count, 3)  OVER (ORDER BY received_at), 0),
-            COALESCE(LEAD(parts_count, 5)  OVER (ORDER BY received_at), 0),
-            COALESCE(LEAD(parts_count, 8)  OVER (ORDER BY received_at), 0),
-            COALESCE(LEAD(parts_count, 10) OVER (ORDER BY received_at), 0)
-          ) AS max_future_10
-        FROM telemetry_raw
-        WHERE machine_id = $1
-          AND received_at >= to_timestamp($2)
-      ),
-      first_count AS (
-        SELECT parts_count AS first_parts
-        FROM telemetry_raw
-        WHERE machine_id = $1
-          AND received_at >= to_timestamp($2)
-        ORDER BY received_at ASC
-        LIMIT 1
-      ),
-      resets AS (
-        SELECT COALESCE(SUM(prev_count), 0) AS total_offset
-        FROM shift_raw
-        -- Only a TRUE counter reset drops to near zero (machine power cycle).
-        -- Connection drop guard: if counter recovers to >50% of pre-drop value
-        -- within 10 readings, exclude it — that was a network glitch, not a reset.
-        WHERE prev_count IS NOT NULL
-          AND parts_count <= 2
-          AND prev_count > 2
-          AND max_future_10 < (prev_count * 0.5)
-      ),
-      latest AS (
-        SELECT machine_status, spindle_load, feed_rate, parts_count, received_at, alarm, mode, energy
-        FROM telemetry_raw
-        WHERE machine_id = $1
-        ORDER BY received_at DESC
-        LIMIT 1
-      )
-      SELECT
-        l.machine_status,
-        l.spindle_load,
-        l.feed_rate,
-        l.alarm,
-        l.received_at,
-        l.mode,
-        l.energy,
-        -- Same guard as dashboard: if no data in current shift, return 0
-        -- instead of stale parts_count from a previous shift.
-        CASE
-          WHEN f.first_parts IS NULL THEN 0
-          ELSE GREATEST(0, l.parts_count + COALESCE(r.total_offset, 0) - f.first_parts)
-        END AS parts_count
-      FROM latest l, resets r, first_count f
-    `, [machineId, detailShiftStartEpoch]);
+      SELECT machine_status, spindle_load, feed_rate, received_at, alarm, mode, energy
+      FROM telemetry_raw
+      WHERE machine_id = $1
+      ORDER BY received_at DESC
+      LIMIT 1
+    `, [machineId]);
 
     const live = liveRows[0] || {};
 
     /* ================= ACCEPTED QTY ================= */
     /*
-     * Use live.parts_count (reset-adjusted, same value shown on dashboard card)
-     * as the production base, NOT producedQty from production_hourly.
-     * production_hourly can lag or carry inflated counts from before the fix;
-     * live.parts_count is the correct current shift count.
-     *
-     * Fallback to producedQty when machine is offline (no live data).
+     * Use production_hourly.produced_qty as the source — same as dashboard.
+     * The MQTT processor handles counter resets, connection drops, and
+     * stale counters properly via delta logic.
      */
     /* ================= REALTIME SECONDS (same logic as dashboard) ================= */
     /*
@@ -766,7 +628,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
      * freshDiff guard (<=15 s) prevents adding stale time when offline.
      */
 
-    const nowRT          = new Date();
+    const nowRT          = new Date(); // real epoch — correct for comparisons
     const effectiveNowRT = (detailShiftEnd && nowRT > detailShiftEnd) ? detailShiftEnd : nowRT;
     const shiftElapsedRT = detailShiftStart
       ? Math.max(0, Math.floor((effectiveNowRT - detailShiftStart) / 60000))
@@ -800,11 +662,8 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       shiftEnergyKwh = Math.max(0, currentEnergy - Number(energyAtShiftStart));
     }
 
-    // Mirror dashboard fallback: when OFFLINE use production_hourly, not live counter
-    // Multiply by multiplication_factor (each machine cycle may produce >1 part)
-    const achievedBase = (detailStatus !== 'OFFLINE' && live.parts_count != null
-      ? Number(live.parts_count || 0)
-      : producedQty) * detailMultFactor;
+    // Use production_hourly as single source — same as dashboard
+    const achievedBase = Math.max(0, producedQty) * detailMultFactor;
     const qualityAccepted = Math.max(0, achievedBase - qualityRejected - qualityRework);
 
     if (receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT) {

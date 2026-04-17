@@ -95,7 +95,8 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
   const plannedSeconds = shift ? shiftPlannedSeconds(shift) : 0;
 
   // 3. Production totals from production_hourly
-  //    Use logical shift_date: hours before shift.start_time belong to previous day's shift
+  //    Use range-based filter: hour_start between shift start and shift end
+  //    (matches dashboard + charts approach — avoids UTC hour-truncation bugs)
   const { rows: prodRows } = await db.query(
     `SELECT
        COALESCE(SUM(produced_qty), 0)  AS produced,
@@ -104,11 +105,13 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
      JOIN shifts s ON s.id = ph.shift_id
      WHERE ph.machine_id = $1
        AND ph.shift_id   = $2
-       AND CASE
-             WHEN (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
-             THEN DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata')
-             ELSE DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
-           END = $3::date`,
+       AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+       AND ph.hour_start <  (
+             CASE WHEN s.start_time > s.end_time
+                  THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                  ELSE ($3::date + s.end_time)
+             END
+           ) AT TIME ZONE 'Asia/Kolkata'`,
     [machine_id, shift_id, date]
   );
 
@@ -164,11 +167,13 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
      JOIN shifts s ON s.id = ph.shift_id
      WHERE ph.machine_id = $1
        AND ph.shift_id   = $2
-       AND CASE
-             WHEN (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::time >= s.start_time
-             THEN DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata')
-             ELSE DATE(ph.hour_start AT TIME ZONE 'Asia/Kolkata') - 1
-           END = $3::date
+       AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+       AND ph.hour_start <  (
+             CASE WHEN s.start_time > s.end_time
+                  THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                  ELSE ($3::date + s.end_time)
+             END
+           ) AT TIME ZONE 'Asia/Kolkata'
      ORDER BY ph.hour_start`,
     [machine_id, shift_id, date]
   );
