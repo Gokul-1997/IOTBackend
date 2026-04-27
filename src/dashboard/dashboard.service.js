@@ -302,12 +302,18 @@ exports.dashboard = async (plant_id, company_id) => {
 
     const maxSeconds = shiftElapsedMinutes * 60;
 
-    runSeconds  = Math.min(runSeconds,  maxSeconds);
-    idleSeconds = Math.min(idleSeconds, maxSeconds);
-
+    // If production_hourly over-accumulated (small per-message overcounts add up),
+    // scale BOTH run and idle proportionally so they sum to shift-elapsed.
+    // Previously we capped run then forced idle = max - run, which made idle=0
+    // whenever raw run >= maxSeconds — masking actual idle time on the card.
     const totalSeconds = runSeconds + idleSeconds;
-    if (totalSeconds > maxSeconds) {
-      idleSeconds = Math.max(0, maxSeconds - runSeconds);
+    if (totalSeconds > maxSeconds && totalSeconds > 0) {
+      const scale = maxSeconds / totalSeconds;
+      runSeconds  = Math.floor(runSeconds  * scale);
+      idleSeconds = Math.floor(idleSeconds * scale);
+    } else {
+      runSeconds  = Math.min(runSeconds,  maxSeconds);
+      idleSeconds = Math.min(idleSeconds, maxSeconds);
     }
 
     const runMinutes  = Math.floor(runSeconds  / 60);
@@ -674,11 +680,14 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       }
     }
 
-    runSeconds  = Math.min(runSeconds,  maxSecondsRT);
-    idleSeconds = Math.min(idleSeconds, maxSecondsRT);
-
-    if ((runSeconds + idleSeconds) > maxSecondsRT) {
-      idleSeconds = Math.max(0, maxSecondsRT - runSeconds);
+    const totalRT = runSeconds + idleSeconds;
+    if (totalRT > maxSecondsRT && totalRT > 0) {
+      const scale = maxSecondsRT / totalRT;
+      runSeconds  = Math.floor(runSeconds  * scale);
+      idleSeconds = Math.floor(idleSeconds * scale);
+    } else {
+      runSeconds  = Math.min(runSeconds,  maxSecondsRT);
+      idleSeconds = Math.min(idleSeconds, maxSecondsRT);
     }
 
     /* ================= TIME FORMAT ================= */

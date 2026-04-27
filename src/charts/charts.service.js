@@ -151,6 +151,9 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxP
       -- Each row where parts_count incremented = one telemetry event.
       -- increment = how many parts were actually produced in this interval
       -- (can be > 1 when telemetry has a gap and the counter jumped).
+      -- Guard: skip stale-counter recovery jumps (prev_parts<=2 AND jump>5).
+      -- This is the SAME guard the MQTT processor uses to avoid attributing
+      -- a machine's pre-shift counter value as parts produced during this shift.
       SELECT
         received_at                                                           AS completed_at,
         COALESCE(
@@ -162,6 +165,7 @@ exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxP
       WHERE prev_parts IS NOT NULL
         AND parts_count > prev_parts
         AND parts_count > 0
+        AND NOT (prev_parts <= 2 AND (parts_count - prev_parts) > 5)
     ),
     -- Extend the last part's window to shift end (or now for live shifts).
     -- Without this, any run/idle time AFTER the final part completion is
