@@ -2,15 +2,18 @@ const db = require('../db');
 
 /*
  * Runs every 10 minutes.
- * When a shift has just ended, rolls up production_hourly + quality_entries
- * into oee_shift_summary.
+ * Backfills oee_shift_summary for all completed shifts in the last 48 hours.
+ * Upsert is idempotent, so re-running is safe — late-arriving production_hourly
+ * data gets picked up on the next tick instead of being lost forever.
  *
- * FIX: previously used AVG(oee_hourly.availability/performance/quality/oee),
- * which gives mathematically incorrect results (simple average of percentages).
- * Now computes OEE from raw totals in production_hourly + quality_entries.
+ * Per-shift filter uses the shift's actual start/end window (handling overnight
+ * shifts that cross midnight) instead of a single-date filter that loses half
+ * the data on night shifts.
  */
 
 let running = false;
+
+const BACKFILL_HOURS = 48;
 
 module.exports = async () => {
   if (running) {
@@ -18,64 +21,36 @@ module.exports = async () => {
     return;
   }
   running = true;
-  const now = new Date();
 
   try {
-    // Iterate companies (shifts are company-scoped, not plant-scoped)
     const { rows: companies } = await db.query(
       `SELECT id FROM companies WHERE is_active = TRUE`
     );
 
     for (const company of companies) {
-      // Find shifts that ended within the last 10 minutes
-      const { rows: endedShifts } = await db.query(
-        `SELECT s.*
-         FROM shifts s
-         WHERE s.company_id = $1
-           AND s.is_active = TRUE
-           AND (
-             (s.start_time < s.end_time
-               AND (NOW() AT TIME ZONE 'Asia/Kolkata')::time
-                 BETWEEN s.end_time AND (s.end_time + INTERVAL '10 minutes')::time)
-             OR
-             (s.start_time > s.end_time
-               AND (NOW() AT TIME ZONE 'Asia/Kolkata')::time
-                 BETWEEN s.end_time AND (s.end_time + INTERVAL '10 minutes')::time)
-           )`,
+      // All active shifts for this company
+      const { rows: shifts } = await db.query(
+        `SELECT * FROM shifts WHERE company_id = $1 AND is_active = TRUE`,
         [company.id]
       );
 
-      for (const shift of endedShifts) {
-        // Determine the shift date (yesterday if overnight shift ended this morning)
-        const nowIST = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-        const [eh, em] = shift.end_time.split(':').map(Number);
-        const endMin = eh * 60 + em;
-        const [sh, sm] = shift.start_time.split(':').map(Number);
-        const startMin = sh * 60 + sm;
+      // Build (shift, shiftDate) pairs for every completed shift instance
+      // that ended within the last BACKFILL_HOURS.
+      const shiftInstances = expandShiftInstances(shifts, BACKFILL_HOURS);
 
-        let shiftDate;
-        if (startMin > endMin) {
-          // Overnight: shift started yesterday
-          const yesterday = new Date(nowIST);
-          yesterday.setDate(yesterday.getDate() - 1);
-          shiftDate = yesterday.toISOString().split('T')[0];
-        } else {
-          shiftDate = nowIST.toISOString().split('T')[0];
-        }
+      const { rows: machines } = await db.query(
+        `SELECT id FROM machines WHERE company_id = $1 AND is_active = TRUE`,
+        [company.id]
+      );
+      const machineIds = machines.map(m => m.id);
+      if (machineIds.length === 0) continue;
 
-        // Full shift planned seconds (for availability denominator)
+      for (const inst of shiftInstances) {
+        const { shift, shiftDate, windowStart, windowEnd } = inst;
         const shiftDurationMinutes = getShiftDurationMinutes(shift);
         const plannedSeconds = shiftDurationMinutes * 60;
 
-        // Get all machines for this company
-        const { rows: machines } = await db.query(
-          `SELECT id FROM machines WHERE company_id = $1 AND is_active = TRUE`,
-          [company.id]
-        );
-
-        const machineIds = machines.map(m => m.id);
-
-        // Batch query: production totals for all machines in one round-trip
+        // Production totals scoped by exact shift window — works for overnight shifts.
         const { rows: allProdRows } = await db.query(
           `SELECT
              ph.machine_id,
@@ -88,12 +63,12 @@ module.exports = async () => {
            LEFT JOIN components c ON c.id = mcj.component_id
            WHERE ph.machine_id = ANY($1)
              AND ph.shift_id   = $2
-             AND ph.hour_start::date = $3::date
+             AND ph.hour_start >= $3
+             AND ph.hour_start <  $4
            GROUP BY ph.machine_id, c.cycle_time`,
-          [machineIds, shift.id, shiftDate]
+          [machineIds, shift.id, windowStart, windowEnd]
         );
 
-        // Batch query: quality totals for all machines in one round-trip
         const { rows: allQRows } = await db.query(
           `SELECT
              machine_id,
@@ -102,15 +77,15 @@ module.exports = async () => {
            FROM quality_entries
            WHERE machine_id = ANY($1)
              AND shift_id   = $2
-             AND created_at::date = $3::date
+             AND created_at >= $3
+             AND created_at <  $4
            GROUP BY machine_id`,
-          [machineIds, shift.id, shiftDate]
+          [machineIds, shift.id, windowStart, windowEnd]
         );
 
         const qualityMap = {};
         for (const q of allQRows) qualityMap[q.machine_id] = q;
 
-        // Build upsert values for all machines in one query
         const upsertValues = [];
         const upsertParams = [];
         let   paramIdx     = 1;
@@ -160,19 +135,78 @@ module.exports = async () => {
                oee          = EXCLUDED.oee`,
             upsertParams
           );
+          console.log(`[shiftOee] upserted ${upsertValues.length} rows: company=${company.id} shift=${shift.shift_code} date=${shiftDate}`);
         }
-
-        console.log(`Shift OEE rollup done: company=${company.id} shift=${shift.shift_code} date=${shiftDate}`);
       }
     }
   } catch (err) {
     console.error('shiftOee.job error:', err.message);
+    console.error(err.stack);
   } finally {
     running = false;
   }
 };
 
-// Helper: shift duration in minutes (handles overnight shifts)
+/*
+ * For each shift, list every completed instance (shiftDate + window) whose end
+ * time falls within the last `backfillHours`. Handles overnight shifts.
+ * windowStart/windowEnd are JS Dates in UTC; shiftDate is 'YYYY-MM-DD' in IST.
+ */
+function expandShiftInstances(shifts, backfillHours) {
+  const out = [];
+  const nowMs = Date.now();
+  const cutoffMs = nowMs - backfillHours * 3600 * 1000;
+
+  // Walk back day-by-day in IST
+  for (let i = 0; i <= Math.ceil(backfillHours / 24) + 1; i++) {
+    const dayIST = istDateOffset(-i); // 'YYYY-MM-DD'
+
+    for (const shift of shifts) {
+      const [sh, sm] = shift.start_time.split(':').map(Number);
+      const [eh, em] = shift.end_time.split(':').map(Number);
+      const startMin = sh * 60 + sm;
+      const endMin   = eh * 60 + em;
+      const overnight = startMin > endMin;
+
+      const windowStart = new Date(`${dayIST}T${pad2(sh)}:${pad2(sm)}:00+05:30`);
+      const endDay = overnight ? istDateOffset(1, dayIST) : dayIST;
+      const windowEnd = new Date(`${endDay}T${pad2(eh)}:${pad2(em)}:00+05:30`);
+
+      // Skip future or not-yet-ended shifts
+      if (windowEnd.getTime() > nowMs) continue;
+      // Skip shifts ended before our backfill window
+      if (windowEnd.getTime() < cutoffMs) continue;
+
+      out.push({
+        shift,
+        shiftDate: dayIST,
+        windowStart,
+        windowEnd
+      });
+    }
+  }
+  return out;
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// Returns IST date YYYY-MM-DD offset by `days` from baseIstDate (or today IST).
+function istDateOffset(days, baseIstDate) {
+  let base;
+  if (baseIstDate) {
+    const [y, m, d] = baseIstDate.split('-').map(Number);
+    base = new Date(Date.UTC(y, m - 1, d));
+  } else {
+    // today in IST
+    const nowMs = Date.now();
+    const istMs = nowMs + 5.5 * 3600 * 1000;
+    const istDate = new Date(istMs);
+    base = new Date(Date.UTC(istDate.getUTCFullYear(), istDate.getUTCMonth(), istDate.getUTCDate()));
+  }
+  base.setUTCDate(base.getUTCDate() + days);
+  return `${base.getUTCFullYear()}-${pad2(base.getUTCMonth() + 1)}-${pad2(base.getUTCDate())}`;
+}
+
 function getShiftDurationMinutes(shift) {
   const [sh, sm] = shift.start_time.split(':').map(Number);
   const [eh, em] = shift.end_time.split(':').map(Number);
