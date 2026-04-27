@@ -602,6 +602,45 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         LIMIT 1
       `, [machineId, shift.id, shiftDateForOee]);
       oee = oeeRows[0] || {};
+
+      // Fallback for in-progress shift: cron only writes after shift end,
+      // so compute OEE on-the-fly using the same formula. This way the
+      // dashboard shows live OEE during the shift (refreshes hourly as
+      // production_hourly accumulates) and the precomputed row takes over
+      // once the shift ends.
+      if (!oeeRows.length) {
+        const startMinO = timeToMinutes(shift.start_time);
+        const endMinO   = timeToMinutes(shift.end_time);
+        const shiftDurO = calculateDuration(startMinO, endMinO);
+        const plannedSecO = Math.max(1,
+          (shiftDurO - Number(shift.break_minutes || 0)) * 60);
+
+        const cycleSecO = component?.cycle_time
+          ? (Number(component.cycle_time.hours   || 0) * 3600
+           + Number(component.cycle_time.minutes || 0) * 60
+           + Number(component.cycle_time.seconds || 0))
+          : 0;
+
+        const totalRunO    = Number(runSeconds   || 0);
+        const totalQtyO    = Number(producedQty  || 0) * detailMultFactor;
+        const acceptedO    = Math.max(0, totalQtyO - qualityRejected - qualityRework);
+
+        const availability = plannedSecO > 0
+          ? Math.min(100, (totalRunO / plannedSecO) * 100) : 0;
+        const idealQtyO    = cycleSecO > 0 ? totalRunO / cycleSecO : 0;
+        const performance  = idealQtyO > 0
+          ? Math.min(100, (totalQtyO / idealQtyO) * 100) : 0;
+        const qualityPct   = totalQtyO > 0
+          ? Math.min(100, (acceptedO / totalQtyO) * 100) : 0;
+        const oeePct       = (availability/100) * (performance/100) * (qualityPct/100) * 100;
+
+        oee = {
+          availability: Number(availability.toFixed(2)),
+          performance:  Number(performance.toFixed(2)),
+          quality:      Number(qualityPct.toFixed(2)),
+          oee:          Number(oeePct.toFixed(2))
+        };
+      }
     }
  
     /* ================= LIVE STATUS ================= */
