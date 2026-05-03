@@ -16,7 +16,12 @@ function signAccessToken(payload) {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: ACCESS_EXPIRES });
 }
 
-// good refresh token: random + store hashed (optional). Here store plain for simplicity.
+// Hash a raw token with SHA-256 before storing in DB
+function hashToken(raw) {
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+// Generate a random refresh token (raw value returned to client)
 function generateRefreshToken() {
   return crypto.randomBytes(48).toString('hex');
 }
@@ -127,14 +132,15 @@ exports.login = async ({ email, password }, req) => {
       [req.ip, user.id]
     );
 
-    // Create refresh session
+    // Create refresh session — store hashed token, return raw to client
     const refreshToken = generateRefreshToken();
+    const hashedRefreshToken = hashToken(refreshToken);
     const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
 
     await client.query(
       `INSERT INTO user_sessions (user_id, refresh_token, expires_at, last_ip, user_agent)
        VALUES ($1, $2, $3, $4, $5)`,
-      [user.id, refreshToken, expiresAt, req.ip, req.headers['user-agent'] || null]
+      [user.id, hashedRefreshToken, expiresAt, req.ip, req.headers['user-agent'] || null]
     );
 
     // Keep only last 2 valid sessions
@@ -196,13 +202,16 @@ exports.login = async ({ email, password }, req) => {
 exports.refresh = async (refreshToken, req) => {
   if (!refreshToken) throw { status: 401, message: 'Refresh token required' };
 
+  // Hash the incoming raw token before looking up in DB
+  const hashedToken = hashToken(refreshToken);
+
   const sessionRes = await db.query(
     `SELECT s.user_id, s.expires_at, s.revoked,
             u.email, u.username, u.plant_id, u.is_active
      FROM user_sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.refresh_token = $1`,
-    [refreshToken]
+    [hashedToken]
   );
 
   if (!sessionRes.rowCount) throw { status: 401, message: 'Invalid refresh token' };
@@ -274,12 +283,14 @@ exports.sendResetLink = async (email) => {
   );
 
   const token = crypto.randomBytes(32).toString('hex');
+  const hashedResetToken = hashToken(token);
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
+  // Store hashed token in DB; send raw token to user via email
   await db.query(
     `INSERT INTO password_reset_tokens (user_id, token, expires_at)
      VALUES ($1, $2, $3)`,
-    [user.id, token, expiresAt]
+    [user.id, hashedResetToken, expiresAt]
   );
 
   const resetLink = `${process.env.FRONTEND_URL}/reset-password/${token}`;
@@ -293,11 +304,14 @@ exports.sendResetLink = async (email) => {
 };
 
 exports.resetPassword = async (token, password) => {
+  // Hash the incoming raw token before DB lookup
+  const hashedToken = hashToken(token);
+
   const result = await db.query(
     `SELECT user_id
      FROM password_reset_tokens
      WHERE token = $1 AND expires_at > NOW() AND used = false`,
-    [token]
+    [hashedToken]
   );
 
   if (result.rowCount === 0) throw { status: 400, message: 'Invalid or expired token' };
@@ -316,7 +330,7 @@ exports.resetPassword = async (token, password) => {
 
     await client.query(
       'UPDATE password_reset_tokens SET used = true WHERE token = $1',
-      [token]
+      [hashedToken]
     );
 
     // revoke all sessions after password change
@@ -337,11 +351,14 @@ exports.resetPassword = async (token, password) => {
 exports.logout = async (refreshToken) => {
   if (!refreshToken) return;
 
+  // Hash the incoming raw token before revoking in DB
+  const hashedToken = hashToken(refreshToken);
+
   await db.query(
     `UPDATE user_sessions
      SET revoked = true
      WHERE refresh_token = $1`,
-    [refreshToken]
+    [hashedToken]
   );
 };
 

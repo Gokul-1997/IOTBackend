@@ -16,7 +16,21 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc:  ["'self'"],
+      styleSrc:   ["'self'", "'unsafe-inline'"],
+      imgSrc:     ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "wss:", "ws:"],
+      fontSrc:    ["'self'", "https:"],
+      objectSrc:  ["'none'"],
+      frameAncestors: ["'none'"],
+    }
+  },
+  crossOriginEmbedderPolicy: false
+}));
 app.use(compression());
 
 // In production: skip all 2xx/3xx requests — only log errors (4xx/5xx).
@@ -38,7 +52,10 @@ app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
 
-    if (allowedOrigins.length === 0) return cb(null, true);
+    if (allowedOrigins.length === 0) {
+      if (process.env.NODE_ENV === 'production') return cb(new Error('CORS_ORIGINS not configured'));
+      return cb(null, true);
+    }
 
     return allowedOrigins.includes(origin)
       ? cb(null, true)
@@ -64,6 +81,9 @@ require('./routes')(app);
 
 // FIX: cron jobs were never imported anywhere — scheduled jobs never ran
 require('./cron');
+
+// API Documentation
+require('./swagger/swagger')(app);
 
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found' });
