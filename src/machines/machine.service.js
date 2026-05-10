@@ -10,6 +10,7 @@ exports.createMachine = async (req) => {
     y_axis,
     z_axis,
     fourth_axis,
+    fifth_axis,
     twin_spindle,
     twin_table,
     atc_tool_capacity,
@@ -65,6 +66,7 @@ exports.createMachine = async (req) => {
       y_axis,
       z_axis,
       fourth_axis,
+      fifth_axis,
       twin_spindle,
       twin_table,
       atc_tool_capacity,
@@ -76,7 +78,7 @@ exports.createMachine = async (req) => {
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
     )
     RETURNING id, machine_serial_no, api_key
     `,
@@ -89,6 +91,7 @@ exports.createMachine = async (req) => {
       y_axis,
       z_axis,
       fourth_axis,
+      fifth_axis,
       twin_spindle,
       twin_table,
       atc_tool_capacity,
@@ -175,6 +178,7 @@ exports.getMachines = async (req) => {
       m.y_axis,
       m.z_axis,
       m.fourth_axis,
+      m.fifth_axis,
       m.twin_spindle,
       m.twin_table,
       m.atc_tool_capacity,
@@ -268,6 +272,7 @@ exports.updateMachine = async (req) => {
     'y_axis',
     'z_axis',
     'fourth_axis',
+    'fifth_axis',
     'twin_spindle',
     'twin_table',
     'atc_tool_capacity',

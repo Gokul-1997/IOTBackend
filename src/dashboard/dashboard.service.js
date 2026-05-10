@@ -474,7 +474,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     /* ================= OPERATOR ================= */
  
     const { rows: operatorRows } = await db.query(`
-      SELECT o.operator_name
+      SELECT o.operator_name, o.operator_code
       FROM operator_machine_assignments a
       JOIN operator_shift_assignments osa
         ON osa.operator_id = a.operator_id
@@ -754,7 +754,8 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       },
 
       operator: {
-        operator_name: operator?.operator_name || '--'
+        operator_name: operator?.operator_name || '--',
+        employee_id:   operator?.operator_code || '--'
       },
 
       job: {
