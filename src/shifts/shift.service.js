@@ -113,6 +113,12 @@ exports.createShift = async (req) => {
 
   const breakMin = Number(break_minutes || 0);
 
+  const dup = await pool.query(
+    `SELECT id FROM shifts WHERE company_id = $1 AND shift_code = $2`,
+    [req.user.company_id, shift_code]
+  );
+  if (dup.rowCount > 0) throw new Error('A shift with this code already exists');
+
   const { startMin, duration } =
     validateShiftInput(start_time, end_time, breakMin);
 
@@ -160,6 +166,14 @@ exports.updateShift = async (id, data, company_id) => {
   }
 
   const current = existing.rows[0];
+
+  if (data.shift_code && data.shift_code !== current.shift_code) {
+    const dup = await pool.query(
+      `SELECT id FROM shifts WHERE company_id = $1 AND shift_code = $2 AND id != $3`,
+      [company_id, data.shift_code, id]
+    );
+    if (dup.rowCount > 0) throw new Error('A shift with this code already exists');
+  }
 
   const start_time = data.start_time ?? current.start_time;
   const end_time = data.end_time ?? current.end_time;
