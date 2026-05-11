@@ -31,10 +31,12 @@ exports.login = async ({ email, password }, req) => {
 
   // Step 1: Get user WITHOUT lock first (read-only)
   const userRes = await db.query(
-    `SELECT id, email, username, password_hash, plant_id, company_id, user_type,
-            is_active, failed_login_attempts, lock_until
-     FROM users
-     WHERE email = $1`,
+    `SELECT u.id, u.email, u.username, u.password_hash, u.plant_id, u.company_id, u.user_type,
+            u.is_active, u.failed_login_attempts, u.lock_until,
+            c.company_name
+     FROM users u
+     LEFT JOIN companies c ON c.id = u.company_id
+     WHERE u.email = $1`,
     [email]
   );
 
@@ -178,12 +180,13 @@ exports.login = async ({ email, password }, req) => {
       accessToken,
       refreshToken,
       user: {
-        id:          user.id,
-        email:       user.email,
-        username:    user.username,
-        plant_id:    user.plant_id,
-        company_id:  user.company_id,
-        user_type:   user.user_type,
+        id:           user.id,
+        email:        user.email,
+        username:     user.username,
+        company_name: user.company_name || null,
+        plant_id:     user.plant_id,
+        company_id:   user.company_id,
+        user_type:    user.user_type,
         is_snt_super,
         roles,
         permissions,
