@@ -168,7 +168,12 @@ exports.updateShift = async (id, data, company_id) => {
   const { startMin, duration } =
     validateShiftInput(start_time, end_time, breakMin);
 
-  await validateOverlap(company_id, startMin, duration, id);
+  // Only re-check overlap when times actually changed — avoids false positives
+  // when only shift_code / shift_name / break_minutes is being updated.
+  const timesChanged = data.start_time !== undefined || data.end_time !== undefined;
+  if (timesChanged) {
+    await validateOverlap(company_id, startMin, duration, id);
+  }
 
   const result = await pool.query(`
     UPDATE shifts
