@@ -46,7 +46,11 @@ const upsertQualityEntry = async (req, res) => {
     return res.json({ success: true, ...result });
   } catch (error) {
     console.error("Quality Entry Error:", error);
-    return res.status(500).json({ success: false, message: "Internal Server Error" });
+    const status = error.status || 500;
+    return res.status(status).json({
+      success: false,
+      message: status === 500 ? "Internal Server Error" : error.message
+    });
   }
 };
 

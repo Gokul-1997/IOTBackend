@@ -94,7 +94,7 @@ module.exports = async () => {
            FROM quality_entries
            WHERE machine_id = $1
              AND shift_id   = $2
-             AND created_at::date = $3::date`,
+             AND COALESCE(shift_date, created_at::date) = $3::date`,
           [row.machine_id, shift.id, hourStart]
         );
 

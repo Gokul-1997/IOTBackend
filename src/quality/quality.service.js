@@ -126,7 +126,7 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
      FROM quality_entries
      WHERE machine_id = $1
        AND shift_id   = $2
-       AND created_at::date = $3::date`,
+       AND COALESCE(shift_date, created_at::date) = $3::date`,
     [machine_id, shift_id, date]
   );
 
@@ -247,11 +247,34 @@ exports.upsertQualityEntryService = async ({
   rework_qty,
   user_id
 }) => {
+  // Validate reject+rework does not exceed produced_qty for this shift+date
+  const { rows: prodRows } = await db.query(
+    `SELECT COALESCE(SUM(produced_qty), 0) AS produced
+     FROM production_hourly ph
+     JOIN shifts s ON s.id = ph.shift_id
+     WHERE ph.machine_id = $1
+       AND ph.shift_id   = $2
+       AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+       AND ph.hour_start <  (
+             CASE WHEN s.start_time > s.end_time
+                  THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                  ELSE ($3::date + s.end_time)
+             END
+           ) AT TIME ZONE 'Asia/Kolkata'`,
+    [machine_id, shift_id, date]
+  );
+  const produced = Number(prodRows[0]?.produced || 0);
+  if (produced > 0 && (reject_qty + rework_qty) > produced) {
+    const err = new Error(`Reject (${reject_qty}) + Rework (${rework_qty}) cannot exceed produced quantity (${produced})`);
+    err.status = 422;
+    throw err;
+  }
+
   const { rows: existing } = await db.query(
     `SELECT id FROM quality_entries
      WHERE machine_id = $1
        AND shift_id   = $2
-       AND created_at::date = $3::date
+       AND COALESCE(shift_date, created_at::date) = $3::date
      ORDER BY created_at DESC
      LIMIT 1`,
     [machine_id, shift_id, date]
@@ -260,17 +283,17 @@ exports.upsertQualityEntryService = async ({
   if (existing.length > 0) {
     await db.query(
       `UPDATE quality_entries
-       SET reject_qty = $1, rework_qty = $2, entered_by = $3
-       WHERE id = $4`,
-      [reject_qty, rework_qty, user_id, existing[0].id]
+       SET reject_qty = $1, rework_qty = $2, entered_by = $3, shift_date = $4
+       WHERE id = $5`,
+      [reject_qty, rework_qty, user_id, date, existing[0].id]
     );
     return { action: "updated" };
   }
 
   await db.query(
-    `INSERT INTO quality_entries (machine_id, shift_id, reject_qty, rework_qty, entered_by)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [machine_id, shift_id, reject_qty, rework_qty, user_id]
+    `INSERT INTO quality_entries (machine_id, shift_id, shift_date, reject_qty, rework_qty, entered_by)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [machine_id, shift_id, date, reject_qty, rework_qty, user_id]
   );
   return { action: "created" };
 };
