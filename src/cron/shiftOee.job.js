@@ -77,10 +77,9 @@ module.exports = async () => {
            FROM quality_entries
            WHERE machine_id = ANY($1)
              AND shift_id   = $2
-             AND created_at >= $3
-             AND created_at <  $4
+             AND COALESCE(shift_date, created_at::date) = $3::date
            GROUP BY machine_id`,
-          [machineIds, shift.id, windowStart, windowEnd]
+          [machineIds, shift.id, shiftDate]
         );
 
         const qualityMap = {};
