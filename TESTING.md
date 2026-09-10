@@ -55,4 +55,3 @@ const res = await request(app).get('/api/<x>');
 - Real DB queries → use a separate `e2e-pg` suite (Testcontainers) when needed
 - Frontend behaviour → that's Playwright in `FrontendIOT/e2e/`
 - MQTT broker behaviour → that's `pms-backend/__tests__/`
-
