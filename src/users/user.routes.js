@@ -3,6 +3,7 @@ const ctrl = require('./user.controller');
 const auth = require('../middleware/auth.middleware');
 const role = require('../middleware/role.middleware');
 const validate = require('../middleware/validate.middleware');
+const checkQuota = require('../middleware/quota.middleware');
 
 // List all users (ADMIN only)
 router.get('/', auth, role(['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN']), ctrl.list);
@@ -11,7 +12,11 @@ router.get('/', auth, role(['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN']), ctrl.list);
 router.get('/:id', auth, role(['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN']), ctrl.getById);
 
 // Create user (ADMIN only)
-router.post('/', auth, role(['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN']), validate({
+/* The plan's user limit is enforced here. The quota middleware has
+   supported 'users' since it was written — its own docstring shows the
+   call — but it was never applied, so a Bronze company capped at 10
+   users could create as many as it liked. */
+router.post('/', auth, role(['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN']), checkQuota('users'), validate({
   username: { required: true, minLength: 3, maxLength: 50, label: 'Username' },
   email: { required: true, label: 'Email' },
   password: { required: true, minLength: 8, label: 'Password' },

@@ -11,7 +11,7 @@ const oeeDashSvc    = require('./oee.dashboard.service');
 const energySvc     = require('./energy.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
-const PDFDocument   = require('pdfkit');
+const { toCsv, tablePdf } = require('../utils/export.util');
 
 /* =====================================================
    DASHBOARD (Paginated Machine Cards)
@@ -465,67 +465,7 @@ exports.exportPeriodic = async (req, res) => {
   }
 };
 
-/**
- * Minimal RFC 4180 CSV.
- *
- * Quoting is not optional here: machine serials and task titles contain
- * commas, and a value with one would otherwise shift every later column on
- * that row — a corruption that looks like clean data when opened.
- */
-function toCsv(rows) {
-  const headers = Object.keys(rows[0]);
-  const cell = v => {
-    const s = v === null || v === undefined ? '' : String(v);
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [headers.join(','), ...rows.map(r => headers.map(h => cell(r[h])).join(','))].join('\r\n');
-}
 
-/**
- * A printable table, streamed so a large export never buffers in memory.
- *
- * Shared by every export on these dashboards: one layout to get right, and
- * two reports of the same data cannot drift apart in how they present it.
- */
-function tablePdf(res, title, rows, headers, widths) {
-  const doc = new PDFDocument({ margin: 36, size: 'A4', layout: 'landscape' });
-  doc.pipe(res);
-
-  doc.fontSize(16).text(title, { align: 'left' });
-  doc.fontSize(9).fillColor('#555')
-     .text(`Generated ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} — ${rows.length} record(s)`);
-  doc.moveDown(0.8).fillColor('#000');
-
-  const left = doc.page.margins.left;
-  const width = widths.reduce((a, b) => a + b, 0);
-
-  const line = (cells, bold) => {
-    const y = doc.y;
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
-    let x = left;
-    cells.forEach((c, i) => {
-      doc.text(String(c ?? ''), x, y, { width: widths[i] - 6, ellipsis: true, lineBreak: false });
-      x += widths[i];
-    });
-    doc.y = y + 14;
-  };
-
-  line(headers, true);
-  doc.moveTo(left, doc.y - 3).lineTo(left + width, doc.y - 3).strokeColor('#ccc').stroke();
-
-  for (const r of rows) {
-    // Break the page before writing, never after — writing first leaves a
-    // clipped half-row at the bottom of the page.
-    if (doc.y > doc.page.height - doc.page.margins.bottom - 20) {
-      doc.addPage();
-      line(headers, true);
-      doc.moveTo(left, doc.y - 3).lineTo(left + width, doc.y - 3).strokeColor('#ccc').stroke();
-    }
-    line(headers.map(h => r[h]));
-  }
-
-  doc.end();
-}
 
 /* Phase 2 · Screen 3 — Preventive Maintenance Dashboard */
 exports.preventive = async (req, res) => {

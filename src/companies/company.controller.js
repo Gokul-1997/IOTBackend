@@ -27,9 +27,19 @@ exports.update = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* The audit trail the agreement asks for: every plan change on a company,
+   who made it and what it replaced. */
+exports.getPlanHistory = async (req, res, next) => {
+  try {
+    const result = await svc.getPlanHistory(req.params.id, req.query);
+    res.json({ status: 'success', ...result });
+  } catch (e) { next(e); }
+};
+
 exports.assignPlan = async (req, res, next) => {
   try {
-    res.json(await svc.assignPlan(req.params.id, req.body));
+    // req.user.id is what makes the history answer "who authorised this?"
+    res.json(await svc.assignPlan(req.params.id, req.body, req.user.id));
   } catch (e) { next(e); }
 };
 

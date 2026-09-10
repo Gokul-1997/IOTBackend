@@ -29,12 +29,20 @@ module.exports = function checkQuota(resource) {
            COALESCE(cp.max_users,    p.max_users)    AS max_users
          FROM company_plans cp
          JOIN plans p ON p.id = cp.plan_id
-         WHERE cp.company_id = $1 AND cp.is_active = true`,
+         WHERE cp.company_id = $1
+           AND cp.is_active = true
+           /* An expired plan grants nothing. Without this an assignment
+              that lapsed months ago keeps handing out its full quota,
+              which makes expires_at decoration rather than a limit. */
+           AND (cp.expires_at IS NULL OR cp.expires_at > NOW())`,
         [company_id]
       );
 
       if (!planRows.length) {
-        return res.status(403).json({ message: 'No active plan found for your company. Contact your administrator.' });
+        return res.status(403).json({
+          message: 'No active plan found for your company, or the plan has expired. Contact your administrator.',
+          quota_exceeded: true
+        });
       }
 
       const limits = planRows[0];

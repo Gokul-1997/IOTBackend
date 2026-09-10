@@ -200,14 +200,81 @@ exports.update = async (id, { company_name, contact_email, contact_phone, addres
  * Assign or change a company's plan.
  * Supports per-company overrides for limits.
  */
-exports.assignPlan = async (company_id, { plan_id, max_users, max_plants, max_machines, expires_at }) => {
+/**
+ * Assign or change a company's subscription plan.
+ *
+ * Three things the agreement asks for and this now does:
+ *
+ *   The plan must be real and active. Assigning a deactivated plan would
+ *   leave the company with limits nobody is maintaining, and the quota
+ *   middleware would happily enforce them for years.
+ *
+ *   Custom limits must not exceed what the plan permits. Without that
+ *   check, "Bronze with max_machines 999" is accepted and the tiers mean
+ *   nothing — the limits are the product, not a suggestion.
+ *
+ *   Every change is recorded. company_plans holds one row per company and
+ *   is upserted, so without a history table each change silently erased
+ *   the one before it and no one could say when a company moved tier or
+ *   who authorised it.
+ */
+exports.assignPlan = async (company_id, { plan_id, max_users, max_plants, max_machines, expires_at, note }, changed_by = null) => {
   if (!plan_id) throw { status: 400, message: 'plan_id is required' };
+
+  if (expires_at && Number.isNaN(Date.parse(expires_at))) {
+    throw { status: 400, message: 'expires_at must be a valid date' };
+  }
+  if (expires_at && new Date(expires_at) <= new Date()) {
+    throw { status: 400, message: 'expires_at is in the past. A plan cannot be assigned already expired.' };
+  }
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Upsert plan assignment
+    /* Lock the company's current assignment for the duration. Two admins
+       changing the plan at once would otherwise both read the same "before"
+       state and write two history rows that each claim to follow it. */
+    const { rows: currentRows } = await client.query(
+      `SELECT plan_id, max_users, max_plants, max_machines
+         FROM company_plans WHERE company_id = $1 FOR UPDATE`,
+      [company_id]
+    );
+    const before = currentRows[0] || null;
+
+    const { rows: planRows } = await client.query(
+      `SELECT id, plan_name, is_active, max_users, max_plants, max_machines
+         FROM plans WHERE id = $1`,
+      [plan_id]
+    );
+    const plan = planRows[0];
+    if (!plan) throw { status: 404, message: 'Plan not found' };
+    if (!plan.is_active) {
+      throw { status: 400, message: `The ${plan.plan_name} plan is no longer available.` };
+    }
+
+    /* A custom limit above the plan's ceiling is rejected rather than
+       silently clamped: an admin who typed 999 should be told the plan does
+       not allow it, not left believing it was applied. */
+    const checkLimit = (label, value, ceiling) => {
+      if (value === null || value === undefined || value === '') return null;
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0) {
+        throw { status: 400, message: `${label} must be a whole number` };
+      }
+      if (ceiling != null && n > Number(ceiling)) {
+        throw {
+          status: 400,
+          message: `${label} of ${n} exceeds the ${plan.plan_name} plan maximum of ${ceiling}.`
+        };
+      }
+      return n;
+    };
+
+    const users    = checkLimit('Users limit',    max_users,    plan.max_users);
+    const plants   = checkLimit('Plants limit',   max_plants,   plan.max_plants);
+    const machines = checkLimit('Machines limit', max_machines, plan.max_machines);
+
     const { rows } = await client.query(
       `INSERT INTO company_plans (company_id, plan_id, max_users, max_plants, max_machines, expires_at, is_active)
        VALUES ($1, $2, $3, $4, $5, $6, true)
@@ -219,7 +286,19 @@ exports.assignPlan = async (company_id, { plan_id, max_users, max_plants, max_ma
          expires_at = $6,
          is_active = true
        RETURNING *`,
-      [company_id, plan_id, max_users || null, max_plants || null, max_machines || null, expires_at || null]
+      [company_id, plan_id, users, plants, machines, expires_at || null]
+    );
+
+    await client.query(
+      `INSERT INTO company_plan_history
+         (company_id, plan_id, max_users, max_plants, max_machines, expires_at,
+          previous_plan_id, previous_max_users, previous_max_plants, previous_max_machines,
+          changed_by, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [company_id, plan_id, users, plants, machines, expires_at || null,
+       before?.plan_id ?? null, before?.max_users ?? null,
+       before?.max_plants ?? null, before?.max_machines ?? null,
+       changed_by, note || null]
     );
 
     await client.query('COMMIT');
@@ -230,6 +309,39 @@ exports.assignPlan = async (company_id, { plan_id, max_users, max_plants, max_ma
   } finally {
     client.release();
   }
+};
+
+/** The audit trail for one company's plan, most recent change first. */
+exports.getPlanHistory = async (company_id, { page = 1, limit = 20 } = {}) => {
+  const pageNum  = Math.max(1, Number(page) || 1);
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const offset   = (pageNum - 1) * limitNum;
+
+  const [dataRes, countRes] = await Promise.all([
+    db.query(
+      `SELECT h.id, h.changed_at, h.note,
+              h.max_users, h.max_plants, h.max_machines, h.expires_at,
+              h.previous_max_users, h.previous_max_plants, h.previous_max_machines,
+              p.plan_name  AS plan_name,
+              pp.plan_name AS previous_plan_name,
+              u.username   AS changed_by_name
+         FROM company_plan_history h
+         LEFT JOIN plans p  ON p.id  = h.plan_id
+         LEFT JOIN plans pp ON pp.id = h.previous_plan_id
+         LEFT JOIN users u  ON u.id  = h.changed_by
+        WHERE h.company_id = $1
+        ORDER BY h.changed_at DESC, h.id DESC
+        LIMIT $2 OFFSET $3`,
+      [company_id, limitNum, offset]
+    ),
+    db.query(`SELECT COUNT(*)::int AS total FROM company_plan_history WHERE company_id = $1`, [company_id])
+  ]);
+
+  const total = countRes.rows[0].total;
+  return {
+    data: dataRes.rows, total, page: pageNum, limit: limitNum,
+    totalPages: Math.max(1, Math.ceil(total / limitNum))
+  };
 };
 
 /**

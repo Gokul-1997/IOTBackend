@@ -11,6 +11,7 @@ router.get('/',                       auth, isSNT,  ctrl.list);
 router.get('/:id',                    auth,          ctrl.getById);
 router.put('/:id',                    auth, isSNT,  ctrl.update);
 router.post('/:id/plan',              auth, isSNT,  ctrl.assignPlan);
+router.get('/:id/plan/history',       auth, isSNT,  ctrl.getPlanHistory);
 router.get('/:id/plan-features',      auth,          ctrl.getPlanFeatures);
 router.get('/:id/permissions',        auth,          ctrl.getCompanyPermissions);
 router.put('/:id/permissions',        auth, isSNT,  ctrl.assignCompanyPermissions);
