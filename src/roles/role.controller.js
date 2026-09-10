@@ -38,7 +38,7 @@ exports.getById = async (req, res) => {
 
 exports.update = async (req, res) => {
   try {
-    res.json(await svc.update(req.params.id, req.body));
+    res.json(await svc.update(req.params.id, req.body, req.user));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
   }
@@ -67,7 +67,7 @@ exports.assignPermissions = async (req, res) => {
 
 exports.remove = async (req, res) => {
   try {
-    await svc.remove(req.params.id);
+    await svc.remove(req.params.id, req.user);
     res.json({ success: true });
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
@@ -76,7 +76,7 @@ exports.remove = async (req, res) => {
 
 exports.assign = async (req, res) => {
   try {
-    await svc.assign(req.params.id, req.body.role_ids);
+    await svc.assign(req.params.id, req.body.role_ids, req.user);
     res.json({ success: true });
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
