@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 
 const app = require('./app');
 const redis = require('./redis'); // ioredis instance
+const realtime = require('./lib/realtime');
 
 const PORT = process.env.PORT || 8000;
 
@@ -56,8 +57,15 @@ io.use((socket, next) => {
 /* ===============================
    🔄 Socket Connection
 ================================ */
+realtime.setIo(io);
+
 io.on('connection', (socket) => {
   // intentionally silent — fires on every browser tab open; too noisy for production
+
+  // Private room per user so per-request progress (e.g. program transfer)
+  // reaches every tab that user has open, and nobody else's.
+  const userId = socket.user?.user_id;
+  if (userId) socket.join(`user:${userId}`);
 
   socket.on('joinPlant', (plantId) => {
     socket.join(`plant:${plantId}`);

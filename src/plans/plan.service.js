@@ -14,6 +14,29 @@ const APP_MODULES = [
   // ── Quality (widget-level) ──
   { key: 'quality',        label: 'Quality',          group: 'Main',   actions: ['view', 'oee-metrics', 'production-cards', 'hourly-chart', 'edit'] },
 
+  // ── Phase 2 modules — added here because they were shipped with routes
+  // and a nav entry (header.component.ts) but never registered as a real
+  // permission. hasPermission() has no 'page:maintenance' etc. to grant
+  // to anyone, so for every role except SNT_SUPER (which bypasses checks
+  // entirely) the header's own permission filter silently hid Maintenance,
+  // Alarms and Downtime from the nav menu — the pages worked fine if you
+  // knew the URL (their routes have no guard), the menu item just never
+  // rendered. Ticket actions (create/assign/status-change) live under the
+  // existing 'maintenance' key rather than a new module, since Tickets is
+  // a tab on that same page, not a separate route.
+  { key: 'maintenance',       label: 'Maintenance',       group: 'Main', actions: ['view', 'create', 'edit', 'delete'] },
+  { key: 'alarms',            label: 'Alarms',            group: 'Main', actions: ['view', 'resolve'] },
+  { key: 'downtime',          label: 'Downtime',          group: 'Main', actions: ['view', 'create', 'edit'] },
+  { key: 'production-plans',  label: 'Production Plans',  group: 'Main', actions: ['view', 'create', 'edit', 'delete'] },
+
+  // Program Transfer shipped with a route and a nav entry but no module
+  // entry at all, so no page:programs:* key had ever existed and every
+  // /api/programs route ran on `auth` alone. Migration 013 grants these
+  // to the system roles; the actions are deliberately finer than CRUD
+  // because sending to a controller and deleting from the library carry
+  // very different risk.
+  { key: 'programs',          label: 'Program Transfer',  group: 'Main', actions: ['view', 'upload', 'transfer', 'fetch', 'delete'] },
+
   // ── Master pages (CRUD) ──
   { key: 'machines',       label: 'Machines',         group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'component',      label: 'Component',        group: 'Master', actions: ['view', 'create', 'edit', 'delete'] },
@@ -63,6 +86,10 @@ const ACTION_LABELS = {
   // Charts widgets
   'partwise-chart':  'Part-Wise Run vs Idle Chart',
   'hourly-chart':    'Hourly Part Count Chart',
+  // Program Transfer actions
+  upload:            'Upload to Library',
+  transfer:          'Send to Machine',
+  fetch:             'Fetch from Machine',
   // Quality widgets
   'oee-metrics':     'OEE Metric Cards',
   'production-cards':'Production Cards (Target/Accepted/Rejected/Rework)',

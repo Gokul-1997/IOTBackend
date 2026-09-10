@@ -1,5 +1,6 @@
 const db = require('../db');
 const pwd = require('../utils/password');
+const { setSupervisedMachines, listSupervisedMachines } = require('../programs/authorization.service');
 
 exports.create = async (data, reqUser) => {
   if (!data.username || !data.email || !data.password) {
@@ -41,6 +42,7 @@ exports.create = async (data, reqUser) => {
 
   const hash = await pwd.hash(data.password);
   const client = await db.connect();
+  let user;
 
   try {
     await client.query('BEGIN');
@@ -57,7 +59,7 @@ exports.create = async (data, reqUser) => {
       [data.username, data.email, hash, plant_id, company_id]
     );
 
-    const user = rows[0];
+    user = rows[0];
     const roleIds = data.role_ids || [];
 
     if (roleIds.length > 0) {
@@ -86,13 +88,24 @@ exports.create = async (data, reqUser) => {
     user.roles = roleRes.rows;
 
     await client.query('COMMIT');
-    return user;
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
   } finally {
     client.release();
   }
+
+  // Machines this user supervises — the people who authorise program
+  // transfers to them. Applied after the user transaction commits so the
+  // two never share a client, and skipped entirely when the caller did
+  // not send the field.
+  if (Array.isArray(data.supervised_machine_ids)) {
+    user.supervised_machine_ids = await setSupervisedMachines(
+      user.id, user.company_id, data.supervised_machine_ids, reqUser.id
+    );
+  }
+
+  return user;
 };
 
 exports.list = async (reqUser) => {
@@ -156,11 +169,15 @@ exports.getById = async (userId, reqUser) => {
     [userId]
   );
   user.roles = roleRes.rows;
+  user.supervised_machine_ids = await listSupervisedMachines(userId, user.company_id);
   return user;
 };
 
 exports.update = async (userId, reqUser, data) => {
   const client = await db.connect();
+  const wantsSupervisorChange = Array.isArray(data.supervised_machine_ids);
+  let user;
+
   try {
     await client.query('BEGIN');
 
@@ -201,10 +218,15 @@ exports.update = async (userId, reqUser, data) => {
       updates.push(`plant_id = $${paramIndex++}`); params.push(data.plant_id || null);
     }
 
-    if (!updates.length) {
+    if (!updates.length && !wantsSupervisorChange) {
       await client.query('ROLLBACK');
       throw { status: 400, message: 'No fields to update' };
     }
+
+    // Changing only the supervised machines touches no user column, but the
+    // statement still has to run so the company-scoped WHERE below decides
+    // whether this caller may see the user at all (and 404s if not).
+    if (!updates.length) updates.push('username = username');
 
     query += updates.join(', ');
 
@@ -224,7 +246,7 @@ exports.update = async (userId, reqUser, data) => {
       throw { status: 404, message: 'User not found' };
     }
 
-    const user = result.rows[0];
+    user = result.rows[0];
     const roleRes = await client.query(
       `SELECT r.id, r.role_name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = $1`,
       [userId]
@@ -232,13 +254,20 @@ exports.update = async (userId, reqUser, data) => {
     user.roles = roleRes.rows;
 
     await client.query('COMMIT');
-    return user;
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
   } finally {
     client.release();
   }
+
+  if (wantsSupervisorChange) {
+    user.supervised_machine_ids = await setSupervisedMachines(
+      user.id, user.company_id, data.supervised_machine_ids, reqUser.id
+    );
+  }
+
+  return user;
 };
 
 exports.remove = async (userId, reqUser) => {

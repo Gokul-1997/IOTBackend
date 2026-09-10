@@ -3,9 +3,10 @@ const service = require('./audit.service');
 exports.getLogs = async (req, res) => {
   try {
     const result = await service.getLogs({
+      ...req.query,
+      // identity last — see alarms: is_snt_super disables tenant scoping
       company_id:   req.user.company_id,
-      is_snt_super: req.user.is_snt_super,
-      ...req.query
+      is_snt_super: req.user.is_snt_super
     });
     res.json({ success: true, ...result });
   } catch (e) {

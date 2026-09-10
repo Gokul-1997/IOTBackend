@@ -3,9 +3,11 @@ const service = require('./alarm.service');
 exports.getAlarms = async (req, res) => {
   try {
     const result = await service.getAlarms({
+      ...req.query,
+      // identity last: a client that sends is_snt_super=true would
+      // otherwise switch off the company filter entirely
       company_id: req.user.company_id,
-      is_snt_super: req.user.is_snt_super,
-      ...req.query
+      is_snt_super: req.user.is_snt_super
     });
     res.json({ success: true, ...result });
   } catch (e) {

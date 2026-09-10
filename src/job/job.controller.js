@@ -55,11 +55,20 @@ exports.getCurrentJobs = async (req, res) => {
 
     const companyId = req.user.company_id;
 
-    const result = await service.getCurrentJobs(companyId);
+    const result = await service.getCurrentJobs(companyId, {
+      page:  req.query.page,
+      limit: req.query.limit
+    });
 
+    // `data` stays an array so existing clients keep working; the paging
+    // fields sit alongside it for anyone who asks for page/limit.
     res.json({
       status: "success",
-      data: result
+      data:       result.data,
+      total:      result.total,
+      page:       result.page,
+      limit:      result.limit,
+      totalPages: result.totalPages
     });
 
   } catch (err) {
@@ -91,11 +100,18 @@ exports.getJobHistory = async (req, res) => {
 
     const companyId = req.user.company_id;
 
-    const result = await service.getJobHistory(companyId);
+    const result = await service.getJobHistory(companyId, {
+      page:  req.query.page,
+      limit: req.query.limit
+    });
 
     res.json({
       status: "success",
-      data: result
+      data:       result.data,
+      total:      result.total,
+      page:       result.page,
+      limit:      result.limit,
+      totalPages: result.totalPages
     });
 
   } catch (err) {

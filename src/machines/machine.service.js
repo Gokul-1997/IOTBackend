@@ -18,7 +18,12 @@ exports.createMachine = async (req) => {
     mmc_no,
     controller,
     spindle_rpm,
-    image_url
+    image_url,
+    ip_address,
+    ftp_port,
+    ftp_user,
+    ftp_pass,
+    ftp_dir
   } = req.body;
 
   if (!machine_serial_no) {
@@ -75,10 +80,15 @@ exports.createMachine = async (req) => {
       controller,
       spindle_rpm,
       image_url,
+      ip_address,
+      ftp_port,
+      ftp_user,
+      ftp_pass,
+      ftp_dir,
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
     )
     RETURNING id, machine_serial_no, api_key
     `,
@@ -100,6 +110,11 @@ exports.createMachine = async (req) => {
       controller,
       spindle_rpm,
       image_url,
+      ip_address || null,
+      ftp_port || 21,
+      ftp_user || null,
+      ftp_pass || null,
+      ftp_dir || null,
       apiKey
     ]
   );
@@ -186,6 +201,10 @@ exports.getMachines = async (req) => {
       m.mmc_no,
       m.controller,
       m.spindle_rpm,
+      m.ip_address,
+      m.ftp_port,
+      m.ftp_user,
+      m.ftp_dir,
       m.api_key,
       m.is_active,
       m.created_at
@@ -280,7 +299,12 @@ exports.updateMachine = async (req) => {
     'mmc_no',
     'controller',
     'spindle_rpm',
-    'image_url'
+    'image_url',
+    'ip_address',
+    'ftp_port',
+    'ftp_user',
+    'ftp_pass',
+    'ftp_dir'
   ];
 
   const fields = [];
@@ -289,6 +313,9 @@ exports.updateMachine = async (req) => {
 
   for (const key of allowedFields) {
     if (req.body[key] !== undefined) {
+      // ftp_pass is write-only (never returned by the API); an empty value
+      // means "keep the existing password", not "clear it"
+      if (key === 'ftp_pass' && !req.body[key]) continue;
       fields.push(`${key} = $${index}`);
       values.push(req.body[key]);
       index++;
@@ -315,5 +342,7 @@ exports.updateMachine = async (req) => {
     throw new Error('Machine not found or access denied');
   }
 
-  return result.rows[0];
+  // ftp_pass is write-only — never send it back to the client
+  const { ftp_pass: _omitted, ...machine } = result.rows[0];
+  return machine;
 };

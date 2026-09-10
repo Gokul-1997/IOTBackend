@@ -9,7 +9,7 @@ exports.getReasons = async (req, res) => {
 
 exports.createReason = async (req, res) => {
   try {
-    const data = await service.createReason({ company_id: req.user.company_id, ...req.body });
+    const data = await service.createReason({ ...req.body, company_id: req.user.company_id });
     res.status(201).json({ success: true, data });
   } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
 };
@@ -23,21 +23,21 @@ exports.updateReason = async (req, res) => {
 
 exports.logEvent = async (req, res) => {
   try {
-    const data = await service.logEvent({ company_id: req.user.company_id, entered_by: req.user.id, ...req.body });
+    const data = await service.logEvent({ ...req.body, company_id: req.user.company_id, entered_by: req.user.id });
     res.status(201).json({ success: true, data });
   } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message }); }
 };
 
 exports.getEvents = async (req, res) => {
   try {
-    const result = await service.getEvents({ company_id: req.user.company_id, ...req.query });
+    const result = await service.getEvents({ ...req.query, company_id: req.user.company_id });
     res.json({ success: true, ...result });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
 exports.getDowntimeSummary = async (req, res) => {
   try {
-    const data = await service.getDowntimeSummary({ company_id: req.user.company_id, ...req.query });
+    const data = await service.getDowntimeSummary({ ...req.query, company_id: req.user.company_id });
     res.json({ success: true, data });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };

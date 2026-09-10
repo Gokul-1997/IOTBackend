@@ -231,11 +231,25 @@ exports.dashboard = async (plant_id, company_id) => {
    * because connection drops cause false resets and inflated counts.
    */
 
+  /*
+   * The received_at bound is load-bearing. telemetry_raw is a Timescale
+   * hypertable with ~180 chunks over months of data; with no time predicate
+   * the planner cannot prune chunks and this DISTINCT ON walks all of them.
+   * Measured against production, the same shape of query on the factory
+   * dashboard had not finished after 227 seconds; bounded it returns in ~20ms.
+   *
+   * An hour is far wider than the 60s OFFLINE_THRESHOLD used below, so it
+   * cannot change any machine's computed status: a machine with no row in the
+   * last hour falls out of liveMap, `live` becomes {}, receivedAtSec stays 0
+   * and the status is already OFFLINE — which is exactly what it would have
+   * been with the full history. Do not remove it.
+   */
   const { rows: liveRows } = await db.query(`
     SELECT DISTINCT ON (machine_id)
       machine_id, machine_status, alarm, received_at
     FROM telemetry_raw
     WHERE machine_id = ANY($1)
+      AND received_at > NOW() - INTERVAL '1 hour'
     ORDER BY machine_id, received_at DESC
   `, [machineIds]);
 
@@ -750,6 +764,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       },
 
       shift: {
+        id:         shift?.id || null,
         shift_code: shift?.shift_code || '--'
       },
 

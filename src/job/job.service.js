@@ -92,9 +92,26 @@ exports.getAvailableMachines = async (company_id) => {
   return rows;
 };
 
-exports.getCurrentJobs = async (company_id) => {
+/**
+ * Currently running jobs, newest first.
+ *
+ * Bounded by machine count in practice, but paginated on the same opt-in
+ * terms as the history so both endpoints answer in one shape.
+ */
+exports.getCurrentJobs = async (company_id, { page, limit } = {}) => {
 
-  const { rows } = await db.query(`
+  const paginated = page != null || limit != null;
+
+  const lim    = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+  const pg     = Math.max(parseInt(page, 10) || 1, 1);
+  const offset = (pg - 1) * lim;
+
+  const where = `
+    WHERE m.company_id = $1
+      AND m.is_active = TRUE
+      AND j.is_active = TRUE`;
+
+  const select = `
     SELECT
       m.id AS machine_id,
       m.machine_serial_no,
@@ -104,20 +121,59 @@ exports.getCurrentJobs = async (company_id) => {
       j.started_at
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
-    WHERE m.company_id = $1
-      AND m.is_active = TRUE
-      AND j.is_active = TRUE
-    ORDER BY j.started_at DESC
-  `,[company_id]);
+    ${where}
+    ORDER BY j.started_at DESC, j.id DESC`;
 
-  return rows;
+  const countSql = `
+    SELECT COUNT(*)::int AS total
+    FROM machine_current_job j
+    JOIN machines m ON m.id = j.machine_id
+    ${where}`;
+
+  const [dataRes, countRes] = await Promise.all([
+    db.query(paginated ? `${select} LIMIT $2 OFFSET $3` : select,
+             paginated ? [company_id, lim, offset] : [company_id]),
+    db.query(countSql, [company_id])
+  ]);
+
+  // tolerate an empty count result rather than throwing on .total
+  const total = countRes.rows[0]?.total ?? dataRes.rows.length;
+
+  return {
+    data:       dataRes.rows,
+    total,
+    page:       paginated ? pg : 1,
+    limit:      paginated ? lim : total,
+    totalPages: paginated ? Math.max(Math.ceil(total / lim), 1) : 1
+  };
 
 };
 
-exports.getJobHistory = async (company_id) => {
+/**
+ * Job history, newest first.
+ *
+ * This used to be a bare `LIMIT 200` with no offset and no total: once a
+ * company passed 200 jobs the older ones were simply unreachable, and no
+ * client could have paged to them because the row count was never returned.
+ *
+ * Pagination is opt-in so existing callers are unaffected — omit page/limit
+ * and you get the whole history as before (minus the silent truncation).
+ */
+exports.getJobHistory = async (company_id, { page, limit } = {}) => {
 
-  const { rows } = await db.query(`
+  const paginated = page != null || limit != null;
+
+  // clamp: a caller asking for limit=100000 should not be able to pull the
+  // whole table into memory
+  const lim    = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+  const pg     = Math.max(parseInt(page, 10) || 1, 1);
+  const offset = (pg - 1) * lim;
+
+  const where  = `WHERE m.company_id = $1`;
+  const select = `
     SELECT
+      j.id AS job_id,
+      m.id AS machine_id,
       m.machine_serial_no,
       j.part_name,
       j.target_qty,
@@ -126,11 +182,30 @@ exports.getJobHistory = async (company_id) => {
       j.is_active
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
-    WHERE m.company_id = $1
-    ORDER BY j.started_at DESC
-    LIMIT 200
-  `,[company_id]);
+    ${where}
+    ORDER BY j.started_at DESC, j.id DESC`;
 
-  return rows;
+  const countSql = `
+    SELECT COUNT(*)::int AS total
+    FROM machine_current_job j
+    JOIN machines m ON m.id = j.machine_id
+    ${where}`;
+
+  const [dataRes, countRes] = await Promise.all([
+    db.query(paginated ? `${select} LIMIT $2 OFFSET $3` : select,
+             paginated ? [company_id, lim, offset] : [company_id]),
+    db.query(countSql, [company_id])
+  ]);
+
+  // tolerate an empty count result rather than throwing on .total
+  const total = countRes.rows[0]?.total ?? dataRes.rows.length;
+
+  return {
+    data:       dataRes.rows,
+    total,
+    page:       paginated ? pg : 1,
+    limit:      paginated ? lim : total,
+    totalPages: paginated ? Math.max(Math.ceil(total / lim), 1) : 1
+  };
 
 };
