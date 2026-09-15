@@ -277,3 +277,59 @@ describe('export', () => {
     expect(rows[0]['Shared']).toBe('2 shared');
   });
 });
+
+/*
+ * Performance bands — the five tiles across the top of Screen 7.
+ *
+ * The tiles are counted server-side over every operator rather than in the
+ * client over the page it happens to be showing, so paging through the
+ * table cannot change the headline numbers.
+ */
+describe('performance bands', () => {
+  const at = oee => ({ oee_pct: oee });
+
+  test('counts each operator into exactly one band', () => {
+    const b = svc.band([at(92), at(86), at(80), at(75), at(70), at(60), at(12)]);
+    expect(b).toEqual({ excellent: 2, good: 2, average: 2, needs_help: 1, unrated: 0 });
+    // every operator is counted once and only once
+    const total = b.excellent + b.good + b.average + b.needs_help + b.unrated;
+    expect(total).toBe(7);
+  });
+
+  test('the boundaries belong to the higher band', () => {
+    expect(svc.band([at(85)]).excellent).toBe(1);
+    expect(svc.band([at(84.9)]).good).toBe(1);
+    expect(svc.band([at(75)]).good).toBe(1);
+    expect(svc.band([at(74.9)]).average).toBe(1);
+    expect(svc.band([at(60)]).average).toBe(1);
+    expect(svc.band([at(59.9)]).needs_help).toBe(1);
+  });
+
+  test('an operator with no OEE reading is unrated, not failing', () => {
+    // no measurement and a bad measurement are different claims, and
+    // dropping the unmeasured into "needs help" accuses someone of
+    // poor work on the strength of a missing cycle time
+    const b = svc.band([at(null), at(undefined), at(90)]);
+    expect(b.unrated).toBe(2);
+    expect(b.needs_help).toBe(0);
+    expect(b.excellent).toBe(1);
+  });
+
+  test('zero is a real score, not a missing one', () => {
+    const b = svc.band([at(0)]);
+    expect(b.needs_help).toBe(1);
+    expect(b.unrated).toBe(0);
+  });
+
+  test('no operators gives all zeros rather than throwing', () => {
+    expect(svc.band([])).toEqual({ excellent: 0, good: 0, average: 0, needs_help: 0, unrated: 0 });
+  });
+
+  test('the dashboard exposes the bands it computed', async () => {
+    queueAll([row({ oee: '90' }), row({ operator_id: 2, oee: '50' }), row({ operator_id: 3, oee: null })]);
+    const res = await svc.getOperators({ company_id });
+    expect(res.bands).toEqual({ excellent: 1, good: 0, average: 0, needs_help: 1, unrated: 1 });
+    // and they cover everyone, not just the page
+    expect(res.attribution.operators).toBe(3);
+  });
+});

@@ -361,6 +361,7 @@ exports.periodic = async (req, res) => {
       machine_id: req.query.machine_id,
       search:     req.query.search,
       status:     req.query.status,
+      due:        req.query.due,
       page:       req.query.page,
       limit:      req.query.limit
     });
@@ -428,7 +429,9 @@ exports.exportPeriodic = async (req, res) => {
       company_id: req.user.company_id,
       machine_id: req.query.machine_id,
       search:     req.query.search,
-      status:     req.query.status
+      status:     req.query.status,
+      // the export must honour the same filter the screen is showing
+      due:        req.query.due
     });
 
     if (!rows.length) {

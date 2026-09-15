@@ -42,7 +42,8 @@ describe('maintenance dashboard — query safety', () => {
     expect(telemetry.length).toBeGreaterThan(0);
     telemetry.forEach(c => {
       // without this the planner cannot prune chunks and the query is unusable
-      expect(c.text).toMatch(/received_at > NOW\(\) - INTERVAL '1 hour'/);
+      // either the live freshness window or the dashboard's own date window
+      expect(c.text).toMatch(/received_at > NOW\(\) - INTERVAL '1 hour'|received_at >= \$2 AND t\.received_at < \$3/);
     });
   });
 
@@ -111,15 +112,19 @@ describe('maintenance dashboard — shaping', () => {
     expect(res.alarms).toEqual({ total: 0, open: 0, critical: 0, non_critical: 0, information: 0 });
   });
 
-  test('names the signals it cannot show, so the UI need not guess', async () => {
-    queueAll();
+  test('names the signals no machine reported, measured from the rows', async () => {
+    // a machine reporting only servo load and temperature, like the
+    // embedded team's sample
+    queueAll({ rows: [{ machine_id: 1, machine_serial_no: 'VMC-1',
+                        servo_load_x: 5, servo_temp_x: 27, spindle_motor_temp: 36 }] });
     const res = await svc.getMaintenanceDashboard(req());
 
-    // servo/temperature/battery/insulation/fan are not collected by anything
     expect(res.unavailable).toEqual(expect.arrayContaining([
-      'servo_load_per_axis', 'machine_temperature', 'battery_status',
-      'insulation_resistance', 'fan_amplifier_status'
+      'encoder_temperature', 'battery_status', 'insulation_resistance', 'fan_amplifier_status'
     ]));
+    expect(res.unavailable).not.toContain('servo_load_per_axis');
+    expect(res.unavailable).not.toContain('servo_temperature');
+    expect(res.unavailable).not.toContain('spindle_temperature');
   });
 
   test('missing rollup rows degrade to nulls instead of throwing', async () => {
@@ -158,5 +163,67 @@ describe('maintenance dashboard — filters', () => {
 
     expect(res.filters).toMatchObject({ date: '2026-08-06', machine_id: 7, shift_id: null });
     expect(res.updated_at).toBeTruthy();
+  });
+});
+
+/*
+ * Machine condition signals (migration 021).
+ */
+describe('maintenance dashboard — condition signals', () => {
+  const { unavailableSignals, SIGNAL_COLUMNS } = svc;
+
+  test('the live row query reads every condition column', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req());
+    const rowsSql = sqlOf(1);
+    for (const cols of Object.values(SIGNAL_COLUMNS)) {
+      for (const c of cols) expect(rowsSql).toContain(`l.${c}`);
+    }
+  });
+
+  test('one axis on one machine is enough for a signal to be available', () => {
+    // "temperature is available for 1 servo": Y and Z silent, X reporting
+    const rows = [{ servo_temp_x: null }, { servo_temp_x: null, servo_temp_z: 41 }];
+    expect(unavailableSignals(rows)).not.toContain('servo_temperature');
+  });
+
+  test('a genuine 0 counts as a reading', () => {
+    expect(unavailableSignals([{ servo_load_x: 0 }])).not.toContain('servo_load_per_axis');
+  });
+
+  test('no rows means every signal is unavailable, and bad input does not throw', () => {
+    const all = Object.keys(SIGNAL_COLUMNS);
+    expect(unavailableSignals([])).toEqual(all);
+    expect(unavailableSignals(null)).toEqual(all);
+    expect(unavailableSignals([null, undefined])).toEqual(all);
+  });
+
+  test('no machine selected: the condition trend is not queried at all', async () => {
+    queueAll();
+    const res = await svc.getMaintenanceDashboard(req());
+    // averaging servo temperatures across a fleet describes no motor, and it
+    // is the most expensive scan the screen could run
+    expect(mockDb.calls().some(c => /date_trunc\('hour', t\.received_at\)/.test(c.text))).toBe(false);
+    expect(res.condition_trend).toEqual([]);
+  });
+
+  test('one machine selected: the trend is bounded, scoped and binds exactly its parameters', async () => {
+    queueAll();
+    mockDb.queueResponse({ rows: [{ hour_start: '2026-08-06T09:00:00Z', servo_temp_x: 27 }] });
+    const res = await svc.getMaintenanceDashboard(req({ machine_id: '7' }));
+
+    const call = mockDb.calls().find(c => /date_trunc\('hour', t\.received_at\)/.test(c.text));
+    expect(call).toBeTruthy();
+    expect(call.text).toMatch(/t\.received_at >= \$2 AND t\.received_at < \$3/);
+    expect(call.text).toMatch(/m\.company_id = \$1/);
+    expect(call.text).toMatch(/t\.machine_id = \$4/);
+
+    // Postgres rejects a statement given more parameters than it references
+    const highest = Math.max(...[...call.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
+    expect(call.params.length).toBe(highest);
+    expect(call.params[0]).toBe(company_id);
+    expect(call.params[3]).toBe(7);
+
+    expect(res.condition_trend).toEqual([{ hour_start: '2026-08-06T09:00:00Z', servo_temp_x: 27 }]);
   });
 });

@@ -51,7 +51,7 @@ exports.getMaintenanceDashboard = async (req) => {
     ? [companyId, win.from, win.to, machineId]
     : [companyId, win.from, win.to];
 
-  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, trendRes] = await Promise.all([
+  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, trendRes, conditionRes] = await Promise.all([
 
     /* fleet health: how many machines are reporting and not alarming.
        "Health" is not defined in the agreement, so it is stated plainly
@@ -102,7 +102,15 @@ exports.getMaintenanceDashboard = async (req) => {
       WITH latest AS (
         SELECT DISTINCT ON (t.machine_id)
                t.machine_id, t.machine_status, t.alarm, t.spindle_load,
-               t.feed_rate, t.received_at
+               t.feed_rate, t.received_at,
+               t.spindle_speed, t.spindle_motor_temp, t.spindle_insulation_res,
+               t.servo_load_x, t.servo_load_y, t.servo_load_z,
+               t.servo_temp_x, t.servo_temp_y, t.servo_temp_z,
+               t.encoder_temp_x, t.encoder_temp_y, t.encoder_temp_z,
+               t.servo_insulation_res_x, t.servo_insulation_res_y, t.servo_insulation_res_z,
+               t.servo_pulse_x, t.servo_pulse_y, t.servo_pulse_z,
+               t.cnc_battery_voltage, t.apc_battery_voltage, t.sequence_number,
+               t.fan_status
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
         WHERE m.company_id = $1 AND m.is_active
@@ -129,6 +137,14 @@ exports.getMaintenanceDashboard = async (req) => {
         l.spindle_load,
         l.feed_rate,
         l.received_at,
+        l.spindle_speed, l.spindle_motor_temp, l.spindle_insulation_res,
+        l.servo_load_x, l.servo_load_y, l.servo_load_z,
+        l.servo_temp_x, l.servo_temp_y, l.servo_temp_z,
+        l.encoder_temp_x, l.encoder_temp_y, l.encoder_temp_z,
+        l.servo_insulation_res_x, l.servo_insulation_res_y, l.servo_insulation_res_z,
+        l.servo_pulse_x, l.servo_pulse_y, l.servo_pulse_z,
+        l.cnc_battery_voltage, l.apc_battery_voltage, l.sequence_number,
+        l.fan_status,
         COALESCE(rt.run_seconds, 0)::int AS run_seconds
       FROM machines m
       LEFT JOIN latest  l  ON l.machine_id  = m.id
@@ -189,7 +205,33 @@ exports.getMaintenanceDashboard = async (req) => {
                AS avg_cycle_seconds
       FROM production_hourly WHERE ${s.sql}
       GROUP BY hour_start ORDER BY hour_start`, s.params
-    )
+    ),
+
+    /* condition trend: servo and spindle temperature and insulation
+       resistance, hour by hour, for one machine.
+
+       Only when a machine is selected. Averaging servo temperatures across
+       a fleet produces a number that describes no motor, and the scan —
+       every telemetry row for every machine across the window — is the
+       most expensive query this screen could run. The received_at bounds
+       are what let TimescaleDB prune to the window's chunks. */
+    machineId
+      ? db.query(`
+          SELECT date_trunc('hour', t.received_at)              AS hour_start,
+                 ROUND(AVG(t.servo_temp_x)::numeric, 1)::float  AS servo_temp_x,
+                 ROUND(AVG(t.servo_temp_y)::numeric, 1)::float  AS servo_temp_y,
+                 ROUND(AVG(t.servo_temp_z)::numeric, 1)::float  AS servo_temp_z,
+                 ROUND(AVG(t.spindle_motor_temp)::numeric, 1)::float AS spindle_motor_temp,
+                 ROUND(AVG(t.servo_insulation_res_x)::numeric, 1)::float AS servo_insulation_res_x,
+                 ROUND(AVG(t.servo_insulation_res_y)::numeric, 1)::float AS servo_insulation_res_y,
+                 ROUND(AVG(t.servo_insulation_res_z)::numeric, 1)::float AS servo_insulation_res_z
+            FROM telemetry_raw t
+            JOIN machines m ON m.id = t.machine_id AND m.company_id = $1
+           WHERE t.machine_id = $4
+             AND t.received_at >= $2 AND t.received_at < $3
+           GROUP BY 1 ORDER BY 1`,
+          [companyId, win.from, win.to, machineId])
+      : Promise.resolve({ rows: [] })
   ]);
 
   const machines = healthRes.rows[0] || { total: 0, running: 0, idle: 0, breakdown: 0, offline: 0 };
@@ -229,14 +271,43 @@ exports.getMaintenanceDashboard = async (req) => {
     rows:       rowsRes.rows,
     cycle_time_trend: trendRes.rows,
 
-    /* Named so the client can say what is missing rather than render an
-       empty panel with no explanation. */
-    unavailable: [
-      'servo_load_per_axis',
-      'machine_temperature',
-      'battery_status',
-      'insulation_resistance',
-      'fan_amplifier_status'
-    ]
+    condition_trend: conditionRes.rows,
+
+    /* Measured, not declared. This used to be a fixed list, true only while
+       nothing could store these signals. Now a signal is named here when no
+       machine in the selection has reported any value for it — so the list
+       shrinks by itself as controllers start supplying data, and a signal
+       one machine lacks does not hide another machine's readings. */
+    unavailable: unavailableSignals(rowsRes.rows)
   };
 };
+
+/* Which telemetry columns back each condition signal on Screen 2. */
+const SIGNAL_COLUMNS = {
+  servo_load_per_axis:   ['servo_load_x', 'servo_load_y', 'servo_load_z'],
+  servo_temperature:     ['servo_temp_x', 'servo_temp_y', 'servo_temp_z'],
+  spindle_temperature:   ['spindle_motor_temp'],
+  encoder_temperature:   ['encoder_temp_x', 'encoder_temp_y', 'encoder_temp_z'],
+  battery_status:        ['cnc_battery_voltage', 'apc_battery_voltage'],
+  insulation_resistance: ['spindle_insulation_res', 'servo_insulation_res_x',
+                          'servo_insulation_res_y', 'servo_insulation_res_z'],
+  fan_amplifier_status:  ['fan_status']
+};
+
+/**
+ * Signals no machine in `rows` has any value for.
+ *
+ * A signal counts as available if a single axis on a single machine
+ * reports it: one servo with a temperature sensor is enough for the panel
+ * to exist, and the other axes then show as "--" rather than hiding the
+ * reading that is there.
+ */
+function unavailableSignals(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  return Object.entries(SIGNAL_COLUMNS)
+    .filter(([, cols]) => !list.some(r => cols.some(c => r?.[c] !== null && r?.[c] !== undefined)))
+    .map(([key]) => key);
+}
+
+exports.unavailableSignals = unavailableSignals;
+exports.SIGNAL_COLUMNS = SIGNAL_COLUMNS;

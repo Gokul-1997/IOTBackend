@@ -277,7 +277,12 @@ describe('every query binds exactly the parameters it references', () => {
     ['status only',           { status: 'OPEN' }],
     ['search and status',     { search: 'grease', status: 'OPEN' }],
     ['machine and search',    { machine_id: 5, search: 'x' }],
-    ['machine, search, status', { machine_id: 5, search: 'x', status: 'CLOSED' }]
+    ['machine, search, status', { machine_id: 5, search: 'x', status: 'CLOSED' }],
+    ['due overdue',           { due: 'overdue' }],
+    ['due today',             { due: 'today' }],
+    ['due with search',       { search: 'grease', due: 'overdue' }],
+    ['due with status',       { status: 'OPEN', due: 'today' }],
+    ['every filter at once',  { machine_id: 5, search: 'x', status: 'OPEN', due: 'overdue' }]
   ])('%s', async (_label, filters) => {
     queueDashboard();
     await svc.getPeriodic({ company_id, ...filters });
@@ -292,10 +297,94 @@ describe('every query binds exactly the parameters it references', () => {
   test('the export path too', async () => {
     mockDb.queueResponse({ rows: [] }, { rows: [{ total: 0 }] });
 
-    await svc.getExportRows({ company_id, search: 'x', status: 'OPEN', machine_id: 5 });
+    await svc.getExportRows({ company_id, search: 'x', status: 'OPEN', machine_id: 5, due: 'overdue' });
 
     for (const call of mockDb.calls()) {
       expect(call.params.length).toBe(highest(call.text));
     }
+  });
+});
+
+/*
+ * The "due" filter behind the Attention Required panel.
+ *
+ * Overdue and due-today are properties of an open ticket's due date, not
+ * statuses, so they need their own predicate. The live-status array goes
+ * into the shared parameter list rather than the data query's own trailing
+ * slot, because the count query reuses the same WHERE — that asymmetry is
+ * exactly what broke this screen once before.
+ */
+describe('the due filter', () => {
+  /** The WHERE clause both the data and count queries share. */
+  const ticketQueries = () =>
+    // Exactly the paged list and its count — the only two that share the
+    // WHERE built in tickets(). The compliance trend and the "upcoming"
+    // panel also read maintenance_tickets, but neither pages nor counts.
+    mockDb.calls().filter(c =>
+      /JOIN machines m ON m\.id = t\.machine_id/.test(c.text) &&
+      (/OFFSET \$/.test(c.text) || /COUNT\(\*\)::int\s+AS total/.test(c.text)));
+
+  /* Only the WHERE may be asserted on: the data query also SELECTs
+     is_overdue, which uses the very same make_interval expression, so
+     matching the whole statement cannot tell a filter from a column. */
+  const whereOf = sql =>
+    sql.slice(sql.indexOf('WHERE t.company_id')).split(/ORDER BY|GROUP BY/)[0].trim();
+
+  test('overdue asks for open tickets past due date plus grace', async () => {
+    queueDashboard();
+    await svc.getPeriodic({ company_id, due: 'overdue' });
+
+    const [data] = ticketQueries();
+    const where = whereOf(data.text);
+    expect(where).toMatch(/t\.due_date \+ make_interval\(days => COALESCE\(s\.grace_days,0\)\) < NOW\(\)/);
+    expect(where).toMatch(/t\.status = ANY\(\$\d+\)/);
+  });
+
+  test('today is the calendar day in the plant timezone, not the next 24 hours', async () => {
+    queueDashboard();
+    await svc.getPeriodic({ company_id, due: 'today' });
+
+    const where = whereOf(ticketQueries()[0].text);
+    // a ticket due at 09:00 is still due today at 17:00
+    expect(where).toMatch(/AT TIME ZONE 'Asia\/Kolkata'\)::date/);
+    expect(where).not.toMatch(/< NOW\(\)/);
+  });
+
+  test('an unrecognised value filters nothing rather than silently hiding rows', async () => {
+    queueDashboard();
+    await svc.getPeriodic({ company_id, due: 'sometime' });
+
+    for (const c of ticketQueries()) {
+      const where = whereOf(c.text);
+      expect(where).not.toMatch(/make_interval\(days => COALESCE\(s\.grace_days,0\)\) < NOW\(\)/);
+      expect(where).not.toMatch(/AT TIME ZONE 'Asia\/Kolkata'\)::date\s*=/);
+    }
+  });
+
+  test('omitting it filters nothing', async () => {
+    queueDashboard();
+    await svc.getPeriodic({ company_id });
+
+    for (const c of ticketQueries()) {
+      expect(whereOf(c.text)).not.toMatch(/AT TIME ZONE 'Asia\/Kolkata'\)::date\s*=/);
+    }
+  });
+
+  test('the data and count queries apply the same predicate', async () => {
+    queueDashboard();
+    await svc.getPeriodic({ company_id, due: 'overdue', status: 'OPEN', search: 'pump' });
+
+    const qs = ticketQueries();
+    expect(qs.length).toBeGreaterThanOrEqual(2);
+    // a count that filters differently from the page it counts gives a
+    // pager that walks off the end of the results
+    const wheres = qs.map(c => whereOf(c.text));
+    for (const w of wheres) expect(w).toBe(wheres[0]);
+  });
+
+  test('the filter is echoed back so the screen can say it is filtering', async () => {
+    queueDashboard();
+    const res = await svc.getPeriodic({ company_id, due: 'overdue' });
+    expect(res.filters.due).toBe('overdue');
   });
 });

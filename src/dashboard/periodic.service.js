@@ -238,7 +238,7 @@ async function upcoming(companyId, machineId, limit = 10) {
  * raises many occurrences at the same instant — and pagination without a
  * total order repeats rows across page boundaries.
  */
-async function tickets(companyId, machineId, { search = '', status = '', page = 1, limit = 10 }) {
+async function tickets(companyId, machineId, { search = '', status = '', due = '', page = 1, limit = 10 }) {
   const pageNum  = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
   const offset   = (pageNum - 1) * limitNum;
@@ -263,6 +263,27 @@ async function tickets(companyId, machineId, { search = '', status = '', page = 
   if (status) {
     values.push(String(status).toUpperCase());
     where += ` AND t.status = $${values.length}`;
+  }
+
+  /*
+   * "Overdue" and "due today" are properties of an open ticket's due date,
+   * not statuses, so they need their own predicate. The live-status array
+   * is pushed onto `values` rather than referenced through the data
+   * query's own $liveIdx: `where` is shared with the count query, and a
+   * placeholder the count query cannot supply is rejected outright by
+   * Postgres ("bind message supplies N parameters"), not ignored.
+   */
+  const dueFilter = String(due || '').toLowerCase();
+  if (dueFilter === 'overdue' || dueFilter === 'today') {
+    values.push(LIVE_STATUSES);
+    const liveParam = values.length;
+    where += ` AND t.status = ANY($${liveParam})`;
+    where += dueFilter === 'overdue'
+      ? ` AND t.due_date + make_interval(days => COALESCE(s.grace_days,0)) < NOW()`
+      // "today" is the calendar day in the plant's timezone, not the next
+      // 24 hours — a ticket due at 09:00 is still due today at 17:00.
+      : ` AND (t.due_date AT TIME ZONE 'Asia/Kolkata')::date
+              = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`;
   }
 
   const liveIdx   = values.length + 1;
@@ -308,7 +329,7 @@ async function tickets(companyId, machineId, { search = '', status = '', page = 
 }
 
 /** Everything the screen needs, in one response. */
-exports.getPeriodic = async ({ company_id, machine_id, search, status, page, limit }) => {
+exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page, limit }) => {
   const machineId = parseMachineId(machine_id);
 
   const [k, trend, freq, workload, next, list] = await Promise.all([
@@ -317,11 +338,11 @@ exports.getPeriodic = async ({ company_id, machine_id, search, status, page, lim
     byFrequency(company_id, machineId),
     technicianWorkload(company_id, machineId),
     upcoming(company_id, machineId),
-    tickets(company_id, machineId, { search, status, page, limit })
+    tickets(company_id, machineId, { search, status, due, page, limit })
   ]);
 
   return {
-    filters: { machine_id: machineId, search: search || null, status: status || null },
+    filters: { machine_id: machineId, search: search || null, status: status || null, due: due || null },
     kpis: k,
     compliance_trend: trend,
     by_frequency: freq,
@@ -333,11 +354,11 @@ exports.getPeriodic = async ({ company_id, machine_id, search, status, page, lim
 };
 
 /** Flat rows for Excel / CSV / PDF export. */
-exports.getExportRows = async ({ company_id, machine_id, search, status }) => {
+exports.getExportRows = async ({ company_id, machine_id, search, status, due }) => {
   const machineId = parseMachineId(machine_id);
   // Bounded: an unbounded export on a plant with years of history is a
   // request that never returns and a spreadsheet nobody can open.
-  const list = await tickets(company_id, machineId, { search, status, page: 1, limit: 100 });
+  const list = await tickets(company_id, machineId, { search, status, due, page: 1, limit: 100 });
 
   return list.data.map(r => ({
     'Ticket':       r.id,

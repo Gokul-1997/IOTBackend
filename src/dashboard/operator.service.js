@@ -209,6 +209,25 @@ function derive(r) {
  * quality together; produced quantity breaks ties. Operators with no OEE
  * recorded sort last rather than counting as zero — absent is not bad.
  */
+/**
+ * Performance bands, on the same OEE thresholds the OEE dashboard uses.
+ *
+ * An operator whose machines have no OEE recorded is counted as `unrated`
+ * rather than dropped into "needs help" — no measurement is not the same
+ * claim as a bad measurement, and the screen says which it is.
+ */
+function band(rows) {
+  const out = { excellent: 0, good: 0, average: 0, needs_help: 0, unrated: 0 };
+  for (const r of rows) {
+    if (r.oee_pct == null)   { out.unrated++;    continue; }
+    if (r.oee_pct >= 85)     { out.excellent++;  continue; }
+    if (r.oee_pct >= 75)     { out.good++;       continue; }
+    if (r.oee_pct >= 60)     { out.average++;    continue; }
+    out.needs_help++;
+  }
+  return out;
+}
+
 function rank(rows) {
   return [...rows].sort((a, b) => {
     if (a.oee_pct == null && b.oee_pct == null) return b.produced - a.produced;
@@ -267,6 +286,9 @@ exports.getOperators = async (q = {}) => {
       shared_machines: all.reduce((n, r) => n + (r.shared_machines > 0 ? 1 : 0), 0),
       note: 'Figures are for the machines each operator is assigned to. Machines with more than one assigned operator appear in each of their rows.'
     },
+    // Counted over every operator, not the page the client happens to be
+    // showing, so the tiles do not change as you page through the table.
+    bands: band(all),
     by_production: [...all].sort((a, b) => b.produced - a.produced).slice(0, 10),
     top_performers: ranked.slice(0, 5),
     operators: {
@@ -350,3 +372,4 @@ exports.getExportRows = async (q = {}) => {
 exports.resolveRange = resolveRange;
 exports.derive = derive;
 exports.rank = rank;
+exports.band = band;
