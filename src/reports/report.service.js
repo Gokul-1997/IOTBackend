@@ -347,3 +347,79 @@ exports.production = async (company_id, date) => {
   `, [company_id, date]);
   return rows;
 };
+
+
+/* ─────────────────────────────────────────────────────────────
+   Emailed reports
+
+   A range longer than three months is not answered in the response (see
+   report.limits.js); it is built here and sent as a spreadsheet instead.
+───────────────────────────────────────────────────────────── */
+
+const { createExcel }       = require('./excel.util');
+const { sendEmail }         = require('../utils/nodemailer');
+const { resolveColumns, shapeRows, assertType } = require('./report.columns');
+const generateReportTemplate = require('../utils/nodemailer/emailTemplates/generateReportTemplate');
+
+const REPORT_NAMES = {
+  'production': 'Production Report',
+  'oee-hourly': 'Hourly OEE Report',
+  'shift-oee':  'Shift OEE Report'
+};
+
+/** The dataset behind each report type — the same queries the screen uses. */
+async function fetchRows(type, company_id, f) {
+  const args = [company_id, f.date_from, f.date_to, f.machine_id || null, f.shift_id || null, f.operator_id || null];
+  if (type === 'production') return exports.productionData(...args);
+  if (type === 'oee-hourly') return exports.oeeHourlyData(...args);
+  return exports.shiftOeeData(...args);
+}
+
+/**
+ * Build the report and email it.
+ *
+ * Returns what was sent rather than nothing, so the caller can log it and
+ * the tests can assert on it without reaching into nodemailer.
+ */
+exports.emailReport = async ({ company_id, type, filters, columns, to, requestedBy, labelFor = {} }) => {
+  assertType(type);
+
+  const cols = resolveColumns(type, columns);
+  const { rows } = await fetchRows(type, company_id, filters);
+  const shaped = shapeRows(rows, cols);
+
+  const name = REPORT_NAMES[type];
+  const file = `${type}_${filters.date_from}_to_${filters.date_to}.xlsx`;
+  const buffer = createExcel(name.slice(0, 31), shaped);
+
+  const filterLines = [];
+  if (filters.machine_id)  filterLines.push(`Machine: ${labelFor.machine  || filters.machine_id}`);
+  if (filters.shift_id)    filterLines.push(`Shift: ${labelFor.shift      || filters.shift_id}`);
+  if (filters.operator_id) filterLines.push(`Operator: ${labelFor.operator || filters.operator_id}`);
+
+  await sendEmail({
+    to,
+    subject: `${name} — ${filters.date_from} to ${filters.date_to}`,
+    html: generateReportTemplate({
+      reportName: name,
+      dateFrom: filters.date_from,
+      dateTo: filters.date_to,
+      rowCount: rows.length,
+      columnLabels: cols.map(c => c.label),
+      filterLines,
+      requestedBy
+    }),
+    text: `${name} for ${filters.date_from} to ${filters.date_to}. ${rows.length} rows attached.`,
+    attachments: [{ filename: file, content: buffer }]
+  });
+
+  return { rows: rows.length, columns: cols.map(c => c.key), filename: file, to };
+};
+
+/* The auth middleware builds req.user without an email — it selects id,
+   username, plant_id, company_id and user_type only — so the recipient of an
+   emailed report is looked up rather than assumed. */
+exports.getUserEmail = async (user_id) => {
+  const { rows } = await db.query('SELECT email FROM users WHERE id = $1', [user_id]);
+  return rows[0]?.email || null;
+};

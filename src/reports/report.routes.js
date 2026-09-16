@@ -15,6 +15,10 @@ router.get('/production-data',  ...adminOrSup, ctrl.productionData);
 router.get('/oee-hourly-data',  ...adminOrSup, ctrl.oeeHourlyData);
 router.get('/shift-oee-data',   ...adminOrSup, ctrl.shiftOeeData);
 
+/* ── Column definitions + emailed reports ── */
+router.get('/columns',          ...adminOrSup, ctrl.getColumns);
+router.post('/email',           ...adminOrSup, ctrl.emailReport);
+
 /* ── Excel downloads ── */
 router.get('/hourly-oee',       ...adminOrSup, ctrl.hourlyOeeExcel);
 router.get('/shift-oee',        ...adminOrSup, ctrl.shiftOeeExcel);
