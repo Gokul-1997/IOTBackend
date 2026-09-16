@@ -89,9 +89,11 @@ describe('the limits come from the same rule the quota check uses', () => {
     await svc.getUsage(4);
     const sql = mockDb.calls()[0].text;
 
-    expect(sql).toMatch(/FROM users\s+u\s+WHERE u\.company_id = c\.id AND u\.is_active/);
-    expect(sql).toMatch(/FROM plants\s+pl WHERE pl\.company_id = c\.id AND pl\.is_active/);
-    expect(sql).toMatch(/FROM machines m\s+WHERE m\.company_id = c\.id AND m\.is_active/);
+    /* Whitespace-tolerant: the query aligns its columns, so the spacing
+       around "=" is cosmetic and must not decide whether a test passes. */
+    expect(sql).toMatch(/FROM\s+users\s+u\s+WHERE\s+u\.company_id\s*=\s*c\.id\s+AND\s+u\.is_active/);
+    expect(sql).toMatch(/FROM\s+plants\s+pl\s+WHERE\s+pl\.company_id\s*=\s*c\.id\s+AND\s+pl\.is_active/);
+    expect(sql).toMatch(/FROM\s+machines\s+m\s+WHERE\s+m\.company_id\s*=\s*c\.id\s+AND\s+m\.is_active/);
   });
 
   test('binds exactly the parameters it references', async () => {
