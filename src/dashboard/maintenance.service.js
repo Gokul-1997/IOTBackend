@@ -20,7 +20,7 @@
  * agree with each other.
  */
 const db = require('../db');
-const { resolveWindow, scope, parseMachineId } = require('./window');
+const { resolveWindow, scope, scopeViaMachine, parseMachineId } = require('./window');
 
 /* Stored as LOW/MEDIUM/HIGH/CRITICAL; the agreement asks for
    Critical / Non-Critical / Information. */
@@ -46,6 +46,7 @@ exports.getMaintenanceDashboard = async (req) => {
   const machineId = parseMachineId(req.query.machine_id);
   const win       = await resolveWindow(companyId, req.query);
   const s         = scope(companyId, win, machineId);
+  const sm        = scopeViaMachine(companyId, win, machineId);
 
   const alarmParams = machineId
     ? [companyId, win.from, win.to, machineId]
@@ -180,11 +181,16 @@ exports.getMaintenanceDashboard = async (req) => {
 
     /* average OEE across the window */
     db.query(`
-      SELECT ROUND(AVG(availability)::numeric,2)::float AS availability,
-             ROUND(AVG(performance)::numeric,2)::float  AS performance,
-             ROUND(AVG(quality)::numeric,2)::float      AS quality,
-             ROUND(AVG(oee)::numeric,2)::float          AS oee
-      FROM oee_hourly WHERE ${s.sql}`, s.params
+      /* Scoped through the machine — oee_hourly.company_id is NULL on
+         almost every row, so the company filter matched nothing and this
+         tile read 0% for every company. */
+      SELECT ROUND(AVG(o.availability)::numeric,2)::float AS availability,
+             ROUND(AVG(o.performance)::numeric,2)::float  AS performance,
+             ROUND(AVG(o.quality)::numeric,2)::float      AS quality,
+             ROUND(AVG(o.oee)::numeric,2)::float          AS oee
+      FROM oee_hourly o
+      JOIN machines m ON m.id = o.machine_id
+      WHERE ${sm.sql}`, sm.params
     ),
 
     /* production status for the window */

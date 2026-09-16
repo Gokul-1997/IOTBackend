@@ -13,7 +13,7 @@ const db = require('../db');
 // resolveWindow/scope moved to ./window.js when the Maintenance dashboard
 // needed the same filter behaviour — two screens filtered identically must
 // resolve identically, so there is one copy rather than two.
-const { resolveWindow, scope, parseMachineId } = require('./window');
+const { resolveWindow, scope, scopeViaMachine, parseMachineId } = require('./window');
 
 /* Alarm severities are stored as LOW/MEDIUM/HIGH/CRITICAL, but the
    agreement asks for Critical / Non-Critical / Information. */
@@ -36,6 +36,7 @@ exports.getFactoryDashboard = async (req) => {
   const win        = await resolveWindow(companyId, req.query);
 
   const s = scope(companyId, win, machineId);
+  const sm = scopeViaMachine(companyId, win, machineId);
 
   const [
     settingsRes, machineRes, prodRes, oeeRes,
@@ -108,13 +109,21 @@ exports.getFactoryDashboard = async (req) => {
       FROM production_hourly WHERE ${s.sql}`, s.params
     ),
 
-    /* OEE averaged across the window */
+    /* OEE averaged across the window.
+
+       Scoped through the machine: oee_hourly.company_id is NULL on almost
+       every row, so filtering on it returned no rows at all and this tile
+       read 0% for every company. AVG ignores NULLs, so a machine with no
+       cycle time no longer drags the average to zero — it is simply not
+       counted in performance. */
     db.query(`
-      SELECT ROUND(AVG(availability)::numeric,2)::float AS availability,
-             ROUND(AVG(performance)::numeric,2)::float  AS performance,
-             ROUND(AVG(quality)::numeric,2)::float      AS quality,
-             ROUND(AVG(oee)::numeric,2)::float          AS oee
-      FROM oee_hourly WHERE ${s.sql}`, s.params
+      SELECT ROUND(AVG(o.availability)::numeric,2)::float AS availability,
+             ROUND(AVG(o.performance)::numeric,2)::float  AS performance,
+             ROUND(AVG(o.quality)::numeric,2)::float      AS quality,
+             ROUND(AVG(o.oee)::numeric,2)::float          AS oee
+      FROM oee_hourly o
+      JOIN machines m ON m.id = o.machine_id
+      WHERE ${sm.sql}`, sm.params
     ),
 
     /* shift-wise production bar chart (whole day, ignores shift filter

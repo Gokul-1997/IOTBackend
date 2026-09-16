@@ -113,4 +113,29 @@ function scope(companyId, win, machineId, startIdx = 1) {
   return { sql, params };
 }
 
-module.exports = { resolveWindow, scope, parseDate, parseMachineId, httpError };
+/**
+ * The same window, but scoped through the machine rather than the row's own
+ * company_id — for oee_hourly.
+ *
+ * oee_hourly.company_id is NULL on 52,555 of its 52,559 rows: the hourly
+ * rollup job never wrote it. Filtering that table with scope() therefore
+ * matches nothing, and the screens using it reported OEE as 0 for every
+ * company on every day — while the OEE dashboard, which computes from
+ * production_hourly, reported the real figure. Two screens contradicting
+ * each other about the plant's headline number.
+ *
+ * Returns a fragment for a query that aliases oee_hourly as `o` and joins
+ * `machines m`. operator.service and report.service already do this; this
+ * puts the same rule in one place.
+ */
+function scopeViaMachine(companyId, win, machineId, startIdx = 1) {
+  const params = [companyId, win.from, win.to];
+  let sql = `m.company_id = $${startIdx} AND o.hour_start >= $${startIdx + 1} AND o.hour_start < $${startIdx + 2}`;
+  if (machineId) {
+    params.push(machineId);
+    sql += ` AND o.machine_id = $${startIdx + 3}`;
+  }
+  return { sql, params };
+}
+
+module.exports = { resolveWindow, scope, scopeViaMachine, parseDate, parseMachineId, httpError };

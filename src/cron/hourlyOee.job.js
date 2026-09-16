@@ -13,8 +13,12 @@ const { getCurrentShift } = require('../utils/shift.util');
  *   quality          = accepted_qty / produced_qty   (accepted = produced - reject - rework)
  *   oee              = availability * performance * quality
  *
- * Note: performance uses cycle_time from components via machine_current_job.
- *       If no cycle_time is set, performance defaults to 0.
+ * Unknown is NULL, not 0. A machine with no cycle time has no knowable
+ * performance, and an hour with nothing produced has no knowable quality —
+ * writing 0 for either made oee 0 too, so the rollup reported a plant
+ * running at 0% OEE while the OEE dashboard, computing from the same
+ * production rows, reported 20%. AVG() skips NULLs, so an unmeasurable
+ * machine no longer drags the factory average down; it is left out of it.
  */
 
 let running = false;
@@ -81,9 +85,10 @@ module.exports = async () => {
         // idealQty × multFactor = how many parts should have been made
         const idealQty = cycleTimeSec > 0 ? (runSeconds / cycleTimeSec) * multFactor : 0;
         const actualQty = producedQty * multFactor;
+        // no cycle time, or no run time, means performance is unknown
         const performance = idealQty > 0
           ? Math.min(100, (actualQty / idealQty) * 100)
-          : 0;
+          : null;
 
         // Quality: accepted / produced
         // Fetch reject + rework for this machine, shift, this hour's date
@@ -102,19 +107,30 @@ module.exports = async () => {
         const rework   = Number(qRows[0].rework);
         const accepted = Math.max(0, producedQty - reject - rework);
 
+        // nothing produced in the hour means quality is unknown, not 0%
         const quality = producedQty > 0
           ? Math.min(100, (accepted / producedQty) * 100)
-          : 0;
+          : null;
 
-        const oee = (availability / 100) * (performance / 100) * (quality / 100) * 100;
+        /* OEE needs all three. With any factor unknown the product is
+           unknown too — reporting 0 would claim the machine produced
+           nothing of value, which is a different statement. */
+        const oee = (performance === null || quality === null)
+          ? null
+          : (availability / 100) * (performance / 100) * (quality / 100) * 100;
 
-        // Upsert into oee_hourly
+        const round2 = v => (v === null ? null : Number(v.toFixed(2)));
+
+        /* company_id is written now. It was left out, so the column was
+           NULL on every row the job has ever produced, and any query
+           filtering oee_hourly by company_id matched nothing. */
         await db.query(
           `INSERT INTO oee_hourly
-             (machine_id, shift_id, hour_start, availability, performance, quality, oee)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+             (machine_id, company_id, shift_id, hour_start, availability, performance, quality, oee)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (machine_id, hour_start)
            DO UPDATE SET
+             company_id   = EXCLUDED.company_id,
              shift_id     = EXCLUDED.shift_id,
              availability = EXCLUDED.availability,
              performance  = EXCLUDED.performance,
@@ -122,12 +138,13 @@ module.exports = async () => {
              oee          = EXCLUDED.oee`,
           [
             row.machine_id,
+            company.id,
             shift.id,
             hourStart,
-            Number(availability.toFixed(2)),
-            Number(performance.toFixed(2)),
-            Number(quality.toFixed(2)),
-            Number(oee.toFixed(2))
+            round2(availability),
+            round2(performance),
+            round2(quality),
+            round2(oee)
           ]
         );
       }
