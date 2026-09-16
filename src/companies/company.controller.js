@@ -29,6 +29,19 @@ exports.update = async (req, res, next) => {
 
 /* The audit trail the agreement asks for: every plan change on a company,
    who made it and what it replaced. */
+exports.getUsage = async (req, res, next) => {
+  try {
+    /* A company admin may only read their own company's usage; a super
+       user may read any. Without this, the id in the URL would be enough
+       to read another tenant's headcount and machine estate. */
+    const id = Number(req.params.id);
+    if (!req.user.is_snt_super && req.user.company_id !== id) {
+      return res.status(403).json({ message: 'You may only view your own company usage' });
+    }
+    res.json(await svc.getUsage(id));
+  } catch (e) { next(e); }
+};
+
 exports.getPlanHistory = async (req, res, next) => {
   try {
     const result = await svc.getPlanHistory(req.params.id, req.query);

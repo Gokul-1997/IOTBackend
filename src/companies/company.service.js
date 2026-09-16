@@ -312,6 +312,56 @@ exports.assignPlan = async (company_id, { plan_id, max_users, max_plants, max_ma
 };
 
 /** The audit trail for one company's plan, most recent change first. */
+/**
+ * What a company is using, against what its plan allows.
+ *
+ * The limits are resolved exactly as quota.middleware resolves them —
+ * company_plans overrides first, the plan's own ceiling second — so a
+ * screen showing "18 of 20 machines" agrees with the answer a create call
+ * will actually give. An expired or inactive assignment grants nothing,
+ * which is why `plan_active` is reported rather than inferred from dates
+ * by the caller.
+ *
+ * Counts are of active rows only, matching what the quota check counts.
+ */
+exports.getUsage = async (company_id) => {
+  const { rows } = await db.query(
+    `SELECT c.id, c.company_name,
+            p.id   AS plan_id,
+            p.plan_name,
+            cp.expires_at,
+            (cp.id IS NOT NULL
+               AND cp.is_active
+               AND (cp.expires_at IS NULL OR cp.expires_at > NOW())) AS plan_active,
+            COALESCE(cp.max_users,    p.max_users)    AS max_users,
+            COALESCE(cp.max_plants,   p.max_plants)   AS max_plants,
+            COALESCE(cp.max_machines, p.max_machines) AS max_machines,
+            (SELECT COUNT(*) FROM users    u  WHERE u.company_id  = c.id AND u.is_active)::int  AS users_used,
+            (SELECT COUNT(*) FROM plants   pl WHERE pl.company_id = c.id AND pl.is_active)::int AS plants_used,
+            (SELECT COUNT(*) FROM machines m  WHERE m.company_id  = c.id AND m.is_active)::int  AS machines_used
+       FROM companies c
+       LEFT JOIN company_plans cp ON cp.company_id = c.id AND cp.is_active = true
+       LEFT JOIN plans p ON p.id = cp.plan_id
+      WHERE c.id = $1`,
+    [company_id]
+  );
+  if (!rows.length) throw { status: 404, message: 'Company not found' };
+
+  const r = rows[0];
+  /* A limit of 0 or null means unlimited, the same reading quota.middleware
+     takes ("if (!limit || limit <= 0) return next()"). Reporting it as 0
+     would show every company as instantly over its limit. */
+  const pct = (used, max) => (!max || Number(max) <= 0) ? null
+    : Math.min(100, Math.round((Number(used) / Number(max)) * 100));
+
+  return {
+    ...r,
+    users_pct:    pct(r.users_used, r.max_users),
+    plants_pct:   pct(r.plants_used, r.max_plants),
+    machines_pct: pct(r.machines_used, r.max_machines)
+  };
+};
+
 exports.getPlanHistory = async (company_id, { page = 1, limit = 20 } = {}) => {
   const pageNum  = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));

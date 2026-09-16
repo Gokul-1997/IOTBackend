@@ -14,6 +14,9 @@ router.put('/:id',                    auth, audited('company'), isSNT,  ctrl.upd
 router.post('/:id/plan',              auth, audited('company'), isSNT,  ctrl.assignPlan);
 router.get('/:id/plan/history',       auth, isSNT,  ctrl.getPlanHistory);
 router.get('/:id/plan-features',      auth,          ctrl.getPlanFeatures);
+// Usage against the plan's limits. Any authenticated user may read it for
+// their own company; the service refuses another company's figures.
+router.get('/:id/usage',              auth,          ctrl.getUsage);
 router.get('/:id/permissions',        auth,          ctrl.getCompanyPermissions);
 router.put('/:id/permissions',        auth, audited('company'), isSNT,  ctrl.assignCompanyPermissions);
 router.delete('/:id',                 auth, audited('company'), isSNT,  ctrl.remove);
@@ -39,12 +42,13 @@ router.post('/:id/plants',
   }),
   ctrl.createCompanyPlant);
 
+/* audited() belongs inside the call. It used to sit after the closing
+   paren as a stray expression, so both of these ran with no audit log at
+   all while still parsing — the server booted and nothing complained. */
 router.put('/:id/plants/:plant_id',
-  auth, isSNT, ctrl.updateCompanyPlant);
-  audited('company'),
+  auth, isSNT, audited('company'), ctrl.updateCompanyPlant);
 
 router.patch('/:id/plants/:plant_id/status',
-  auth, isSNT, ctrl.toggleCompanyPlantStatus);
-  audited('company'),
+  auth, isSNT, audited('company'), ctrl.toggleCompanyPlantStatus);
 
 module.exports = router;
