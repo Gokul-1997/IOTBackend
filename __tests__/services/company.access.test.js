@@ -20,6 +20,10 @@
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
+// Saving clears the grant cache, which requires the Redis client — a real one
+// would try to open a connection from inside a unit test.
+const mockRedis = { get: jest.fn(), set: jest.fn(), del: jest.fn().mockResolvedValue(1) };
+jest.mock('../../src/redis', () => mockRedis);
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const svc  = require('../../src/companies/company.service');
 const ctrl = require('../../src/companies/company.controller');
@@ -134,6 +138,28 @@ describe('assignCompanyPermissions — a diff, scoped to page permissions', () =
     mockDb.queueError(boom);                                // the INSERT fails
     await expect(svc.assignCompanyPermissions(4, [1], 1)).rejects.toBe(boom);
     expect(texts()).toContain('ROLLBACK');
+  });
+});
+
+describe('assignCompanyPermissions — a revoke has to bite at once', () => {
+  beforeEach(() => mockRedis.del.mockClear());
+
+  test('the cached grants are cleared after a save, so the API stops honouring a revoked page immediately', async () => {
+    mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] },
+      { rows: [{ permission_id: 1 }, { permission_id: 2 }] }, {}, { rowCount: 0 }, {});
+    await svc.assignCompanyPermissions(4, [2], 1);
+    expect(mockRedis.del).toHaveBeenCalledWith('company_grants:4');
+  });
+
+  test('nothing is cleared when the save was refused', async () => {
+    await svc.assignCompanyPermissions(4, [], 1).catch(() => {});
+    expect(mockRedis.del).not.toHaveBeenCalled();
+  });
+
+  test('a cache failure does not undo or fail a save that already committed', async () => {
+    mockRedis.del.mockRejectedValueOnce(new Error('redis down'));
+    mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] }, { rows: [] }, {}, {});
+    await expect(svc.assignCompanyPermissions(4, [2], 1)).resolves.toMatchObject({ granted: 1 });
   });
 });
 

@@ -539,6 +539,11 @@ exports.assignCompanyPermissions = async (company_id, permission_ids, granted_by
     }
 
     await client.query('COMMIT');
+
+    // access.middleware caches a company's grants for up to a minute; without
+    // this a revoke would keep working until it expired.
+    await require('../middleware/access.middleware').invalidateCompanyGrants(company_id);
+
     return {
       company_id,
       permission_count: wanted.length,

@@ -10,7 +10,7 @@
  *   router.post('/', auth, checkPerm('page:machines:create'), ctrl.create)
  */
 module.exports = function checkPermission(requiredPermission) {
-  return (req, res, next) => {
+  const guard = (req, res, next) => {
     if (!req.user) {
       return res.status(401).json({ message: 'User context missing' });
     }
@@ -32,4 +32,7 @@ module.exports = function checkPermission(requiredPermission) {
 
     next();
   };
+  // Read back by __tests__/services/permission.catalogue.test.js.
+  guard.requiredPermission = requiredPermission;
+  return guard;
 };

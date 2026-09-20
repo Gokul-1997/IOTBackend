@@ -6,6 +6,33 @@ const APP_MODULES = [
   { key: 'dashboard',      label: 'Dashboard',       group: 'Main',   actions: ['view', 'partcount', 'target', 'utilization', 'runtime', 'operator', 'status'] },
   { key: 'dashboard:live', label: 'Live Dashboard',   group: 'Main',   actions: ['view', 'power-consume', 'feed-override-chart', 'spindle-speed-chart'] },
 
+  /* ── Phase 2 analytics dashboards — one module each ──
+     All nine used to share the single `page:dashboard` guard, whose actions
+     (partcount, target, utilization...) are the widgets of the ORIGINAL live
+     dashboard. That made it impossible to sell or revoke them one at a time:
+     a company that paid for OEE but not Energy could not be configured, and
+     ticking or unticking "Dashboard" in Manage Access moved all nine together.
+
+     Each has its own key so S&T can grant exactly what was paid for.
+     `export` exists only where the screen has an export; `settings` on Energy
+     is the tariff form, which used to check the bare key `page:dashboard` —
+     a key that has never existed, so nobody but SNT_SUPER (who has no
+     company) could save a tariff.
+
+     The `analytics-` prefix is deliberate. `page:dashboard:` is a prefix of
+     `page:dashboard:live:` and the frontend matches on prefixes, so naming
+     these `dashboard:factory` and so on would have let anyone holding a
+     single live-dashboard widget through the old guard for all nine. */
+  { key: 'analytics-factory',     label: 'Factory Overall',        group: 'Analytics', actions: ['view'] },
+  { key: 'analytics-maintenance', label: 'Maintenance Dashboard',  group: 'Analytics', actions: ['view'] },
+  { key: 'analytics-preventive',  label: 'Preventive Maintenance', group: 'Analytics', actions: ['view'] },
+  { key: 'analytics-periodic',    label: 'Periodic Maintenance',   group: 'Analytics', actions: ['view', 'export'] },
+  { key: 'analytics-alarms',      label: 'Alarm Report',           group: 'Analytics', actions: ['view', 'export'] },
+  { key: 'analytics-downtime',    label: 'Downtime Analysis',      group: 'Analytics', actions: ['view', 'export'] },
+  { key: 'analytics-operators',   label: 'Operator Performance',   group: 'Analytics', actions: ['view', 'export'] },
+  { key: 'analytics-oee',         label: 'OEE Dashboard',          group: 'Analytics', actions: ['view', 'export'] },
+  { key: 'analytics-energy',      label: 'Energy Dashboard',       group: 'Analytics', actions: ['view', 'export', 'settings'] },
+
   // ── OEE & Reports (widget-level control) ──
   { key: 'oee-reports',    label: 'OEE Reports',      group: 'Main',   actions: ['view', 'oee', 'availability', 'performance', 'quality', 'export'] },
   { key: 'reports',        label: 'Reports',          group: 'Main',   actions: ['view', 'kpi', 'export'] },
@@ -90,6 +117,8 @@ const ACTION_LABELS = {
   upload:            'Upload to Library',
   transfer:          'Send to Machine',
   fetch:             'Fetch from Machine',
+  // Energy dashboard
+  settings:          'Tariff Settings',
   // Quality widgets
   'oee-metrics':     'OEE Metric Cards',
   'production-cards':'Production Cards (Target/Accepted/Rejected/Rework)',

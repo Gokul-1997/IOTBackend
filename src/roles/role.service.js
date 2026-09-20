@@ -24,6 +24,8 @@ const LEGACY_API_PERMISSIONS = [
   { key: 'component.delete', desc: 'Delete components',       roles: ['SNT_SUPER','COMPANY_ADMIN'] },
 ];
 
+exports.LEGACY_API_PERMISSIONS = LEGACY_API_PERMISSIONS;
+
 /**
  * Seed all system roles + legacy API permissions.
  * Called on app startup.
