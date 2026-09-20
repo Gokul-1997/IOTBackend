@@ -55,3 +55,47 @@ exports.getUnreadCount = async (user_id) => {
   );
   return parseInt(res.rows[0].count);
 };
+
+/* ─────────────────────────────────────────────────────────
+   PER-USER NOTIFICATION PREFERENCES (migration 022)
+
+   Distinct from alert_preferences (company-wide: does an alarm/offline/low
+   OEE event create a notification at all). This is per-user: of the
+   notifications that exist, which types does this person want surfaced.
+───────────────────────────────────────────────────────── */
+
+const DEFAULT_PREFS = {
+  notify_alarm: true, notify_maintenance: true, notify_ticket: true,
+  notify_program_transfer: true, notify_system: true, email_digest: false
+};
+
+/** Created lazily so a user who never opens Settings costs nothing. */
+exports.getPreferences = async (userId) => {
+  const { rows } = await db.query('SELECT * FROM notification_preferences WHERE user_id = $1', [userId]);
+  if (rows.length) {
+    const { user_id, updated_at, ...prefs } = rows[0];
+    return prefs;
+  }
+  return { ...DEFAULT_PREFS };
+};
+
+exports.updatePreferences = async (userId, patch) => {
+  const allowed = Object.keys(DEFAULT_PREFS);
+  const fields = allowed.filter(k => patch[k] !== undefined);
+  if (!fields.length) throw { status: 400, message: 'Nothing to update' };
+
+  const values = fields.map(k => !!patch[k]);
+  const insertCols = ['user_id', ...fields].join(', ');
+  const insertVals = ['$1', ...fields.map((_, i) => `$${i + 2}`)].join(', ');
+  const updateSet = fields.map(k => `${k} = EXCLUDED.${k}`).join(', ');
+
+  const { rows } = await db.query(
+    `INSERT INTO notification_preferences (${insertCols})
+     VALUES (${insertVals})
+     ON CONFLICT (user_id) DO UPDATE SET ${updateSet}, updated_at = NOW()
+     RETURNING *`,
+    [userId, ...values]
+  );
+  const { user_id, updated_at, ...prefs } = rows[0];
+  return prefs;
+};

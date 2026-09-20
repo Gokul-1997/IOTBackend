@@ -115,3 +115,110 @@ describe('auth.service.login', () => {
     expect(out.user.plan).toMatchObject({ plan_code: 'PRO', tier: 2 });
   });
 });
+
+
+/*
+ * Self-service profile: the route a non-admin uses to see and change their
+ * own account. Before this existed, GET/PUT /api/users/:id required
+ * ADMIN-tier role, so a MANAGER/SUPERVISOR/OPERATOR had no way to view their
+ * own profile or change their own password.
+ */
+describe('getMyProfile', () => {
+  test('returns the profile joined with company and plant names', async () => {
+    mockDb.queueResponse({ rows: [{
+      id: 12, username: 'suresh', email: 's@x.com', mobile: null,
+      user_type: 'SUPERVISOR', company_id: 4, plant_id: 1,
+      last_login_at: null, created_at: '2026-01-01',
+      company_name: 'S AND T', plant_name: 'Plant 1'
+    }] });
+    const p = await auth.getMyProfile(12);
+    expect(p.username).toBe('suresh');
+    expect(p.company_name).toBe('S AND T');
+  });
+
+  test('a deleted user throws 404 rather than returning nothing', async () => {
+    mockDb.queueResponse({ rows: [] });
+    await expect(auth.getMyProfile(999)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('updateMyProfile', () => {
+  test('rejects a malformed email before it reaches the database', async () => {
+    await expect(auth.updateMyProfile(12, { email: 'not-an-email' }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('rejects an update with nothing to change', async () => {
+    await expect(auth.updateMyProfile(12, {})).rejects.toMatchObject({ status: 400 });
+  });
+
+  test('updates email and mobile together', async () => {
+    mockDb.queueResponse({ rows: [{ id: 12, username: 'suresh', email: 'new@x.com', mobile: '9999999999' }] });
+    const out = await auth.updateMyProfile(12, { email: 'new@x.com', mobile: '9999999999' });
+    expect(out.email).toBe('new@x.com');
+    const { text: sql, params } = mockDb.calls()[0];
+    expect(sql).toMatch(/UPDATE users SET email = \$1, mobile = \$2/);
+    expect(params).toEqual(['new@x.com', '9999999999', 12]);
+  });
+
+  test('a duplicate email reports 409, not a raw database error', async () => {
+    // queueError only throws instanceof Error — a plain object would be
+    // returned as if it were a successful { code, message } row.
+    const dup = new Error('duplicate key');
+    dup.code = '23505';
+    mockDb.queueError(dup);
+    await expect(auth.updateMyProfile(12, { email: 'taken@x.com' }))
+      .rejects.toMatchObject({ status: 409 });
+  });
+});
+
+describe('changeMyPassword', () => {
+  beforeEach(() => { bcrypt.compare.mockReset(); });
+
+  test('requires both the current and the new password', async () => {
+    await expect(auth.changeMyPassword(12, '', 'newpassword1')).rejects.toMatchObject({ status: 400 });
+    await expect(auth.changeMyPassword(12, 'oldpass', '')).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('rejects a new password shorter than 8 characters', async () => {
+    await expect(auth.changeMyPassword(12, 'oldpass1', 'short')).rejects.toMatchObject({ status: 400 });
+  });
+
+  test('a wrong current password is rejected before anything is written', async () => {
+    mockDb.queueResponse({ rows: [{ password_hash: 'hash:oldpass1' }] });
+    bcrypt.compare.mockResolvedValueOnce(false);
+    await expect(auth.changeMyPassword(12, 'wrongpass', 'newpassword1'))
+      .rejects.toMatchObject({ status: 401 });
+    // only the SELECT ran — no UPDATE for a rejected attempt
+    expect(mockDb.calls()).toHaveLength(1);
+  });
+
+  test('the new password must differ from the current one', async () => {
+    mockDb.queueResponse({ rows: [{ password_hash: 'hash:samepass1' }] });
+    bcrypt.compare
+      .mockResolvedValueOnce(true)   // matches current
+      .mockResolvedValueOnce(true);  // new === current
+    await expect(auth.changeMyPassword(12, 'samepass1', 'samepass1'))
+      .rejects.toMatchObject({ status: 400 });
+  });
+
+  test('a correct current password and a new one succeeds', async () => {
+    mockDb.queueResponse({ rows: [{ password_hash: 'hash:oldpass1' }] }, {});
+    bcrypt.compare
+      .mockResolvedValueOnce(true)   // current password matches
+      .mockResolvedValueOnce(false); // new password is not the same as old
+    await auth.changeMyPassword(12, 'oldpass1', 'brandnewpass1');
+    const { text: sql, params } = mockDb.calls()[1];
+    expect(sql).toMatch(/UPDATE users SET password_hash/);
+    expect(params[0]).toBe('hash:brandnewpass1');
+    expect(params[1]).toBe(12);
+  });
+
+  test('a user that no longer exists is reported, not a null-pointer crash', async () => {
+    mockDb.queueResponse({ rows: [] });
+    await expect(auth.changeMyPassword(999, 'anything1', 'newpassword1'))
+      .rejects.toMatchObject({ status: 404 });
+  });
+});

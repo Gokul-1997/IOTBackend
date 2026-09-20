@@ -365,3 +365,85 @@ exports.logout = async (refreshToken) => {
   );
 };
 
+
+/* ─────────────────────────────────────────────────────────
+   SELF-SERVICE PROFILE
+
+   Everything above this line answers "who am I logging in as"; this answers
+   "what can I see and change about my own account once I am". Before this,
+   GET/PUT /api/users/:id required ADMIN-tier role — a MANAGER, SUPERVISOR or
+   OPERATOR had no route to their own profile or their own password at all.
+───────────────────────────────────────────────────────── */
+
+exports.getMyProfile = async (userId) => {
+  const { rows } = await db.query(
+    `SELECT u.id, u.username, u.email, u.mobile, u.user_type, u.company_id,
+            u.plant_id, u.last_login_at, u.created_at,
+            c.company_name, p.plant_name
+       FROM users u
+       LEFT JOIN companies c ON c.id = u.company_id
+       LEFT JOIN plants    p ON p.id = u.plant_id
+      WHERE u.id = $1`,
+    [userId]
+  );
+  if (!rows.length) throw { status: 404, message: 'User not found' };
+  return rows[0];
+};
+
+/** Email and mobile only — username, role and company are admin-controlled
+ *  elsewhere, and letting a user grant themselves a different role through
+ *  their own profile form would be a privilege-escalation hole. */
+exports.updateMyProfile = async (userId, { email, mobile }) => {
+  const fields = [];
+  const params = [];
+  let i = 1;
+
+  if (email !== undefined) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw { status: 400, message: 'Enter a valid email address' };
+    }
+    fields.push(`email = $${i++}`); params.push(email);
+  }
+  if (mobile !== undefined) {
+    fields.push(`mobile = $${i++}`); params.push(mobile || null);
+  }
+  if (!fields.length) throw { status: 400, message: 'Nothing to update' };
+
+  params.push(userId);
+  try {
+    const { rows } = await db.query(
+      `UPDATE users SET ${fields.join(', ')}, updated_at = NOW()
+        WHERE id = $${i} RETURNING id, username, email, mobile`,
+      params
+    );
+    if (!rows.length) throw { status: 404, message: 'User not found' };
+    return rows[0];
+  } catch (e) {
+    // unique_violation on email
+    if (e.code === '23505') throw { status: 409, message: 'That email is already in use' };
+    throw e;
+  }
+};
+
+/** Requires the current password — unlike admin-driven resets, a user
+ *  changing their own password must prove they still are who they are. */
+exports.changeMyPassword = async (userId, currentPassword, newPassword) => {
+  if (!currentPassword || !newPassword) {
+    throw { status: 400, message: 'Current and new password are required' };
+  }
+  if (newPassword.length < 8) {
+    throw { status: 400, message: 'New password must be at least 8 characters' };
+  }
+
+  const { rows } = await db.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+  if (!rows.length) throw { status: 404, message: 'User not found' };
+
+  const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
+  if (!valid) throw { status: 401, message: 'Current password is incorrect' };
+
+  const sameAsOld = await bcrypt.compare(newPassword, rows[0].password_hash);
+  if (sameAsOld) throw { status: 400, message: 'New password must be different from the current one' };
+
+  const hash = await bcrypt.hash(newPassword, 10);
+  await db.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, userId]);
+};

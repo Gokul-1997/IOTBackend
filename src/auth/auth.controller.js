@@ -93,3 +93,31 @@ exports.resetPassword = async (req, res) => {
     });
   }
 };
+
+exports.getMyProfile = async (req, res) => {
+  try {
+    const profile = await service.getMyProfile(req.user.id);
+    res.json({ success: true, data: profile });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message || 'Unable to load profile' });
+  }
+};
+
+exports.updateMyProfile = async (req, res) => {
+  try {
+    const profile = await service.updateMyProfile(req.user.id, req.body || {});
+    res.json({ success: true, data: profile });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message || 'Unable to update profile' });
+  }
+};
+
+exports.changeMyPassword = async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body || {};
+    await service.changeMyPassword(req.user.id, current_password, new_password);
+    res.json({ success: true, message: 'Password changed' });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message || 'Unable to change password' });
+  }
+};

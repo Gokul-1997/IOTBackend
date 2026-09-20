@@ -35,3 +35,21 @@ exports.getUnreadCount = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   }
 };
+
+exports.getPreferences = async (req, res) => {
+  try {
+    const prefs = await service.getPreferences(req.user.id);
+    res.json({ success: true, data: prefs });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message });
+  }
+};
+
+exports.updatePreferences = async (req, res) => {
+  try {
+    const prefs = await service.updatePreferences(req.user.id, req.body || {});
+    res.json({ success: true, data: prefs });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message });
+  }
+};
