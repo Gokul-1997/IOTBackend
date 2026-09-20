@@ -18,7 +18,9 @@ router.get('/:id/plan-features',      auth,          ctrl.getPlanFeatures);
 // their own company; the service refuses another company's figures.
 router.get('/:id/usage',              auth,          ctrl.getUsage);
 router.get('/:id/permissions',        auth,          ctrl.getCompanyPermissions);
-router.put('/:id/permissions',        auth, audited('company'), isSNT,  ctrl.assignCompanyPermissions);
+router.put('/:id/permissions',        auth, audited('company'), isSNT, validate({
+  permission_ids: { required: true, type: 'array', label: 'Permission IDs' }
+}), ctrl.assignCompanyPermissions);
 router.delete('/:id',                 auth, audited('company'), isSNT,  ctrl.remove);
 router.delete('/:id/permanent',       auth, audited('company'), isSNT,  ctrl.permanentDelete);
 

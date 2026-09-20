@@ -429,25 +429,123 @@ exports.getCompanyPermissions = async (company_id) => {
  * Super user selects which pages/actions the company can access.
  * permission_ids = array of permission IDs to grant.
  */
+/**
+ * Replace the page access a company has been granted.
+ *
+ * This is the write side of "Manage Access" — what S&T decides a company has
+ * paid for. It used to DELETE every company_permissions row and re-insert
+ * whatever ids arrived, which had four problems:
+ *
+ *   - nothing validated the ids. An unknown id failed on a foreign key
+ *     halfway through and surfaced as a bare 500; a missing or non-array
+ *     body threw a TypeError after the DELETE had already run.
+ *   - a company that did not exist reported success.
+ *   - the modal only knows page permissions, but the DELETE wiped every row,
+ *     including any non-page grants a company held.
+ *   - revoking a page changed nothing that enforces it: the roles inside the
+ *     company kept the permission, so the revocation was cosmetic. A company
+ *     admin could not GRANT the page again (role.service checks new grants
+ *     against this table), but every role that already held it kept it.
+ *
+ * Now: validated, a diff against the current page grants (unchanged rows keep
+ * their original granted_by/granted_at), and a revoke cascades to the
+ * company's OWN roles. System roles are shared by every tenant, so their
+ * permissions cannot be narrowed per company — the response says how many
+ * role grants were removed so the caller is not left assuming more than
+ * happened.
+ *
+ * An empty selection is refused. The frontend reads a company with no grants
+ * as "fresh, unrestricted" (auth.service.ts: companyPerms.length === 0),
+ * so saving nothing would not revoke everything — it would silently grant
+ * everything.
+ */
 exports.assignCompanyPermissions = async (company_id, permission_ids, granted_by) => {
+  if (!Array.isArray(permission_ids)) {
+    throw { status: 400, message: 'permission_ids must be a list of permission ids' };
+  }
+  const wanted = [...new Set(permission_ids.map(Number))];
+  if (wanted.some(n => !Number.isInteger(n) || n <= 0)) {
+    throw { status: 400, message: 'permission_ids must be positive whole numbers' };
+  }
+  if (wanted.length === 0) {
+    throw {
+      status: 400, code: 'EMPTY_ACCESS',
+      message: 'Select at least one page. A company with no access selected is treated as unrestricted, ' +
+               'not as locked out — deactivate the company to lock it out.'
+    };
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Remove old permissions
-    await client.query(`DELETE FROM company_permissions WHERE company_id = $1`, [company_id]);
+    // Locks the row so two simultaneous saves serialise, and is the
+    // existence check: previously a made-up company id reported success.
+    const { rows: co } = await client.query('SELECT id FROM companies WHERE id = $1 FOR UPDATE', [company_id]);
+    if (!co.length) throw { status: 404, message: 'Company not found' };
 
-    // Insert new permissions
-    for (const pid of permission_ids) {
+    const { rows: valid } = await client.query(
+      `SELECT id FROM permissions WHERE id = ANY($1::int[]) AND permission_key LIKE 'page:%'`,
+      [wanted]
+    );
+    const validIds = new Set(valid.map(r => r.id));
+    const unknown = wanted.filter(id => !validIds.has(id));
+    if (unknown.length) {
+      throw { status: 400, message: `Not a page permission: ${unknown.join(', ')}` };
+    }
+
+    // Only page permissions are managed here — legacy API keys (machine.view
+    // and the like) are not in the catalogue the modal offers, so they are
+    // neither read nor deleted.
+    const { rows: cur } = await client.query(
+      `SELECT cp.permission_id
+         FROM company_permissions cp
+         JOIN permissions p ON p.id = cp.permission_id
+        WHERE cp.company_id = $1 AND p.permission_key LIKE 'page:%'`,
+      [company_id]
+    );
+    const current   = new Set(cur.map(r => r.permission_id));
+    const wantedSet = new Set(wanted);
+    const added     = wanted.filter(id => !current.has(id));
+    const removed   = [...current].filter(id => !wantedSet.has(id));
+
+    if (removed.length) {
+      await client.query(
+        `DELETE FROM company_permissions WHERE company_id = $1 AND permission_id = ANY($2::int[])`,
+        [company_id, removed]
+      );
+    }
+    if (added.length) {
       await client.query(
         `INSERT INTO company_permissions (company_id, permission_id, granted_by)
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-        [company_id, pid, granted_by || null]
+         SELECT $1, unnest($2::int[]), $3
+         ON CONFLICT DO NOTHING`,
+        [company_id, added, granted_by || null]
       );
     }
 
+    let revokedFromRoles = 0;
+    if (removed.length) {
+      const r = await client.query(
+        `DELETE FROM role_permissions rp
+          USING roles ro
+          WHERE rp.role_id = ro.id
+            AND ro.company_id = $1
+            AND ro.is_system = false
+            AND rp.permission_id = ANY($2::int[])`,
+        [company_id, removed]
+      );
+      revokedFromRoles = r.rowCount || 0;
+    }
+
     await client.query('COMMIT');
-    return { company_id, permission_count: permission_ids.length };
+    return {
+      company_id,
+      permission_count: wanted.length,
+      granted: added.length,
+      revoked: removed.length,
+      revoked_from_roles: revokedFromRoles
+    };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

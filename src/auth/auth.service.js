@@ -251,6 +251,22 @@ exports.refresh = async (refreshToken, req) => {
   const su = sessionUser.rows[0] || {};
   const is_snt_super_refresh = roles.includes('SNT_SUPER');
 
+  /* What the company has been granted, read fresh. Login sends this to the
+     browser once and nothing ever updated it, so a change made in Manage
+     Access reached a signed-in user only when they signed out and back in —
+     however long that took. Refresh runs every ~14 minutes for anyone with
+     the app open, which makes it the natural place to carry it. */
+  const companyPermRes = su.company_id
+    ? await db.query(
+        `SELECT p.permission_key
+           FROM company_permissions cp
+           JOIN permissions p ON p.id = cp.permission_id
+          WHERE cp.company_id = $1`,
+        [su.company_id]
+      )
+    : { rows: [] };
+  const company_permissions = companyPermRes.rows.map(r => r.permission_key);
+
   const accessToken = signAccessToken({
     user_id:    s.user_id,
     plant_id:   s.plant_id,
@@ -261,7 +277,7 @@ exports.refresh = async (refreshToken, req) => {
     permissions
   });
 
-  return { accessToken };
+  return { accessToken, permissions, company_permissions };
 };
 
 /* =========================================================

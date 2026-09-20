@@ -2,6 +2,24 @@ const svc      = require('./company.service');
 const plantSvc = require('../plants/plant.service');
 const checkQuota = require('../middleware/quota.middleware');
 
+/* company.routes.js says "SNT_SUPER only (except GET own company)" — but
+   nothing enforced the exception's other half. getById, getPlanFeatures and
+   getCompanyPermissions took req.params.id and ran it, so any authenticated
+   user could read any company's contact details, plan and page access by
+   changing an integer in the URL. getUsage already did this check (below);
+   these now share it. Answered before touching the database, and as a 403
+   rather than a 404 because a company id is not a secret the way a role id
+   guessed by an attacker is — the list of companies is one click away for
+   anyone who can see the admin screen. */
+function ownCompanyOrSuper(req, res) {
+  const id = Number(req.params.id);
+  if (!req.user.is_snt_super && req.user.company_id !== id) {
+    res.status(403).json({ message: 'You may only view your own company' });
+    return false;
+  }
+  return true;
+}
+
 exports.create = async (req, res, next) => {
   try {
     const company = await svc.create(req.body);
@@ -17,6 +35,7 @@ exports.list = async (req, res, next) => {
 
 exports.getById = async (req, res, next) => {
   try {
+    if (!ownCompanyOrSuper(req, res)) return;
     res.json(await svc.getById(req.params.id));
   } catch (e) { next(e); }
 };
@@ -58,19 +77,21 @@ exports.assignPlan = async (req, res, next) => {
 
 exports.getPlanFeatures = async (req, res, next) => {
   try {
+    if (!ownCompanyOrSuper(req, res)) return;
     res.json(await svc.getPlanFeatures(req.params.id));
   } catch (e) { next(e); }
 };
 
 exports.getCompanyPermissions = async (req, res, next) => {
   try {
+    if (!ownCompanyOrSuper(req, res)) return;
     res.json(await svc.getCompanyPermissions(req.params.id));
   } catch (e) { next(e); }
 };
 
 exports.assignCompanyPermissions = async (req, res, next) => {
   try {
-    res.json(await svc.assignCompanyPermissions(req.params.id, req.body.permission_ids, req.user.id));
+    res.json(await svc.assignCompanyPermissions(Number(req.params.id), req.body.permission_ids, req.user.id));
   } catch (e) { next(e); }
 };
 

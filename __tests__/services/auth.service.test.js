@@ -222,3 +222,56 @@ describe('changeMyPassword', () => {
       .rejects.toMatchObject({ status: 404 });
   });
 });
+
+/*
+ * Refresh carries the company's current grants.
+ *
+ * Login sent company_permissions to the browser once and nothing ever
+ * updated it — a change made in Manage Access reached a signed-in user only
+ * when they signed out and back in. Refresh runs about every 14 minutes for
+ * anyone with the app open.
+ */
+describe('refresh', () => {
+  const session = { rows: [{ user_id: 12, expires_at: new Date(Date.now() + 86_400_000), revoked: false,
+                             email: 'a@b.com', username: 'a', plant_id: 1, is_active: true }], rowCount: 1 };
+
+  test('returns the current page grants alongside the new token', async () => {
+    mockDb.queueResponse(
+      session,
+      { rows: [{ role_name: 'COMPANY_ADMIN' }] },                         // roles
+      { rows: [{ permission_key: 'page:programs:view' }] },               // role permissions
+      { rows: [{ company_id: 4, user_type: 'ADMIN' }] },                  // company
+      { rows: [{ permission_key: 'page:dashboard:view' }, { permission_key: 'page:reports:view' }] }
+    );
+    const out = await auth.refresh('raw-refresh-token', fakeReq);
+    expect(out.accessToken).toBe('signed-jwt-token');
+    expect(out.company_permissions).toEqual(['page:dashboard:view', 'page:reports:view']);
+    expect(out.permissions).toEqual(['page:programs:view']);
+  });
+
+  test('a page revoked since login is absent — that is the point', async () => {
+    mockDb.queueResponse(
+      session, { rows: [{ role_name: 'COMPANY_ADMIN' }] }, { rows: [] },
+      { rows: [{ company_id: 4, user_type: 'ADMIN' }] },
+      { rows: [{ permission_key: 'page:dashboard:view' }] }               // reports is gone
+    );
+    const out = await auth.refresh('raw-refresh-token', fakeReq);
+    expect(out.company_permissions).not.toContain('page:reports:view');
+  });
+
+  test('a super admin has no company, so no company query runs and the list is empty', async () => {
+    mockDb.queueResponse(
+      session, { rows: [{ role_name: 'SNT_SUPER' }] }, { rows: [] },
+      { rows: [{ company_id: null, user_type: 'SNT_SUPER' }] }
+    );
+    const out = await auth.refresh('raw-refresh-token', fakeReq);
+    expect(out.company_permissions).toEqual([]);
+    expect(mockDb.calls().some(c => /FROM company_permissions/.test(c.text))).toBe(false);
+  });
+
+  test('a revoked session is still refused before any of this is read', async () => {
+    mockDb.queueResponse({ rows: [{ ...session.rows[0], revoked: true }], rowCount: 1 });
+    await expect(auth.refresh('raw-refresh-token', fakeReq)).rejects.toMatchObject({ status: 401 });
+    expect(mockDb.calls()).toHaveLength(1);
+  });
+});
