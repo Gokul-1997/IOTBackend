@@ -30,7 +30,7 @@ exports.list = async (req, res) => {
 
 exports.getById = async (req, res) => {
   try {
-    res.json(await svc.getById(req.params.id));
+    res.json(await svc.getById(req.params.id, req.user));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
   }
@@ -57,8 +57,10 @@ exports.listPermissions = async (req, res) => {
 
 exports.assignPermissions = async (req, res) => {
   try {
-    const company_id = req.user.is_snt_super ? null : req.user.company_id;
-    await svc.assignPermissions(req.params.id, req.body.permission_ids, company_id);
+    // role.service.js now derives company scoping from the actor itself —
+    // and checks the role belongs to them — rather than trusting a
+    // precomputed company_id with no ownership check behind it.
+    await svc.assignPermissions(req.params.id, req.body.permission_ids, req.user);
     res.json({ success: true });
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });

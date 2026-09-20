@@ -111,9 +111,15 @@ exports.list = async ({ company_id, is_snt_super = false } = {}) => {
               ORDER BY r.role_name`;
     params = [company_id];
   } else {
-    query  = `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id
-              FROM roles r ORDER BY r.is_system DESC, r.role_name`;
-    params = [];
+    /* Neither a confirmed super admin nor a known company: this used to run
+       an unfiltered query and return every role from every company. Nothing
+       legitimate reaches this branch — the only caller is the GET /api/roles
+       handler, which always passes one or the other for a real admin — so
+       it is reachable only when a company admin's company_id has come back
+       null (the column is nullable), and returning everyone else's roles to
+       that request is exactly the tenant leak this function exists to
+       prevent. Fail closed. */
+    return [];
   }
 
   const { rows } = await db.query(query, params);
@@ -164,15 +170,14 @@ async function loadRoleFor(client, roleId, { company_id, is_snt_super = false } 
   return role;
 }
 
-exports.getById = async (roleId) => {
-  const { rows } = await db.query(
-    `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id
-     FROM roles r WHERE r.id = $1`,
-    [roleId]
-  );
-  if (!rows.length) throw { status: 404, message: 'Role not found' };
+/* Took only the id, with no actor at all — any authenticated admin-tier
+   user could read any company's role, permissions included, by requesting
+   its id. db exposes the same .query(text, params) interface loadRoleFor
+   expects from a transaction client, so it can stand in directly for a
+   plain read with no transaction needed. */
+exports.getById = async (roleId, actor = {}) => {
+  const role = await loadRoleFor(db, roleId, actor);
 
-  const role = rows[0];
   const { rows: perms } = await db.query(
     `SELECT p.id, p.permission_key, p.description
      FROM permissions p
@@ -246,10 +251,21 @@ exports.update = async (roleId, { role_name, description }, actor = {}) => {
  * Replace a role's permissions entirely.
  * Validates that permissions are allowed by the company's plan.
  */
-exports.assignPermissions = async (roleId, permissionIds, company_id) => {
+exports.assignPermissions = async (roleId, permissionIds, actor = {}) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    /* Same guard update/remove/assign already use: confirms this role is
+       the caller's to touch before anything below writes to it, and — new
+       here — refuses a system role. Without that second check, overwriting
+       role_permissions for the SNT_SUPER row would corrupt what every
+       super-admin account is entitled to; system roles get their
+       permissions from seedPagePermissions(), not this per-company editor. */
+    const role = await loadRoleFor(client, roleId, actor);
+    if (role.is_system) throw { status: 403, message: 'Cannot edit permissions of a system role' };
+
+    const company_id = actor.is_snt_super ? null : actor.company_id;
 
     // Validate against company_permissions (what super user allowed)
     if (company_id && permissionIds.length) {
@@ -414,9 +430,13 @@ exports.listPermissions = async ({ company_id, is_snt_super } = {}) => {
   const { APP_MODULES } = require('../plans/plan.service');
 
   let query, params;
-  if (is_snt_super || !company_id) {
+  if (is_snt_super) {
     query = `SELECT id, permission_key, description FROM permissions WHERE permission_key LIKE 'page:%' ORDER BY permission_key`;
     params = [];
+  } else if (!company_id) {
+    // Same reasoning as list() above: an unconfirmed caller sees nothing,
+    // not the full catalogue of what every other company can be granted.
+    return [];
   } else {
     query = `SELECT p.id, p.permission_key, p.description
              FROM permissions p
