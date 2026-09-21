@@ -40,7 +40,7 @@ exports.getFactoryDashboard = async (req) => {
 
   const [
     settingsRes, machineRes, prodRes, oeeRes,
-    shiftRes, downtimeRes, alarmRes, energyRes, planRes
+    shiftRes, downtimeRes, alarmRes, energyRes
   ] = await Promise.all([
 
     /* company tariff — cost is unavailable rather than zero when unset */
@@ -179,22 +179,12 @@ exports.getFactoryDashboard = async (req) => {
              COALESCE(SUM(produced_qty),0)::int AS produced
       FROM production_hourly WHERE ${s.sql}
       GROUP BY hour_start ORDER BY hour_start`, s.params
-    ),
-
-    /* planned quantity for actual-vs-planned */
-    db.query(`
-      SELECT COALESCE(SUM(planned_qty),0)::int AS planned
-      FROM production_plans
-      WHERE company_id = $1 AND plan_date = $2::date
-        ${machineId ? 'AND machine_id = $3' : ''}`,
-      machineId ? [companyId, win.day, machineId] : [companyId, win.day]
     )
   ]);
 
   const settings   = settingsRes.rows[0] || {};
   const rate       = Number(settings.energy_rate_per_kwh || 0);
   const prod       = prodRes.rows[0];
-  const planned    = planRes.rows[0]?.planned || 0;
 
   /* month-to-date energy, for the monthly cost figure */
   const monthRes = await db.query(`
@@ -223,10 +213,7 @@ exports.getFactoryDashboard = async (req) => {
     machines: machineRes.rows[0],
 
     production: {
-      produced: prod.produced,
-      planned,
-      // "overall production percentage" — actual against plan
-      percent: planned > 0 ? Number(((prod.produced / planned) * 100).toFixed(1)) : null
+      produced: prod.produced
     },
 
     time: {

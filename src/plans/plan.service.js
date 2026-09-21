@@ -52,9 +52,9 @@ const APP_MODULES = [
   // existing 'maintenance' key rather than a new module, since Tickets is
   // a tab on that same page, not a separate route.
   { key: 'maintenance',       label: 'Maintenance',       group: 'Main', actions: ['view', 'create', 'edit', 'delete'] },
+  { key: 'maintenance-report', label: 'Maintenance Report', group: 'Analytics', actions: ['view', 'export'] },
   { key: 'alarms',            label: 'Alarms',            group: 'Main', actions: ['view', 'resolve'] },
   { key: 'downtime',          label: 'Downtime',          group: 'Main', actions: ['view', 'create', 'edit'] },
-  { key: 'production-plans',  label: 'Production Plans',  group: 'Main', actions: ['view', 'create', 'edit', 'delete'] },
 
   // Program Transfer shipped with a route and a nav entry but no module
   // entry at all, so no page:programs:* key had ever existed and every

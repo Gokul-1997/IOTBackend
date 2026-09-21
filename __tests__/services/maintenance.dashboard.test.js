@@ -24,8 +24,7 @@ const queueAll = (over = {}) => mockDb.queueResponse(
   { rows: over.rows   || [{ machine_id: 1, machine_serial_no: 'VMC-1' }] },
   { rows: over.alarms || [] },
   { rows: [over.oee   || { availability: 90, performance: 80, quality: 99, oee: 71 }] },
-  { rows: [over.prod  || { produced: 100, run_seconds: 3600, idle_seconds: 600 }] },
-  { rows: over.trend  || [] }
+  { rows: [over.prod  || { produced: 100, run_seconds: 3600, idle_seconds: 600 }] }
 );
 
 const sqlOf = (i) => mockDb.calls()[i].text;
@@ -56,12 +55,6 @@ describe('maintenance dashboard — query safety', () => {
     expect(rowsSql).toMatch(/LIMIT 1/);
     // a bare join against the assignment table is the bug this replaced
     expect(rowsSql).not.toMatch(/LEFT JOIN operator_machine_assignments/);
-  });
-
-  test('the cycle-time trend cannot divide by a zero part count', async () => {
-    queueAll();
-    await svc.getMaintenanceDashboard(req());
-    expect(sqlOf(5)).toMatch(/NULLIF\(SUM\(produced_qty\),0\)/);
   });
 
   test('every query is scoped to the caller’s company', async () => {

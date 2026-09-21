@@ -25,6 +25,7 @@ const LEGACY_API_PERMISSIONS = [
 ];
 
 exports.LEGACY_API_PERMISSIONS = LEGACY_API_PERMISSIONS;
+exports.syncDefaultRoles = syncDefaultRoles;
 
 /**
  * Seed all system roles + legacy API permissions.
@@ -79,8 +80,10 @@ exports.seedPagePermissions = async () => {
        ON CONFLICT DO NOTHING`
     );
 
+    const roles = await syncDefaultRoles(client);
+
     await client.query('COMMIT');
-    return { seeded: LEGACY_API_PERMISSIONS.length, pages: pageCount };
+    return { seeded: LEGACY_API_PERMISSIONS.length, pages: pageCount, roles };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -88,6 +91,69 @@ exports.seedPagePermissions = async () => {
     client.release();
   }
 };
+
+/**
+ * Bring the default system roles in line with default-roles.js.
+ *
+ * Runs on every start, and is authoritative for `page:%` keys: a key the
+ * definition dropped is removed from the role, not left behind. That is what
+ * makes "the same roles in every company" a fact rather than a hope — these
+ * roles carry company_id NULL, so one row serves every tenant and no company
+ * can end up with a Supervisor that means something different.
+ *
+ * Legacy `machine.view`-style keys are insert-only. They are shared with
+ * LEGACY_API_PERMISSIONS above, which grants them to the older system roles
+ * on the same pass, and deleting from that set here would fight it.
+ *
+ * Nothing here touches a company's own roles (company_id IS NOT NULL) or the
+ * roles a company was given through Manage Access. role_name is UNIQUE across
+ * every company, so a company may already hold one of these names: the upsert
+ * is guarded on company_id IS NULL and the lookup below repeats the guard, so
+ * that company keeps its own role rather than having it turned into a system
+ * one underneath it.
+ */
+async function syncDefaultRoles(client) {
+  const { resolveDefaultRoles } = require('./default-roles');
+  const summary = [];
+
+  for (const role of resolveDefaultRoles()) {
+    await client.query(
+      `INSERT INTO roles (role_name, description, is_system, company_id)
+       VALUES ($1, $2, true, NULL)
+       ON CONFLICT (role_name) DO UPDATE
+         SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
+       WHERE roles.company_id IS NULL`,
+      [role.name, role.description]
+    );
+
+    const { rows } = await client.query(
+      `SELECT id FROM roles WHERE role_name = $1 AND company_id IS NULL`, [role.name]);
+    if (!rows.length) continue;            // a company owns this name; leave it alone
+    const roleId = rows[0].id;
+
+    const removed = await client.query(
+      `DELETE FROM role_permissions rp
+        USING permissions p
+        WHERE rp.role_id = $1
+          AND p.id = rp.permission_id
+          AND p.permission_key LIKE 'page:%'
+          AND NOT (p.permission_key = ANY($2::text[]))`,
+      [roleId, role.permissions]
+    );
+
+    const added = await client.query(
+      `INSERT INTO role_permissions (role_id, permission_id)
+       SELECT $1, p.id FROM permissions p
+        WHERE p.permission_key = ANY($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [roleId, [...role.permissions, ...role.legacy]]
+    );
+
+    summary.push({ role: role.name, granted: added.rowCount, revoked: removed.rowCount });
+  }
+
+  return summary;
+}
 
 // ── Role CRUD (company-scoped) ─────────────────────────────────
 

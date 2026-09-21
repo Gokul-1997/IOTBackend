@@ -69,6 +69,13 @@ router.get('/energy/settings', auth, view('energy'), ctrl.getEnergySettings);
 router.post('/energy/settings', auth, access('page:analytics-energy:settings'), ctrl.saveEnergySettings);
 router.get('/energy/export/:format', auth, export_('energy'), ctrl.exportEnergy);
 
+/* Maintenance Report — the ticket record over a period, exportable.
+   Its own key, not page:analytics-maintenance: the dashboard shows live
+   machine condition and this shows what maintenance did, and a company can
+   reasonably be sold one without the other. */
+router.get('/maintenance-report', auth, access('page:maintenance-report:view'), ctrl.maintenanceReport);
+router.get('/maintenance-report/export/:format', auth, access('page:maintenance-report:export'), ctrl.exportMaintenanceReport);
+
 router.get('/live/:machine_id', auth, access('page:dashboard:live:view'), ctrl.machineDetail);
 
 

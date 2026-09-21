@@ -52,7 +52,7 @@ exports.getMaintenanceDashboard = async (req) => {
     ? [companyId, win.from, win.to, machineId]
     : [companyId, win.from, win.to];
 
-  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, trendRes, conditionRes] = await Promise.all([
+  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, conditionRes] = await Promise.all([
 
     /* fleet health: how many machines are reporting and not alarming.
        "Health" is not defined in the agreement, so it is stated plainly
@@ -201,18 +201,6 @@ exports.getMaintenanceDashboard = async (req) => {
       FROM production_hourly WHERE ${s.sql}`, s.params
     ),
 
-    /* cycle-time trend: seconds of cutting per part, hour by hour.
-       NULLIF guards the hours where nothing was produced — dividing by a
-       zero part count would make the chart spike to infinity. */
-    db.query(`
-      SELECT hour_start,
-             COALESCE(SUM(produced_qty),0)::int AS produced,
-             ROUND((SUM(run_seconds)::numeric / NULLIF(SUM(produced_qty),0)), 1)::float
-               AS avg_cycle_seconds
-      FROM production_hourly WHERE ${s.sql}
-      GROUP BY hour_start ORDER BY hour_start`, s.params
-    ),
-
     /* condition trend: servo and spindle temperature and insulation
        resistance, hour by hour, for one machine.
 
@@ -275,8 +263,6 @@ exports.getMaintenanceDashboard = async (req) => {
     oee:        oeeRes.rows[0]  || { availability: null, performance: null, quality: null, oee: null },
     production: prodRes.rows[0] || { produced: 0, run_seconds: 0, idle_seconds: 0 },
     rows:       rowsRes.rows,
-    cycle_time_trend: trendRes.rows,
-
     condition_trend: conditionRes.rows,
 
     /* Measured, not declared. This used to be a fixed list, true only while

@@ -114,12 +114,28 @@ describe('every analytics dashboard is actually enforced', () => {
   const analytics = APP_MODULES.filter(m => m.group === 'Analytics');
   const enforced = new Set(routes.filter(r => !r.loadError).map(r => r.key));
 
-  test('there are nine, one per Phase 2 screen', () => {
-    expect(analytics.map(m => m.key).sort()).toEqual([
+  /* The nine Phase 2 dashboards, plus the Maintenance Report — which is in
+     this group because it is sold and revoked the same way, but is not one
+     of the nine screens and has no analytics- prefix. */
+  test('there are nine dashboards, one per Phase 2 screen', () => {
+    expect(analytics.map(m => m.key).filter(k => k.startsWith('analytics-')).sort()).toEqual([
       'analytics-alarms', 'analytics-downtime', 'analytics-energy', 'analytics-factory',
       'analytics-maintenance', 'analytics-oee', 'analytics-operators',
       'analytics-periodic', 'analytics-preventive'
     ]);
+  });
+
+  test('the Maintenance Report is grantable and exportable in its own right', () => {
+    const mod = APP_MODULES.find(m => m.key === 'maintenance-report');
+    expect(mod).toBeTruthy();
+    expect(mod.actions).toEqual(['view', 'export']);
+    expect(enforced.has('page:maintenance-report:view')).toBe(true);
+    expect(enforced.has('page:maintenance-report:export')).toBe(true);
+  });
+
+  test('Production Plans is gone from the catalogue — it was never in Phase 2', () => {
+    expect(APP_MODULES.some(m => m.key === 'production-plans')).toBe(false);
+    expect([...catalogue].filter(k => k.includes('production-plans'))).toEqual([]);
   });
 
   test.each(analytics.flatMap(m => m.actions.map(a => [`page:${m.key}:${a}`])))(

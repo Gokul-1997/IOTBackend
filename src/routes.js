@@ -36,7 +36,6 @@ module.exports = app => {
   app.use('/api/downtime',         require('./downtime/downtime.routes'));
   app.use('/api/maintenance',      require('./maintenance/maintenance.routes'));
   app.use('/api/tickets',          require('./tickets/ticket.routes'));
-  app.use('/api/production-plans', require('./production-plans/plan.routes'));
   app.use('/api/programs',         require('./programs/program.routes'));
 
   // ── File Upload ───────────────────────────────────────────────
