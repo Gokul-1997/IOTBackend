@@ -181,14 +181,15 @@ const RETIRED_SYSTEM_ROLES = ['MANAGER', 'OPERATOR', 'VIEWER',
    same list in the database. */
 const RESERVED_ROLE_NAMES = ['SNT_SUPER', 'COMPANY_ADMIN', 'ADMIN'];
 
-/* Roles S&T may hand out: a company's admin, and its own platform role. */
-const SNT_ASSIGNABLE = ['COMPANY_ADMIN', 'SNT_SUPER'];
-
 exports.PLATFORM_ONLY_ROLES  = PLATFORM_ONLY_ROLES;
 exports.RETIRED_SYSTEM_ROLES = RETIRED_SYSTEM_ROLES;
 exports.RESERVED_ROLE_NAMES  = RESERVED_ROLE_NAMES;
 
 function forbidden(message) { return { status: 403, message }; }
+
+/* S&T gives no one a role. A company's admin is made with the company, and
+   that admin gives everyone else theirs — a second admin included. */
+const SNT_ASSIGNS_NO_ROLES = "S&T doesn't assign roles. A company's admin is set when the company is created, and the admin assigns every other role.";
 
 /** Creating, editing, copying and deleting roles is the company admin's job. */
 function requireCompanyAdmin(actor = {}) {
@@ -313,6 +314,7 @@ function nameTaken(e, name) {
  * Takes a client so callers can run it inside their own transaction.
  */
 async function assertAssignable(client, roleIds, { actor = {}, targetCompanyId }) {
+  if (actor.is_snt_super) throw forbidden(SNT_ASSIGNS_NO_ROLES);
   for (const roleId of roleIds) {
     /* FOR UPDATE, matching the lock remove() takes: without it a role could
        be deleted between this check and the insert, and the insert would
@@ -326,18 +328,6 @@ async function assertAssignable(client, roleIds, { actor = {}, targetCompanyId }
 
     if (role.is_system && RETIRED_SYSTEM_ROLES.includes(role.role_name)) {
       throw forbidden(`Role ${role.role_name} is no longer in use`);
-    }
-    if (actor.is_snt_super) {
-      /* S&T sets up a company's admin; the admin gives everyone else their
-         role. A company's own roles are only ever the company's to hand out. */
-      if (!role.is_system || !SNT_ASSIGNABLE.includes(role.role_name)) {
-        throw forbidden("S&T can only make someone a company's admin. The company admin assigns every other role.");
-      }
-      // an S&T account belongs to no company; one inside a company would see every tenant
-      if (PLATFORM_ONLY_ROLES.includes(role.role_name) && targetCompanyId !== null && targetCompanyId !== undefined) {
-        throw forbidden('An S&T super admin account cannot belong to a company');
-      }
-      continue;
     }
     if (PLATFORM_ONLY_ROLES.includes(role.role_name)) {
       throw forbidden(`Role ${role.role_name} can only be granted by S&T`);
@@ -698,6 +688,7 @@ exports.remove = async (roleId, actor = {}) => {
  */
 exports.assign = async (user_id, role_ids, actor = {}) => {
   const ids = Array.isArray(role_ids) ? role_ids.map(Number).filter(n => Number.isInteger(n) && n > 0) : [];
+  if (actor.is_snt_super) throw forbidden(SNT_ASSIGNS_NO_ROLES);
 
   const client = await db.connect();
   try {
@@ -708,7 +699,7 @@ exports.assign = async (user_id, role_ids, actor = {}) => {
     const target = userRows[0];
     if (!target) throw { status: 404, message: 'User not found' };
 
-    if (!actor.is_snt_super && (!actor.company_id || target.company_id !== actor.company_id)) {
+    if (!actor.company_id || target.company_id !== actor.company_id) {
       throw { status: 404, message: 'User not found' };
     }
 

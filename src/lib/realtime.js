@@ -19,4 +19,10 @@ function emitToUser(userId, event, payload) {
   io.to(`user:${userId}`).emit(event, payload);
 }
 
-module.exports = { setIo, emitToUser };
+/** Close every open socket these users have — live data stops at once. */
+function disconnectUsers(userIds = []) {
+  if (!io || !userIds.length) return;
+  io.in(userIds.map(id => `user:${id}`)).disconnectSockets(true);
+}
+
+module.exports = { setIo, emitToUser, disconnectUsers };

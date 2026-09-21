@@ -3,6 +3,11 @@ const pwd = require('../utils/password');
 const { setSupervisedMachines, listSupervisedMachines } = require('../programs/authorization.service');
 
 exports.create = async (data, reqUser) => {
+  /* A company's admin is made with the company, and that admin adds
+     everyone else — a second full-access person included. S&T adds no one. */
+  if (reqUser.is_snt_super) {
+    throw { status: 403, message: "A company's admin is created with the company. The company admin adds everyone else." };
+  }
   if (!data.username || !data.email || !data.password) {
     throw { status: 400, message: 'Username, email, and password are required' };
   }
@@ -13,37 +18,28 @@ exports.create = async (data, reqUser) => {
     throw { status: 400, message: 'Choose a role for this user' };
   }
 
-  // SNT_SUPER must specify company_id; company admin uses own company
-  let company_id = null;
+  // the new user joins the creator's own company
+  const company_id = reqUser.company_id;
   let plant_id   = null;
 
-  if (reqUser.is_snt_super) {
-    if (!data.company_id) throw { status: 400, message: 'Company is required when creating a user' };
-    company_id = data.company_id;
-    // SNT_SUPER can optionally assign a plant
-    plant_id   = data.plant_id || null;
-  } else {
-    company_id = reqUser.company_id;
-
-    // COMPANY_ADMIN (plant_id = NULL) can assign user to any plant in their company.
-    // PLANT_ADMIN can only assign to their own plant.
-    if (data.plant_id) {
-      if (reqUser.plant_id && Number(reqUser.plant_id) !== Number(data.plant_id)) {
-        throw { status: 403, message: 'You can only assign users to your own plant' };
-      }
-      // Validate the plant belongs to this company
-      const plantCheck = await db.query(
-        `SELECT id FROM plants WHERE id = $1 AND company_id = $2 AND is_active = true`,
-        [data.plant_id, company_id]
-      );
-      if (!plantCheck.rowCount) {
-        throw { status: 400, message: 'Invalid plant — plant does not exist or does not belong to your company' };
-      }
-      plant_id = data.plant_id;
-    } else {
-      // No plant specified — inherit from creator (NULL for company admin, their plant for plant admin)
-      plant_id = reqUser.plant_id || null;
+  // COMPANY_ADMIN (plant_id = NULL) can assign user to any plant in their company.
+  // PLANT_ADMIN can only assign to their own plant.
+  if (data.plant_id) {
+    if (reqUser.plant_id && Number(reqUser.plant_id) !== Number(data.plant_id)) {
+      throw { status: 403, message: 'You can only assign users to your own plant' };
     }
+    // Validate the plant belongs to this company
+    const plantCheck = await db.query(
+      `SELECT id FROM plants WHERE id = $1 AND company_id = $2 AND is_active = true`,
+      [data.plant_id, company_id]
+    );
+    if (!plantCheck.rowCount) {
+      throw { status: 400, message: 'Invalid plant — plant does not exist or does not belong to your company' };
+    }
+    plant_id = data.plant_id;
+  } else {
+    // No plant specified — inherit from creator (NULL for company admin, their plant for plant admin)
+    plant_id = reqUser.plant_id || null;
   }
 
   const hash = await pwd.hash(data.password);
@@ -72,9 +68,7 @@ exports.create = async (data, reqUser) => {
     /* These used to go straight into user_roles. Nothing checked that the
        role belonged to this company, or that the caller was allowed to
        grant it — so a company admin could create a user holding SNT_SUPER
-       and hand themselves the whole platform. assertAssignable also limits
-       S&T to creating a company's admin: the company admin creates everyone
-       else. */
+       and hand themselves the whole platform. */
     await require('../roles/role.service')
       .assertAssignable(client, roleIds, { actor: reqUser, targetCompanyId: company_id });
 
@@ -113,24 +107,38 @@ exports.create = async (data, reqUser) => {
   return user;
 };
 
-/* S&T's side of users is company admins only. Each company creates and
-   manages its own users; S&T creates the company's admin and nothing else,
-   so it has no reason to read — or change — anyone else in a company.
-   This is the one condition every S&T query below adds. */
-const isCompanyAdmin = alias => `EXISTS (
-  SELECT 1 FROM user_roles xa JOIN roles xr ON xr.id = xa.role_id
-   WHERE xa.user_id = ${alias}.id AND xr.role_name = 'COMPANY_ADMIN' AND xr.company_id IS NULL)`;
+/* S&T's side of users is one admin per company: the one made with the
+   company. Each company creates and manages its own users — a second
+   full-access admin included — so S&T has no reason to read or change
+   anyone else in a company. This is the one condition every S&T query
+   below adds.
+
+   "The one made with the company" is the company's earliest user holding
+   the shared Company Admin role. Company create adds that admin in the
+   same transaction as the company, so it always has the company's lowest
+   user id; if the company later removes that person, S&T sees whichever
+   admin it made next. */
+const isTheCompanyAdmin = alias => `${alias}.id = (
+  SELECT MIN(xa.user_id) FROM user_roles xa
+    JOIN roles xr ON xr.id = xa.role_id
+    JOIN users xu ON xu.id = xa.user_id
+   WHERE xu.company_id = ${alias}.company_id
+     AND xr.role_name = 'COMPANY_ADMIN' AND xr.company_id IS NULL)`;
+
+/** What S&T may change about a company's admin. The company is not on the
+ *  list: the admin belongs to the company they were created with. */
+const SNT_EDITABLE = ['username', 'email', 'password', 'is_active'];
 
 exports.list = async (reqUser) => {
   let query, params;
 
   if (reqUser.is_snt_super) {
-    // S&T sees each company's admins — not the users a company creates
+    // S&T sees each company's admin — not the users a company creates
     query = `SELECT u.id, u.username, u.email, u.is_active, u.company_id, u.user_type,
-                    c.company_name
+                    c.company_name, COALESCE(c.is_active, true) AS company_active
              FROM users u
              LEFT JOIN companies c ON c.id = u.company_id
-             WHERE u.user_type != 'snt_super' AND ${isCompanyAdmin('u')}
+             WHERE u.user_type != 'snt_super' AND ${isTheCompanyAdmin('u')}
              ORDER BY c.company_name NULLS LAST, u.username`;
     params = [];
   } else if (reqUser.company_id) {
@@ -167,7 +175,7 @@ exports.getById = async (userId, reqUser) => {
 
   if (reqUser.is_snt_super) {
     query = `SELECT u.id, u.username, u.email, u.is_active, u.plant_id, u.company_id, u.user_type
-               FROM users u WHERE u.id = $1 AND ${isCompanyAdmin('u')}`;
+               FROM users u WHERE u.id = $1 AND ${isTheCompanyAdmin('u')}`;
     params = [userId];
   } else {
     query = `SELECT id, username, email, is_active, plant_id, company_id, user_type FROM users WHERE id = $1 AND company_id = $2`;
@@ -188,6 +196,16 @@ exports.getById = async (userId, reqUser) => {
 };
 
 exports.update = async (userId, reqUser, data) => {
+  if (reqUser.is_snt_super) {
+    const other = Object.keys(data || {}).filter(k => data[k] !== undefined && !SNT_EDITABLE.includes(k));
+    if (other.length) {
+      throw {
+        status: 400,
+        message: "S&T can change a company admin's name, email, password and active status only. The company can't be changed."
+      };
+    }
+  }
+
   const client = await db.connect();
   const wantsSupervisorChange = Array.isArray(data.supervised_machine_ids);
   let user;
@@ -207,9 +225,6 @@ exports.update = async (userId, reqUser, data) => {
       updates.push(`password_hash = $${paramIndex++}`); params.push(hash);
     }
     if (data.is_active !== undefined) { updates.push(`is_active = $${paramIndex++}`); params.push(data.is_active); }
-    if (data.company_id !== undefined && reqUser.is_snt_super) {
-      updates.push(`company_id = $${paramIndex++}`); params.push(data.company_id);
-    }
     // COMPANY_ADMIN can reassign a user to a different plant within their company
     if (data.plant_id !== undefined && !reqUser.is_snt_super) {
       if (data.plant_id === null || data.plant_id === '') {
@@ -228,9 +243,6 @@ exports.update = async (userId, reqUser, data) => {
         updates.push(`plant_id = $${paramIndex++}`); params.push(data.plant_id);
       }
     }
-    if (data.plant_id !== undefined && reqUser.is_snt_super) {
-      updates.push(`plant_id = $${paramIndex++}`); params.push(data.plant_id || null);
-    }
 
     if (!updates.length && !wantsSupervisorChange) {
       await client.query('ROLLBACK');
@@ -245,7 +257,7 @@ exports.update = async (userId, reqUser, data) => {
     query += updates.join(', ');
 
     if (reqUser.is_snt_super) {
-      query += ` WHERE id = $${paramIndex++} AND ${isCompanyAdmin('users')}`;
+      query += ` WHERE id = $${paramIndex++} AND ${isTheCompanyAdmin('users')}`;
       params.push(userId);
     } else {
       query += ` WHERE id = $${paramIndex++} AND company_id = $${paramIndex++}`;
@@ -285,20 +297,21 @@ exports.update = async (userId, reqUser, data) => {
 };
 
 exports.remove = async (userId, reqUser) => {
+  /* S&T can't add a company admin, so it can't take one away either — the
+     company would be left with nobody to run it. The admin goes with the
+     company; to hand the account to someone else, edit its name, email and
+     password. */
+  if (reqUser.is_snt_super) {
+    throw { status: 403, message: "A company's admin is removed only with the company. To give the account to someone else, edit its name, email and password." };
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    /* Decide first whether this caller may delete this user, and only then
-       touch user_roles — the S&T check reads the user's roles, so clearing
-       them first would make every company admin look like an ordinary user.
-       Locked so the answer holds until the delete. */
-    const target = reqUser.is_snt_super
-      ? await client.query(
-          `SELECT u.id FROM users u
-            WHERE u.id = $1 AND u.user_type != 'snt_super' AND ${isCompanyAdmin('u')} FOR UPDATE`, [userId])
-      : await client.query(
-          `SELECT id FROM users WHERE id = $1 AND company_id = $2 FOR UPDATE`, [userId, reqUser.company_id]);
+    // Locked so the answer holds until the delete
+    const target = await client.query(
+      `SELECT id FROM users WHERE id = $1 AND company_id = $2 FOR UPDATE`, [userId, reqUser.company_id]);
 
     if (!target.rowCount) {
       await client.query('ROLLBACK');

@@ -26,6 +26,15 @@ function generateRefreshToken() {
   return crypto.randomBytes(48).toString('hex');
 }
 
+/* S&T disabling a company shuts out everyone in it: its admin, its users,
+   every role it made. Their accounts are left as they are, so turning the
+   company back on restores exactly who could sign in before. */
+const COMPANY_DISABLED = {
+  status: 403,
+  code: 'COMPANY_DISABLED',
+  message: "Your company's access has been turned off. Contact S&T to turn it back on."
+};
+
 exports.login = async ({ email, password }, req) => {
   if (!email || !password) throw { status: 400, message: 'Email and password required' };
 
@@ -33,7 +42,7 @@ exports.login = async ({ email, password }, req) => {
   const userRes = await db.query(
     `SELECT u.id, u.email, u.username, u.password_hash, u.plant_id, u.company_id, u.user_type,
             u.is_active, u.failed_login_attempts, u.lock_until,
-            c.company_name
+            c.company_name, COALESCE(c.is_active, true) AS company_active
      FROM users u
      LEFT JOIN companies c ON c.id = u.company_id
      WHERE u.email = $1`,
@@ -70,6 +79,9 @@ exports.login = async ({ email, password }, req) => {
 
     throw { status: 401, message: 'Invalid credentials' };
   }
+
+  // after the password, so only the account's owner learns the company is off
+  if (user.company_active === false) throw COMPANY_DISABLED;
 
   // Step 3: Get roles + permissions + company plan in parallel
   const [roleRes, permRes, planRes, companyPermRes] = await Promise.all([
@@ -210,9 +222,11 @@ exports.refresh = async (refreshToken, req) => {
 
   const sessionRes = await db.query(
     `SELECT s.user_id, s.expires_at, s.revoked,
-            u.email, u.username, u.plant_id, u.is_active
+            u.email, u.username, u.plant_id, u.is_active,
+            COALESCE(c.is_active, true) AS company_active
      FROM user_sessions s
      JOIN users u ON u.id = s.user_id
+     LEFT JOIN companies c ON c.id = u.company_id
      WHERE s.refresh_token = $1`,
     [hashedToken]
   );
@@ -223,6 +237,8 @@ exports.refresh = async (refreshToken, req) => {
   if (s.revoked) throw { status: 401, message: 'Session revoked' };
   if (new Date(s.expires_at) <= new Date()) throw { status: 401, message: 'Session expired' };
   if (!s.is_active) throw { status: 403, message: 'Account inactive' };
+  // the session is kept, so it works again if S&T turns the company back on
+  if (s.company_active === false) throw COMPANY_DISABLED;
 
   // reload roles/permissions (or cache)
   const roleRes = await db.query(
@@ -284,8 +300,11 @@ exports.refresh = async (refreshToken, req) => {
    RESET PASSWORD (keep your flow, just add cleanup)
    ========================================================= */
 exports.sendResetLink = async (email) => {
+  // no reset mail for a disabled company: the new password couldn't be used
   const userRes = await db.query(
-    'SELECT id, email FROM users WHERE email = $1',
+    `SELECT u.id, u.email FROM users u
+       LEFT JOIN companies c ON c.id = u.company_id
+      WHERE u.email = $1 AND COALESCE(c.is_active, true)`,
     [email]
   );
 

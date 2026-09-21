@@ -183,6 +183,17 @@ exports.getById = async (id) => {
   return company;
 };
 
+/* Turning a company off — or back on — applies straight away. The login and
+   refresh checks alone would leave it working for a while: the auth
+   middleware caches each user for a minute, and an open socket keeps
+   streaming live data until it reconnects. */
+async function applyCompanyStatus(companyId, isActive) {
+  const { rows } = await db.query(`SELECT id FROM users WHERE company_id = $1`, [companyId]);
+  const ids = rows.map(r => r.id);
+  await require('../middleware/auth.middleware').forgetUsers(ids);
+  if (!isActive) require('../lib/realtime').disconnectUsers(ids);
+}
+
 /**
  * Update company basic info.
  */
@@ -201,6 +212,7 @@ exports.update = async (id, { company_name, contact_email, contact_phone, addres
     [company_name, contact_email, contact_phone, address, logo_url, is_active, id]
   );
   if (!rows.length) throw { status: 404, message: 'Company not found' };
+  if (is_active !== undefined && is_active !== null) await applyCompanyStatus(rows[0].id, rows[0].is_active);
   return rows[0];
 };
 
@@ -585,6 +597,7 @@ exports.remove = async (id) => {
     [id]
   );
   if (!rowCount) throw { status: 404, message: 'Company not found' };
+  await applyCompanyStatus(id, false);
 };
 
 /**

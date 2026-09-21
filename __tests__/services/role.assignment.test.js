@@ -59,18 +59,22 @@ describe('assertAssignable — the shared rule', () => {
       .rejects.toMatchObject({ status: 403, message: /only be granted by S&T/ });
   });
 
-  test('S&T can grant SNT_SUPER — to an account with no company', async () => {
-    mockDb.queueResponse({ rows: [role({ id: 6, role_name: 'SNT_SUPER' })] });
+  /* S&T gives no role to anyone. A company's admin is made with the
+     company, and S&T creates no other account — so there is nobody left for
+     S&T to grant SNT_SUPER or Company Admin to. */
+  test('S&T grants no role — not SNT_SUPER, not Company Admin', async () => {
     await expect(roleSvc.assertAssignable(client(), [6], { actor: sntSuper, targetCompanyId: null }))
-      .resolves.toBeUndefined();
+      .rejects.toMatchObject({ status: 403, message: /S&T doesn't assign roles/ });
+    await expect(roleSvc.assertAssignable(client(), [7], { actor: sntSuper, targetCompanyId: 4 }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(mockDb.calls()).toHaveLength(0);
   });
 
-  /* A super admin inside a company would see every other company's data
-     while looking like one of that company's users. */
-  test('but never to a company user, not even by S&T', async () => {
-    mockDb.queueResponse({ rows: [role({ id: 6, role_name: 'SNT_SUPER' })] });
-    await expect(roleSvc.assertAssignable(client(), [6], { actor: sntSuper, targetCompanyId: 4 }))
-      .rejects.toMatchObject({ status: 403, message: /cannot belong to a company/ });
+  test('POST /roles/assign by S&T is refused before the user is even looked up', async () => {
+    await expect(roleSvc.assign(10, [7], sntSuper)).rejects.toMatchObject({ status: 403 });
+    // clearing an admin's roles is refused too
+    await expect(roleSvc.assign(10, [], sntSuper)).rejects.toMatchObject({ status: 403 });
+    expect(mockDb.calls()).toHaveLength(0);
   });
 
   test('another company\'s custom role is refused', async () => {

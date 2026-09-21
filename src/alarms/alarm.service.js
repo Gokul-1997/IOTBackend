@@ -47,11 +47,12 @@ exports.sendAlarmEmails = async (company_id, machine_id, alarm_type, message) =>
     );
     const machineName = machineRes.rows[0]?.machine_serial_no || `Machine #${machine_id}`;
 
-    // Get company admin emails
+    // Get company admin emails — none while S&T has the company turned off
     const emailRes = await db.query(
       `SELECT DISTINCT u.email FROM users u
        JOIN user_roles ur ON ur.user_id = u.id
        JOIN roles r ON r.id = ur.role_id
+       JOIN companies c ON c.id = u.company_id AND c.is_active = true
        WHERE u.company_id = $1 AND u.is_active = true
          AND r.role_name IN ('COMPANY_ADMIN','ADMIN')`,
       [company_id]
@@ -82,9 +83,11 @@ exports.createAlarmNotification = async (company_id, machine_id, alarm_type, mes
     );
     const machineName = machineRes.rows[0]?.machine_serial_no || `Machine #${machine_id}`;
 
-    // Get all active users in this company
+    // Get all active users in this company — none while it is turned off
     const usersRes = await db.query(
-      `SELECT id FROM users WHERE company_id = $1 AND is_active = true`, [company_id]
+      `SELECT u.id FROM users u
+         JOIN companies c ON c.id = u.company_id AND c.is_active = true
+        WHERE u.company_id = $1 AND u.is_active = true`, [company_id]
     );
     if (!usersRes.rowCount) return;
 

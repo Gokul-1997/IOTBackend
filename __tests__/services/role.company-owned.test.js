@@ -289,14 +289,16 @@ describe('the company\'s default roles are its own to change', () => {
       .rejects.toMatchObject({ status: 403, message: /no longer in use/ });
   });
 
-  test('S&T can only make someone a company admin — not give out the company\'s roles', async () => {
-    mockDb.queueResponse({ rows: [{ id: 51, role_name: 'MAINTENANCE', company_id: 4, is_system: false }] });
+  /* A company's admin is made with the company; the admin gives everyone
+     else their role, a second admin included. So S&T gives out none — not
+     the company's roles, and not Company Admin either. */
+  test('S&T gives out no role — not the company\'s, not even Company Admin', async () => {
     await expect(svc.assertAssignable(mockDb, [51], { actor: sntSuper, targetCompanyId: 4 }))
-      .rejects.toMatchObject({ status: 403, message: /company's admin/ });
-
-    resetDb();
-    mockDb.queueResponse({ rows: [{ id: 7, role_name: 'COMPANY_ADMIN', company_id: null, is_system: true }] });
-    await expect(svc.assertAssignable(mockDb, [7], { actor: sntSuper, targetCompanyId: 4 })).resolves.toBeUndefined();
+      .rejects.toMatchObject({ status: 403, message: /S&T doesn't assign roles/ });
+    await expect(svc.assertAssignable(mockDb, [7], { actor: sntSuper, targetCompanyId: 4 }))
+      .rejects.toMatchObject({ status: 403 });
+    // refused before any role is looked up
+    expect(mockDb.calls()).toHaveLength(0);
   });
 
   test('a crafted "system" row owned by a company cannot be granted across companies', async () => {

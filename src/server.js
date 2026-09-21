@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 
 const app = require('./app');
+const db = require('./db');
 const redis = require('./redis'); // ioredis instance
 const realtime = require('./lib/realtime');
 
@@ -24,7 +25,7 @@ const io = new Server(httpServer, {
 /* ===============================
    🔐 WebSocket Authentication
 ================================ */
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     let token = socket.handshake.auth?.token;
 
@@ -39,6 +40,19 @@ io.use((socket, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    /* A token stays valid for its full 15 minutes, so check the account too:
+       a disabled user, or anyone in a company S&T has disabled, gets no live
+       data. */
+    const { rows } = await db.query(
+      `SELECT u.is_active, COALESCE(c.is_active, true) AS company_active
+         FROM users u LEFT JOIN companies c ON c.id = u.company_id
+        WHERE u.id = $1`,
+      [decoded.user_id]
+    );
+    if (!rows[0]?.is_active || !rows[0].company_active) {
+      return next(new Error('Unauthorized'));
+    }
 
     socket.user = decoded;
 

@@ -7,7 +7,8 @@ exports.login = async (req, res) => {
   } catch (e) {
     res.status(e.status || 401).json({
       success: false,
-      message: e.message || 'Login failed'
+      message: e.message || 'Login failed',
+      ...(e.code && { code: e.code })
     });
   }
 };
@@ -27,7 +28,8 @@ exports.refresh = async (req, res) => {
   } catch (e) {
     res.status(e.status || 401).json({
       success: false,
-      message: e.message || 'Unable to refresh token'
+      message: e.message || 'Unable to refresh token',
+      ...(e.code && { code: e.code })
     });
   }
 };

@@ -2,6 +2,14 @@ const jwt   = require('jsonwebtoken');
 const db    = require('../db');
 const redis = require('../redis');
 
+/* Everyone in a company S&T has disabled is shut out — every request, not
+   just the next sign-in. 401 rather than 403 so the app tries its refresh,
+   which refuses too, and signs the person out. */
+const companyDisabled = res => res.status(401).json({
+  message: "Your company's access has been turned off. Contact S&T to turn it back on.",
+  code: 'COMPANY_DISABLED'
+});
+
 module.exports = async (req, res, next) => {
   try {
     const auth = req.headers.authorization;
@@ -30,6 +38,8 @@ module.exports = async (req, res, next) => {
     if (cached) {
       const user = JSON.parse(cached);
       if (!user.is_active) return res.status(403).json({ message: 'Account inactive' });
+      // an entry cached before this field existed reads as active
+      if (user.company_active === false) return companyDisabled(res);
 
       req.user = {
         id:          user.id,
@@ -47,9 +57,13 @@ module.exports = async (req, res, next) => {
     }
 
     // Cache miss — query DB
+    // S&T belongs to no company, so it has no company to be disabled
     const { rows } = await db.query(
-      `SELECT id, username, plant_id, company_id, user_type, is_active
-       FROM users WHERE id = $1`,
+      `SELECT u.id, u.username, u.plant_id, u.company_id, u.user_type, u.is_active,
+              COALESCE(c.is_active, true) AS company_active
+       FROM users u
+       LEFT JOIN companies c ON c.id = u.company_id
+       WHERE u.id = $1`,
       [decoded.user_id]
     );
 
@@ -65,8 +79,11 @@ module.exports = async (req, res, next) => {
       plant_id:  user.plant_id,
       company_id: user.company_id,
       user_type: user.user_type,
-      is_active: user.is_active
+      is_active: user.is_active,
+      company_active: user.company_active
     }));
+
+    if (user.company_active === false) return companyDisabled(res);
 
     req.user = {
       id:          user.id,
@@ -86,4 +103,12 @@ module.exports = async (req, res, next) => {
     console.error('AUTH ERROR:', err);
     return res.status(401).json({ message: 'Unauthorized' });
   }
+};
+
+/** Drop the cached copies of these users, so a change to their company's
+ *  status applies on their next request instead of up to a minute later. */
+module.exports.forgetUsers = async (userIds = []) => {
+  if (!userIds.length) return;
+  try { await redis.del(...userIds.map(id => `user:${id}`)); }
+  catch { /* each entry expires within 60 seconds anyway */ }
 };
