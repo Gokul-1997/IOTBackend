@@ -5,11 +5,11 @@
  * The guarantees worth pinning:
  *   - the roles are created with company_id NULL, so one row serves every
  *     tenant. A per-company copy would let "Supervisor" drift apart.
- *   - page:% keys are authoritative: a key dropped from the definition is
- *     removed from the role, not left behind.
- *   - legacy machine.view-style keys are insert-only, because the legacy
- *     seeder grants the same keys to the older system roles on the same
- *     pass and a delete here would fight it.
+ *   - the definition is authoritative for every key a default role holds —
+ *     page keys and older machine.view-style keys alike. A key it does not
+ *     list is removed, not left behind. (SUPERVISOR once carried write keys
+ *     for lines and operators from the legacy seeder that nobody meant it
+ *     to have.)
  *   - role_name is UNIQUE across all companies, so a company may already
  *     own one of these names. That company keeps its role.
  */
@@ -53,7 +53,9 @@ describe('syncDefaultRoles — the shape of the guarantee', () => {
     queueRoleIds();
     await syncDefaultRoles(client());
     const upsert = mockDb.calls().find(c => /INSERT INTO roles/.test(c.text));
-    expect(upsert.text).toMatch(/ON CONFLICT \(role_name\) DO UPDATE/);
+    // the predicate lets Postgres pick the system-name index once 025 splits
+    // role_name uniqueness per company; it also matches the old global index
+    expect(upsert.text).toMatch(/ON CONFLICT \(role_name\) WHERE company_id IS NULL DO UPDATE/);
     expect(upsert.text).toMatch(/SET description = EXCLUDED\.description/);
   });
 
@@ -92,28 +94,32 @@ describe('syncDefaultRoles — the shape of the guarantee', () => {
   });
 });
 
-describe('syncDefaultRoles — page keys are authoritative', () => {
-  test('removes page keys the definition no longer lists', async () => {
+describe('syncDefaultRoles — the definition is authoritative', () => {
+  test('removes any key the definition does not list — page or legacy', async () => {
     queueRoleIds();
     await syncDefaultRoles(client());
 
     const del = mockDb.calls().find(c => /DELETE FROM role_permissions/.test(c.text));
-    expect(del.text).toMatch(/p\.permission_key LIKE 'page:%'/);
+    expect(del.text).not.toMatch(/LIKE 'page:%'/);
     expect(del.text).toMatch(/NOT \(p\.permission_key = ANY\(\$2::text\[\]\)\)/);
-    expect(del.params[1]).toEqual(DEFAULTS[0].permissions);
+    // what it keeps is exactly the definition: its pages and the keys they need
+    expect(del.params[1]).toEqual([...DEFAULTS[0].permissions, ...DEFAULTS[0].legacy]);
   });
 
-  /* The legacy keys are shared with LEGACY_API_PERMISSIONS, which grants
-     them to the older system roles on the same pass. Deleting from that
-     set here would undo the other seeder's work on every restart. */
-  test('never deletes a legacy key', async () => {
-    queueRoleIds();
-    await syncDefaultRoles(client());
-
-    for (const c of mockDb.calls().filter(c => /DELETE FROM role_permissions/.test(c.text))) {
-      expect(c.text).toMatch(/LIKE 'page:%'/);
-      expect(c.params[1].every(k => k.startsWith('page:'))).toBe(true);
+  /* The two seeders must never grant and revoke the same key on one pass,
+     or the result would depend on which ran last. */
+  test('the legacy seeder no longer names any default role', () => {
+    const { LEGACY_API_PERMISSIONS } = require('../../src/roles/role.service');
+    const names = DEFAULTS.map(r => r.name);
+    for (const perm of LEGACY_API_PERMISSIONS) {
+      expect(perm.roles.filter(r => names.includes(r))).toEqual([]);
     }
+  });
+
+  test('SUPERVISOR keeps its read keys and loses the write keys it never needed', () => {
+    const sup = DEFAULTS.find(r => r.name === 'SUPERVISOR');
+    expect(sup.legacy).toEqual(expect.arrayContaining(['machine.view', 'line.view', 'operator.view']));
+    expect(sup.legacy.filter(k => /\.(create|update|delete)$/.test(k))).toEqual([]);
   });
 
   test('grants page keys and legacy keys together, ignoring ones already held', async () => {

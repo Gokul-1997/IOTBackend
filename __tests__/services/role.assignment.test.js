@@ -45,10 +45,18 @@ describe('assertAssignable — the shared rule', () => {
       .rejects.toMatchObject({ status: 403, message: /only be granted by S&T/ });
   });
 
-  test('S&T itself still can', async () => {
+  test('S&T can grant SNT_SUPER — to an account with no company', async () => {
+    mockDb.queueResponse({ rows: [role({ id: 6, role_name: 'SNT_SUPER' })] });
+    await expect(roleSvc.assertAssignable(client(), [6], { actor: sntSuper, targetCompanyId: null }))
+      .resolves.toBeUndefined();
+  });
+
+  /* A super admin inside a company would see every other company's data
+     while looking like one of that company's users. */
+  test('but never to a company user, not even by S&T', async () => {
     mockDb.queueResponse({ rows: [role({ id: 6, role_name: 'SNT_SUPER' })] });
     await expect(roleSvc.assertAssignable(client(), [6], { actor: sntSuper, targetCompanyId: 4 }))
-      .resolves.toBeUndefined();
+      .rejects.toMatchObject({ status: 403, message: /cannot belong to a company/ });
   });
 
   test('another company\'s custom role is refused', async () => {
@@ -123,17 +131,16 @@ describe('POST /api/users — role_ids used to go straight into user_roles', () 
     expect(mockDb.calls().some(c => /INSERT INTO user_roles/.test(c.text))).toBe(true);
   });
 
-  test('a non-numeric role id is dropped rather than reaching SQL', async () => {
-    queueCreate();
-    // nothing queued for a role lookup: none should happen
-    mockDb.queueResponse({ rows: [{ id: 20 }] });   // the OPERATOR default lookup
-    mockDb.queueResponse({});                       // INSERT user_roles (default)
-    mockDb.queueResponse({ rows: [] });             // read back
-    mockDb.queueResponse({});                       // COMMIT
-
-    await userSvc.create(newUser({ role_ids: ["'; DROP TABLE users; --", -1, 0] }), companyA);
-    expect(mockDb.calls().some(c => /DROP TABLE/.test(c.text))).toBe(false);
-    // falls through to the default-role branch, as an empty list would
-    expect(mockDb.calls().some(c => /role_name = 'OPERATOR'/.test(c.text))).toBe(true);
+  /* A user with no role used to get OPERATOR, a retired role nobody manages.
+     Garbage ids clean down to no role at all, so they get the same answer —
+     before anything reaches the database. */
+  test('no usable role id is refused before anything is written', async () => {
+    await expect(userSvc.create(newUser({ role_ids: ["'; DROP TABLE users; --", -1, 0] }), companyA))
+      .rejects.toMatchObject({ status: 400, message: 'Choose a role for this user' });
+    await expect(userSvc.create(newUser({ role_ids: [] }), companyA))
+      .rejects.toMatchObject({ status: 400 });
+    await expect(userSvc.create(newUser(), companyA))
+      .rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
   });
 });

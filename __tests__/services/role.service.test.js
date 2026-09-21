@@ -100,8 +100,17 @@ describe('listPermissions()', () => {
     mockDb.queueResponse({ rows: [] });
     await svc.listPermissions({ is_snt_super: false, company_id: 4 });
     const { text: sql, params } = mockDb.calls()[0];
-    expect(sql).toMatch(/JOIN company_permissions cp/);
+    expect(sql).toMatch(/cp\.company_id = \$1 AND cp\.permission_id = p\.id/);
     expect(params).toEqual([4]);
+  });
+
+  /* A company with no grants at all is unrestricted everywhere else in the
+     app. This used to return nothing for it, so its role editor was empty
+     and the admin could not build a role. */
+  test('a company with no grants at all sees the whole catalogue, not nothing', async () => {
+    mockDb.queueResponse({ rows: [] });
+    await svc.listPermissions({ is_snt_super: false, company_id: 4 });
+    expect(mockDb.calls()[0].text).toMatch(/NOT EXISTS \(SELECT 1 FROM company_permissions x/);
   });
 
   test('neither SNT_SUPER nor a known company: empty, not the full catalogue', async () => {
@@ -151,11 +160,17 @@ describe('assignPermissions()', () => {
   test('a company admin can assign permissions to their own custom role', async () => {
     mockDb.queueResponse(
       {},                                                                            // BEGIN
-      { rows: [{ id: 10, role_name: 'SETTER', is_system: false, company_id: 4 }] },  // loadRoleFor
-      { rows: [{ permission_id: 1 }, { permission_id: 2 }] },                        // company_permissions
+      { rows: [{ id: 10, role_name: 'LINE LEAD', is_system: false, company_id: 4 }] },  // loadRoleFor
+      { rows: [{ id: 1 }, { id: 2 }] },                                              // which ids are pages
+      { rows: [{ permission_id: 1 }, { permission_id: 2 }] },                        // company grants
+      { rows: [{ id: 1, permission_key: 'page:machines:view' },
+               { id: 2, permission_key: 'page:machines:edit' }] },                  // the pages
       {}, {}, {}                                                                     // DELETE, INSERT, COMMIT
     );
-    await expect(svc.assignPermissions(10, [1, 2], companyA)).resolves.toBeUndefined();
+    const out = await svc.assignPermissions(10, [1, 2], companyA);
+    expect(out.pages).toBe(2);
+    // the pages bring the API keys they need, or the machine list would 403
+    expect(out.legacy).toEqual(['machine.view', 'line.view', 'machine.update']);
   });
 
   test('the bug: assigning to another company\'s role — now blocked before any write', async () => {
@@ -170,9 +185,9 @@ describe('assignPermissions()', () => {
     ]);
   });
 
-  test('the bug: overwriting a system role\'s permissions (e.g. SNT_SUPER itself) is refused', async () => {
-    mockDb.queueResponse({}, { rows: [{ id: 1, role_name: 'SNT_SUPER', is_system: true, company_id: null } ] });
-    await expect(svc.assignPermissions(1, [1], sntSuper)).rejects.toMatchObject({ status: 403 });
+  test('a company admin cannot reach a default role to overwrite it', async () => {
+    mockDb.queueResponse({}, { rows: [{ id: 51, role_name: 'MAINTENANCE', is_system: true, company_id: null }] });
+    await expect(svc.assignPermissions(51, [1], companyA)).rejects.toMatchObject({ status: 404 });
     expect(mockDb.calls().map(c => c.text)).toEqual([
       'BEGIN',
       expect.stringContaining('SELECT id, role_name, is_system, company_id FROM roles'),
@@ -180,10 +195,20 @@ describe('assignPermissions()', () => {
     ]);
   });
 
+  /* AWS model: S&T sets what a company can use; the company manages its
+     roles. S&T is refused before anything is read or written — including
+     SNT_SUPER's own row, which this route once let S&T overwrite. */
+  test('S&T is refused before any query — roles are the company admin\'s', async () => {
+    await expect(svc.assignPermissions(1, [1], sntSuper))
+      .rejects.toMatchObject({ status: 403, message: /managed by each company's admin/ });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
   test('a permission outside the company\'s allowed set is refused, not silently dropped', async () => {
     mockDb.queueResponse(
       {},
       { rows: [{ id: 10, role_name: 'SETTER', is_system: false, company_id: 4 }] },
+      { rows: [{ id: 1 }, { id: 99 }] },             // both are pages
       { rows: [{ permission_id: 1 }] },              // only permission 1 is allowed
       { rows: [{ permission_key: 'page:machines:delete' }] }
     );
@@ -193,15 +218,20 @@ describe('assignPermissions()', () => {
 });
 
 describe('update(), remove(), assign() — already guarded; confirming it holds', () => {
+  /* Both open a transaction, so BEGIN takes the first queued response. The
+     earlier versions of these queued the role first, BEGIN swallowed it, and
+     the tests passed on an empty lookup — right answer, wrong reason. */
   test('update() refuses to rename another company\'s role', async () => {
-    mockDb.queueResponse({ rows: [{ id: 10, role_name: 'SETTER', is_system: false, company_id: 5 }] });
+    mockDb.queueResponse({}, { rows: [{ id: 10, role_name: 'SETTER', is_system: false, company_id: 5 }] });
     await expect(svc.update(10, { role_name: 'RENAMED' }, companyA))
       .rejects.toMatchObject({ status: 404 });
+    expect(mockDb.calls().some(c => /UPDATE roles/.test(c.text))).toBe(false);
   });
 
   test('remove() refuses to delete another company\'s role', async () => {
-    mockDb.queueResponse({ rows: [{ id: 10, role_name: 'SETTER', is_system: false, company_id: 5 }] });
+    mockDb.queueResponse({}, { rows: [{ id: 10, role_name: 'SETTER', is_system: false, company_id: 5 }] });
     await expect(svc.remove(10, companyA)).rejects.toMatchObject({ status: 404 });
+    expect(mockDb.calls().some(c => /DELETE FROM roles/.test(c.text))).toBe(false);
   });
 
   test('assign() refuses to grant a user a role from another company', async () => {

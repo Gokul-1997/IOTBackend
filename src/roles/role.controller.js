@@ -8,10 +8,21 @@ exports.seedPages = async (req, res) => {
   }
 };
 
+/* Only the named fields are passed on. The whole body used to be spread
+   into the service, which let a caller set is_system and company_id. */
 exports.create = async (req, res) => {
   try {
-    const company_id = req.user.is_snt_super ? (req.body.company_id || null) : req.user.company_id;
-    res.status(201).json(await svc.create({ ...req.body, company_id }));
+    const { role_name, description, permission_ids } = req.body || {};
+    res.status(201).json(await svc.create({ role_name, description, permission_ids }, req.user));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message });
+  }
+};
+
+exports.copy = async (req, res) => {
+  try {
+    const { role_name, description } = req.body || {};
+    res.status(201).json(await svc.copy(Number(req.params.id), { role_name, description }, req.user));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
   }
@@ -38,7 +49,8 @@ exports.getById = async (req, res) => {
 
 exports.update = async (req, res) => {
   try {
-    res.json(await svc.update(req.params.id, req.body, req.user));
+    const { role_name, description } = req.body || {};
+    res.json(await svc.update(req.params.id, { role_name, description }, req.user));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
   }

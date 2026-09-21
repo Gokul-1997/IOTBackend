@@ -67,7 +67,7 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
     const adminUser = userRes.rows[0];
 
     // Assign COMPANY_ADMIN role
-    const roleRes = await client.query(`SELECT id FROM roles WHERE role_name = 'COMPANY_ADMIN'`);
+    const roleRes = await client.query(`SELECT id FROM roles WHERE role_name = 'COMPANY_ADMIN' AND company_id IS NULL`);
     if (roleRes.rowCount > 0) {
       await client.query(
         `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`,

@@ -193,6 +193,15 @@ describe('legacy API keys — the half of access that is not page keys', () => {
     }
   });
 
+  /* The Quality page loads its line filter from /api/lines, which checks
+     line.view. QUALITY shipped without it, so its one screen opened with an
+     empty filter and a 403 behind it. */
+  test('every role with the Quality page can load its line filter', () => {
+    for (const name of ['SUPERVISOR', 'QUALITY']) {
+      expect(byName[name].legacy).toContain('line.view');
+    }
+  });
+
   test('SETTER is not given operator data it has no reason to see', () => {
     expect(byName.SETTER.legacy).not.toContain('operator.view');
   });

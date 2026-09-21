@@ -6,6 +6,12 @@ exports.create = async (data, reqUser) => {
   if (!data.username || !data.email || !data.password) {
     throw { status: 400, message: 'Username, email, and password are required' };
   }
+  /* A role is required. With none, this used to hand out OPERATOR — one of
+     the retired system roles — so a user created without a choice got a role
+     nobody manages. Checked before anything is written. */
+  if (!(Array.isArray(data.role_ids) && data.role_ids.some(n => Number.isInteger(Number(n)) && Number(n) > 0))) {
+    throw { status: 400, message: 'Choose a role for this user' };
+  }
 
   // SNT_SUPER must specify company_id; company admin uses own company
   let company_id = null;
@@ -63,29 +69,20 @@ exports.create = async (data, reqUser) => {
     const roleIds = (Array.isArray(data.role_ids) ? data.role_ids : [])
       .map(Number).filter(n => Number.isInteger(n) && n > 0);
 
-    if (roleIds.length > 0) {
-      /* These used to go straight into user_roles. Nothing checked that the
-         role belonged to this company, or that the caller was allowed to
-         grant it — so a company admin could create a user holding SNT_SUPER
-         and hand themselves the whole platform. */
-      await require('../roles/role.service')
-        .assertAssignable(client, roleIds, { actor: reqUser, targetCompanyId: company_id });
+    /* These used to go straight into user_roles. Nothing checked that the
+       role belonged to this company, or that the caller was allowed to
+       grant it — so a company admin could create a user holding SNT_SUPER
+       and hand themselves the whole platform. assertAssignable also limits
+       S&T to creating a company's admin: the company admin creates everyone
+       else. */
+    await require('../roles/role.service')
+      .assertAssignable(client, roleIds, { actor: reqUser, targetCompanyId: company_id });
 
-      for (const roleId of roleIds) {
-        await client.query(
-          `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`,
-          [user.id, roleId]
-        );
-      }
-    } else {
-      // Assign default OPERATOR role
-      const defaultRole = await client.query(`SELECT id FROM roles WHERE role_name = 'OPERATOR'`);
-      if (defaultRole.rowCount > 0) {
-        await client.query(
-          `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`,
-          [user.id, defaultRole.rows[0].id]
-        );
-      }
+    for (const roleId of roleIds) {
+      await client.query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`,
+        [user.id, roleId]
+      );
     }
 
     // Fetch assigned roles

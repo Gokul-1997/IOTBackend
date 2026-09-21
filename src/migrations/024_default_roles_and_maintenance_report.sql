@@ -69,7 +69,7 @@ ON CONFLICT DO NOTHING;
 
 -- SUPERVISOR
 INSERT INTO roles (role_name, description, is_system, company_id) VALUES ('SUPERVISOR', 'Runs the shift: the live floor, downtime, OEE and energy, plus the OEE, chart and quality reports (read only).', true, NULL)
-  ON CONFLICT (role_name) DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
+  ON CONFLICT (role_name) WHERE company_id IS NULL DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
   WHERE roles.company_id IS NULL;
 
 DELETE FROM role_permissions rp USING permissions p, roles ro
@@ -85,7 +85,7 @@ ON CONFLICT DO NOTHING;
 
 -- MAINTENANCE
 INSERT INTO roles (role_name, description, is_system, company_id) VALUES ('MAINTENANCE', 'Keeps the machines running: the maintenance, alarm, preventive, periodic and energy dashboards, and the maintenance report.', true, NULL)
-  ON CONFLICT (role_name) DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
+  ON CONFLICT (role_name) WHERE company_id IS NULL DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
   WHERE roles.company_id IS NULL;
 
 DELETE FROM role_permissions rp USING permissions p, roles ro
@@ -101,7 +101,7 @@ ON CONFLICT DO NOTHING;
 
 -- QUALITY
 INSERT INTO roles (role_name, description, is_system, company_id) VALUES ('QUALITY', 'Owns quality: the OEE dashboard, and the quality screen including entry.', true, NULL)
-  ON CONFLICT (role_name) DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
+  ON CONFLICT (role_name) WHERE company_id IS NULL DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
   WHERE roles.company_id IS NULL;
 
 DELETE FROM role_permissions rp USING permissions p, roles ro
@@ -117,7 +117,7 @@ ON CONFLICT DO NOTHING;
 
 -- SETTER
 INSERT INTO roles (role_name, description, is_system, company_id) VALUES ('SETTER', 'Sends programs to the machines.', true, NULL)
-  ON CONFLICT (role_name) DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
+  ON CONFLICT (role_name) WHERE company_id IS NULL DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
   WHERE roles.company_id IS NULL;
 
 DELETE FROM role_permissions rp USING permissions p, roles ro
@@ -133,7 +133,7 @@ ON CONFLICT DO NOTHING;
 
 -- HR
 INSERT INTO roles (role_name, description, is_system, company_id) VALUES ('HR', 'Looks after the people: operator performance, and the operator records.', true, NULL)
-  ON CONFLICT (role_name) DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
+  ON CONFLICT (role_name) WHERE company_id IS NULL DO UPDATE SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
   WHERE roles.company_id IS NULL;
 
 DELETE FROM role_permissions rp USING permissions p, roles ro

@@ -122,12 +122,49 @@ const DEFAULT_ROLES = [
   }
 ];
 
+/* ── Older API keys a page depends on ─────────────────────────
+   Part of the API still checks `machine.view`-style keys rather than page
+   keys (machines, lines, shifts and operators routes). A role holding only
+   page keys therefore opens a page and then gets 403 from the calls behind
+   it — the Program Transfer page, for one, lists its machines through
+   /api/machines. Every role, default or a company's own, gets these derived
+   from its pages so the two halves of access can never disagree. */
+const LEGACY_FOR_PAGE = {
+  // the machine form loads its line dropdown from /api/lines
+  machines:  { view: ['machine.view', 'line.view'], create: ['machine.create'], edit: ['machine.update'], delete: ['machine.delete'] },
+  lines:     { view: ['line.view'],     create: ['line.create'],     edit: ['line.update'],     delete: ['line.delete'] },
+  // the shift DELETE route checks shift.update, not shift.delete
+  shifts:    { view: ['shift.view'],    create: ['shift.create'],    edit: ['shift.update'],    delete: ['shift.update'] },
+  // the operator form loads the shift list from /api/shifts
+  operators: { view: ['operator.view', 'shift.view'], create: ['operator.create'], edit: ['operator.update'], delete: ['operator.delete'] },
+  component: { view: ['component.view'], create: ['component.create'], edit: ['component.update'], delete: ['component.delete'] },
+  // pages that read those lists for their own dropdowns and filters
+  programs:         { view: ['machine.view'] },
+  assignments:      { view: ['operator.view', 'shift.view'] },
+  'machine-shifts': { view: ['shift.view'] },
+  job:              { view: ['machine.view', 'operator.view'] },
+  quality:          { view: ['line.view'] },
+  reports:          { view: ['machine.view', 'operator.view', 'shift.view'] }
+};
+
+/** The legacy keys a set of page keys needs, e.g. page:machines:edit → machine.update. */
+function legacyKeysFor(pageKeys = []) {
+  const out = new Set();
+  for (const key of pageKeys) {
+    const m = /^page:(.+):([^:]+)$/.exec(key);
+    if (!m) continue;
+    for (const k of (LEGACY_FOR_PAGE[m[1]]?.[m[2]] || [])) out.add(k);
+  }
+  return [...out];
+}
+
 /** Resolves every role's key list, throwing if any module or action is gone. */
 function resolveDefaultRoles() {
   return DEFAULT_ROLES.map(r => {
     const permissions = [...new Set(r.permissions())];
-    return { name: r.name, description: r.description, permissions, legacy: [...new Set(r.legacy || [])] };
+    const legacy = [...new Set([...(r.legacy || []), ...legacyKeysFor(permissions)])];
+    return { name: r.name, description: r.description, permissions, legacy };
   });
 }
 
-module.exports = { DEFAULT_ROLES, resolveDefaultRoles, all, some };
+module.exports = { DEFAULT_ROLES, resolveDefaultRoles, legacyKeysFor, LEGACY_FOR_PAGE, all, some };
