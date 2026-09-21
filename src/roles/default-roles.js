@@ -1,22 +1,23 @@
 /**
- * The default roles every company gets, and exactly what each one can open.
+ * The default roles every company starts with.
  *
- * These are system roles: one row with company_id NULL, shared by every
- * company, so "Supervisor" means the same thing in every tenant. A company
- * that wants something different creates its own role — that is what the
- * Roles screen is for — and a company's own roles are still capped by what
- * Manage Access grants the company, so a default role can never reach a
- * page the company has not been sold.
+ * These are templates, not shared roles. When S&T creates a company, each
+ * template becomes a role OWNED by that company (company_id set), holding
+ * only the pages the company has been given in Manage Access. From then on
+ * the company admin manages them completely — adds or removes pages,
+ * renames, copies, deletes — and S&T takes no action on them.
+ * (role.service.createDefaultRolesForCompany; migration 027 did the same
+ * for the companies that existed before this.)
  *
- * Read this together with APP_MODULES in plans/plan.service.js: every key
- * below is built from a module there, and `resolveDefaultRoles` throws if a
- * module is renamed or an action removed out from under it, rather than
- * leaving a role silently holding a key that no longer opens anything.
+ * Changing a template here changes what NEW companies start with. It does
+ * not reach into an existing company's roles: those are that company's now.
+ *
+ * Every page key below is built from a module in APP_MODULES, and
+ * `resolveDefaultRoles` throws if a module is renamed or an action removed,
+ * rather than leaving a template holding a key that opens nothing.
  *
  * Admin is deliberately absent. COMPANY_ADMIN gets everything its company
- * was granted, decided by Manage Access rather than by a permission list
- * (see middleware/access.middleware.js), so listing pages for it here
- * would be a second source of truth that could disagree with the first.
+ * was granted, decided by Manage Access rather than by a page list.
  */
 
 const { APP_MODULES } = require('../plans/plan.service');
@@ -46,15 +47,6 @@ function some(moduleKey, actions) {
    produces cards that lead to a permission error. */
 const LIVE_FLOOR = [...all('dashboard'), ...all('dashboard:live')];
 
-/* Read access to the master data every screen's filters are built from.
-   These are the legacy `machine.view`-style keys, not page keys: a good
-   part of the API still enforces those (machines, operators, shifts, lines,
-   components), so a role without them opens a page whose every dropdown
-   comes back empty or 403. They are listed per role rather than granted
-   wholesale — HR has no business writing machines, and SETTER none reading
-   operators. */
-const FLOOR_LOOKUPS = ['machine.view', 'line.view', 'shift.view', 'component.view'];
-
 const DEFAULT_ROLES = [
   {
     name: 'SUPERVISOR',
@@ -69,8 +61,7 @@ const DEFAULT_ROLES = [
       /* "Quality View Only" — the widgets, but not `edit`, which is what
          puts the quality-entry form on the page. */
       ...some('quality', ['view', 'oee-metrics', 'production-cards', 'hourly-chart'])
-    ],
-    legacy: [...FLOOR_LOOKUPS, 'operator.view']
+    ]
   },
   {
     name: 'MAINTENANCE',
@@ -88,8 +79,7 @@ const DEFAULT_ROLES = [
          gated on page:maintenance (dashboard.routes.js). Without it the
          dashboards open and every button on them returns 403. */
       ...all('maintenance')
-    ],
-    legacy: [...FLOOR_LOOKUPS, 'operator.view']
+    ]
   },
   {
     name: 'QUALITY',
@@ -97,8 +87,7 @@ const DEFAULT_ROLES = [
     permissions: () => [
       ...some('analytics-oee', ['view', 'export']),
       ...all('quality')   // including `edit` — this role enters the readings
-    ],
-    legacy: ['machine.view', 'shift.view', 'component.view', 'operator.view']
+    ]
   },
   {
     name: 'SETTER',
@@ -108,8 +97,7 @@ const DEFAULT_ROLES = [
          risk from sending one to a controller, and this role is defined by
          the sending. */
       ...some('programs', ['view', 'upload', 'transfer', 'fetch'])
-    ],
-    legacy: ['machine.view', 'component.view']
+    ]
   },
   {
     name: 'HR',
@@ -117,8 +105,7 @@ const DEFAULT_ROLES = [
     permissions: () => [
       ...some('analytics-operators', ['view', 'export']),
       ...all('operators')
-    ],
-    legacy: ['machine.view', 'shift.view', 'operator.view', 'operator.create', 'operator.update', 'operator.delete']
+    ]
   }
 ];
 
@@ -158,13 +145,18 @@ function legacyKeysFor(pageKeys = []) {
   return [...out];
 }
 
-/** Resolves every role's key list, throwing if any module or action is gone. */
+/**
+ * Resolves every template's pages, and the older API keys those pages need,
+ * throwing if any module or action is gone.
+ */
 function resolveDefaultRoles() {
   return DEFAULT_ROLES.map(r => {
     const permissions = [...new Set(r.permissions())];
-    const legacy = [...new Set([...(r.legacy || []), ...legacyKeysFor(permissions)])];
-    return { name: r.name, description: r.description, permissions, legacy };
+    return { name: r.name, description: r.description, permissions, legacy: legacyKeysFor(permissions) };
   });
 }
 
-module.exports = { DEFAULT_ROLES, resolveDefaultRoles, legacyKeysFor, LEGACY_FOR_PAGE, all, some };
+/** Names of the default roles, e.g. to retire the old shared rows by name. */
+const DEFAULT_ROLE_NAMES = DEFAULT_ROLES.map(r => r.name);
+
+module.exports = { DEFAULT_ROLES, DEFAULT_ROLE_NAMES, resolveDefaultRoles, legacyKeysFor, LEGACY_FOR_PAGE, all, some };

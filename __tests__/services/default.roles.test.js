@@ -1,12 +1,10 @@
 /*
- * The default roles every company gets.
+ * The default role templates every new company starts from.
  *
- * "All companies the same" is only true if these stay system roles with
- * company_id NULL and the seeder is authoritative about what they hold —
- * so most of what is pinned here is the shape of that guarantee, not the
- * individual lists. The lists themselves are pinned because they were
- * agreed with the customer, and a silent change to one is a change to what
- * a shift supervisor can see on the floor.
+ * Each company gets its own copy when S&T creates it, and its admin changes
+ * them from there. The lists are pinned because they were agreed with the
+ * customer: a silent change to one is a change to what every new company's
+ * shift supervisor can see on the floor.
  */
 
 const { resolveDefaultRoles, DEFAULT_ROLES } = require('../../src/roles/default-roles');
@@ -168,13 +166,15 @@ describe('HR — the people', () => {
 });
 
 describe('legacy API keys — the half of access that is not page keys', () => {
-  /* A good part of the API still enforces machine.view-style keys. A role
-     without them opens a page whose every dropdown is empty or 403s, which
-     is exactly the bug this list exists to prevent. */
-  test('every role that opens a screen can read the master data behind it', () => {
-    for (const name of ['SUPERVISOR', 'MAINTENANCE', 'QUALITY', 'SETTER', 'HR']) {
-      expect(byName[name].legacy).toContain('machine.view');
-    }
+  /* A good part of the API still enforces machine.view-style keys. They are
+     derived from each template's pages, from what those pages actually call
+     (default-roles.LEGACY_FOR_PAGE) — no more, no less. */
+  test('each role gets exactly the keys its pages need', () => {
+    expect(byName.SUPERVISOR.legacy).toEqual(['line.view']);       // Quality page's line filter
+    expect(byName.MAINTENANCE.legacy).toEqual([]);                 // its pages call none of those routes
+    expect(byName.QUALITY.legacy).toEqual(['line.view']);
+    expect(byName.SETTER.legacy).toEqual(['machine.view']);        // Program Transfer lists machines
+    expect(byName.HR.legacy).toEqual(expect.arrayContaining(['operator.view', 'shift.view']));
   });
 
   test('HR can write operators, because that is the screen it was given', () => {

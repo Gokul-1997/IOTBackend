@@ -33,10 +33,24 @@ beforeEach(() => resetDb());
 describe('assertAssignable — the shared rule', () => {
   const client = () => mockDb;
 
-  test('a shared system role is assignable to a company user', async () => {
-    mockDb.queueResponse({ rows: [role({ id: 50, role_name: 'MAINTENANCE' })] });
+  test('the company\'s own role is assignable to its users', async () => {
+    mockDb.queueResponse({ rows: [role({ id: 50, role_name: 'MAINTENANCE', company_id: 4, is_system: false })] });
     await expect(roleSvc.assertAssignable(client(), [50], { actor: companyA, targetCompanyId: 4 }))
       .resolves.toBeUndefined();
+  });
+
+  test('so is Company Admin, the one shared role a company admin can give', async () => {
+    mockDb.queueResponse({ rows: [role({ id: 7, role_name: 'COMPANY_ADMIN' })] });
+    await expect(roleSvc.assertAssignable(client(), [7], { actor: companyA, targetCompanyId: 4 }))
+      .resolves.toBeUndefined();
+  });
+
+  /* Each company now owns its default roles; the old shared rows were
+     retired by migration 027. If one ever reappeared it must not be usable. */
+  test('a leftover shared default row is refused', async () => {
+    mockDb.queueResponse({ rows: [role({ id: 19, role_name: 'SUPERVISOR' })] });
+    await expect(roleSvc.assertAssignable(client(), [19], { actor: companyA, targetCompanyId: 4 }))
+      .rejects.toMatchObject({ status: 403, message: /no longer in use/ });
   });
 
   test('a company admin CANNOT assign SNT_SUPER — the escalation', async () => {
@@ -72,14 +86,14 @@ describe('assertAssignable — the shared rule', () => {
   });
 
   test('one bad id in a list of good ones refuses the whole list', async () => {
-    mockDb.queueResponse({ rows: [role({ id: 50, role_name: 'MAINTENANCE' })] });
+    mockDb.queueResponse({ rows: [role({ id: 50, role_name: 'MAINTENANCE', company_id: 4, is_system: false })] });
     mockDb.queueResponse({ rows: [role({ id: 6, role_name: 'SNT_SUPER' })] });
     await expect(roleSvc.assertAssignable(client(), [50, 6], { actor: companyA, targetCompanyId: 4 }))
       .rejects.toMatchObject({ status: 403 });
   });
 
   test('the row is locked, so a role cannot be deleted between check and insert', async () => {
-    mockDb.queueResponse({ rows: [role()] });
+    mockDb.queueResponse({ rows: [role({ company_id: 4, is_system: false })] });
     await roleSvc.assertAssignable(client(), [50], { actor: companyA, targetCompanyId: 4 });
     expect(mockDb.calls()[0].text).toMatch(/FOR UPDATE/);
   });
@@ -119,9 +133,9 @@ describe('POST /api/users — role_ids used to go straight into user_roles', () 
     expect(mockDb.calls().some(c => /INSERT INTO user_roles/.test(c.text))).toBe(false);
   });
 
-  test('a legitimate default role still works', async () => {
+  test('the company\'s own default role works', async () => {
     queueCreate();
-    mockDb.queueResponse({ rows: [role({ id: 50, role_name: 'MAINTENANCE' })] });
+    mockDb.queueResponse({ rows: [role({ id: 50, role_name: 'MAINTENANCE', company_id: 4, is_system: false })] });
     mockDb.queueResponse({});                                            // INSERT user_roles
     mockDb.queueResponse({ rows: [{ id: 50, role_name: 'MAINTENANCE' }] }); // read back
     mockDb.queueResponse({});                                            // COMMIT

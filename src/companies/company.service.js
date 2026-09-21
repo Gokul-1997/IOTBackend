@@ -86,6 +86,13 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
       );
     }
 
+    /* The company starts with its own copy of each default role (Supervisor,
+       Maintenance, Quality, Setter, HR), limited to what it was just granted.
+       Its admin adjusts them from here; S&T takes no action on roles. In the
+       same transaction, so a company never exists without them. */
+    const defaultRoles = await require('../roles/role.service')
+      .createDefaultRolesForCompany(client, company.id);
+
     await client.query('COMMIT');
 
     // Send login credentials email (fire and forget)
@@ -110,6 +117,7 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
     }).catch(err => console.error('Failed to send admin welcome email:', err.message));
 
     company.admin_user = adminUser;
+    company.default_roles = defaultRoles.map(r => r.role);
     return company;
   } catch (e) {
     await client.query('ROLLBACK');
@@ -532,10 +540,19 @@ exports.assignCompanyPermissions = async (company_id, permission_ids, granted_by
           WHERE rp.role_id = ro.id
             AND ro.company_id = $1
             AND ro.is_system = false
-            AND rp.permission_id = ANY($2::int[])`,
+            AND rp.permission_id = ANY($2::int[])
+          RETURNING rp.role_id`,
         [company_id, removed]
       );
       revokedFromRoles = r.rowCount || 0;
+
+      /* A removed page also takes away the older API keys it needed
+         (machine.view and the like), or the role-only routes that check
+         those would keep answering for a page the company no longer has. */
+      if (r.rows.length) {
+        await require('../roles/role.service')
+          .rederiveLegacyKeys(client, r.rows.map(x => x.role_id));
+      }
     }
 
     await client.query('COMMIT');

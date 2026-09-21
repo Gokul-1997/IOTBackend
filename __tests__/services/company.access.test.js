@@ -103,7 +103,7 @@ describe('assignCompanyPermissions — a diff, scoped to page permissions', () =
       { rows: [{ permission_id: 1 }, { permission_id: 2 }] }, // currently granted: 1, 2
       {},                                                   // DELETE company_permissions (removes 1)
       {},                                                   // INSERT (adds 3)
-      { rowCount: 0 },                                      // cascade
+      { rowCount: 0, rows: [] },                            // cascade: no role held 1
       {}                                                    // COMMIT
     );
     const out = await svc.assignCompanyPermissions(4, [2, 3], 7);
@@ -146,7 +146,7 @@ describe('assignCompanyPermissions — a revoke has to bite at once', () => {
 
   test('the cached grants are cleared after a save, so the API stops honouring a revoked page immediately', async () => {
     mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] },
-      { rows: [{ permission_id: 1 }, { permission_id: 2 }] }, {}, { rowCount: 0 }, {});
+      { rows: [{ permission_id: 1 }, { permission_id: 2 }] }, {}, { rowCount: 0, rows: [] }, {});
     await svc.assignCompanyPermissions(4, [2], 1);
     expect(mockRedis.del).toHaveBeenCalledWith('company_grants:4');
   });
@@ -168,8 +168,13 @@ describe('assignCompanyPermissions — revoking cascades to the company\'s own r
     {}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] },
     { rows: [{ permission_id: 1 }, { permission_id: 2 }] },   // had 1 and 2, keeps 2
     {},                                                        // DELETE company_permissions
-    { rowCount: 3 },                                           // cascade removed 3 role grants
-    {}
+    { rowCount: 3, rows: [{ role_id: 10 }, { role_id: 10 }, { role_id: 11 }] }, // cascade
+    // role 10 keeps the Machines page: its API keys are re-derived from it
+    { rows: [{ id: 2 }] },
+    { rows: [{ id: 2, permission_key: 'page:machines:view' }] }, {}, {},
+    // role 11 has no pages left, so no API keys either
+    { rows: [] }, { rows: [] }, {}, {},
+    {}                                                         // COMMIT
   );
 
   test('removed pages are stripped from custom roles of THAT company only', async () => {
@@ -188,6 +193,19 @@ describe('assignCompanyPermissions — revoking cascades to the company\'s own r
     expect(await svc.assignCompanyPermissions(4, [2], 1)).toEqual({
       company_id: 4, permission_count: 1, granted: 0, revoked: 1, revoked_from_roles: 3
     });
+  });
+
+  /* A removed page also takes away the older machine.view-style keys it
+     needed; otherwise the role-only routes that check those keys would keep
+     answering for a page the company no longer has. Each touched role is
+     re-derived once, from the pages it still holds. */
+  test('a removed page takes its API keys with it — each touched role re-derived once', async () => {
+    revokeOne();
+    await svc.assignCompanyPermissions(4, [2], 1);
+    const inserts = mockDb.calls().filter(c => /INSERT INTO role_permissions/.test(c.text));
+    expect(inserts.map(c => c.params[0])).toEqual([10, 11]);   // not 10 twice
+    expect(inserts[0].params[2]).toEqual(['machine.view', 'line.view']);
+    expect(inserts[1].params[2]).toEqual([]);
   });
 
   test('granting alone never touches role_permissions', async () => {

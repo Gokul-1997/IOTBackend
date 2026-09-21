@@ -1,11 +1,12 @@
 /*
- * The AWS-style roles model, agreed with the customer on 2026-09-21.
+ * The roles model agreed with the customer on 2026-09-21.
  *
- *   S&T super admin  — sets what each company paid for; creates its admin.
- *                      Does not manage a company's roles.
- *   Default roles    — the same everywhere, locked.
- *   Company admin    — creates users, and its own roles: from scratch, or by
- *                      copying a default. Only from pages the company paid for.
+ *   S&T super admin  — creates the company and its admin, and sets what the
+ *                      company paid for. No action on roles.
+ *   Default roles    — each company gets its own copy when it is created.
+ *   Company admin    — creates users and manages every company role: changes
+ *                      the defaults, copies, creates, deletes. Only ever with
+ *                      pages the company paid for.
  *
  * Three gaps this closes on the way:
  *   - create() spread the request body in, so is_system and any permission
@@ -141,10 +142,20 @@ describe('role names', () => {
       expect(sql().some(t => /INSERT INTO roles/.test(t))).toBe(false);
     });
 
-  test('a default role\'s name cannot be reused — two SUPERVISORs in one list', async () => {
-    mockDb.queueResponse({}, { rows: [{ id: 19, company_id: null }] });
-    await expect(svc.create({ role_name: 'supervisor' }, companyA))
-      .rejects.toMatchObject({ status: 409, message: /default role/ });
+  test('an active system role\'s name is refused', async () => {
+    mockDb.queueResponse({}, { rows: [{ id: 3, company_id: null }] });
+    await expect(svc.create({ role_name: 'platform thing' }, companyA))
+      .rejects.toMatchObject({ status: 409, message: /system role name/ });
+  });
+
+  /* The old shared SUPERVISOR/…/HR rows are retired; each company owns its
+     own. A company that deleted its SUPERVISOR must be able to make one. */
+  test('a retired shared row does not block a company\'s own name', async () => {
+    mockDb.queueResponse({}, { rows: [] });
+    await svc.create({ role_name: 'supervisor' }, companyA).catch(() => {});
+    const check = mockDb.calls()[1];
+    expect(check.params[3]).toEqual(expect.arrayContaining(['SUPERVISOR', 'OPERATOR']));
+    expect(check.text).toMatch(/NOT \(role_name = ANY\(\$4::text\[\]\)\)/);
   });
 
   test('a company cannot have two roles of the same name, whatever the case', async () => {
@@ -153,11 +164,11 @@ describe('role names', () => {
       .rejects.toMatchObject({ status: 409, message: /already has a role/ });
   });
 
-  test('the clash check only looks at this company and the defaults', async () => {
+  test('the clash check only looks at this company and active system roles', async () => {
     mockDb.queueResponse({}, { rows: [{ id: 80, company_id: 4 }] });
     await svc.create({ role_name: 'line lead' }, companyA).catch(() => {});
     const check = mockDb.calls()[1];
-    expect(check.text).toMatch(/company_id IS NULL OR company_id = \$2/);
+    expect(check.text).toMatch(/OR company_id = \$2/);
     expect(check.params[1]).toBe(4);
   });
 
@@ -183,8 +194,9 @@ describe('role names', () => {
 
 /* ─────────────────────────── copy ─────────────────────────── */
 
-describe('copy — a default role, made the company\'s own', () => {
-  const MAINT = { id: 51, role_name: 'MAINTENANCE', description: 'd', company_id: null, is_system: true };
+describe('copy — one of the company\'s roles, into a new one', () => {
+  // the company's OWN Maintenance role, created for it with the company
+  const MAINT = { id: 51, role_name: 'MAINTENANCE', description: 'd', company_id: 4, is_system: false };
 
   const PAGES = [{ id: 1, permission_key: 'page:analytics-maintenance:view' },
                  { id: 2, permission_key: 'page:maintenance:view' },
@@ -203,7 +215,9 @@ describe('copy — a default role, made the company\'s own', () => {
     );
   };
 
-  test('keeps only pages the company paid for, and says how many it left out', async () => {
+  /* S&T may have narrowed the company's access since the source was made;
+     the copy follows the company's access today, and says what it dropped. */
+  test('keeps only pages the company still has, and says how many it left out', async () => {
     queueCopy();
     const out = await svc.copy(51, { role_name: 'NIGHT MAINT' }, companyA);
     expect(out).toMatchObject({ copied: 2, skipped: 1, from: 'MAINTENANCE' });
@@ -226,9 +240,9 @@ describe('copy — a default role, made the company\'s own', () => {
   });
 
   test.each([
-    ['SNT_SUPER',     { id: 6,  role_name: 'SNT_SUPER', company_id: null, is_system: true }],
-    ['a retired role', { id: 8, role_name: 'MANAGER',   company_id: null, is_system: true }],
-    ['another company\'s role', { id: 70, role_name: 'QC', company_id: 5, is_system: false }]
+    ['SNT_SUPER',                  { id: 6,  role_name: 'SNT_SUPER',  company_id: null, is_system: true }],
+    ['a retired shared row',       { id: 19, role_name: 'SUPERVISOR', company_id: null, is_system: true }],
+    ['another company\'s role',    { id: 70, role_name: 'QC',         company_id: 5,    is_system: false }]
   ])('%s cannot be copied — reads as not found', async (_n, source) => {
     mockDb.queueResponse({}, { rows: [source] });
     await expect(svc.copy(source.id, { role_name: 'MINE' }, companyA)).rejects.toMatchObject({ status: 404 });
@@ -240,37 +254,43 @@ describe('copy — a default role, made the company\'s own', () => {
     await expect(svc.copy(7, { role_name: 'MY ADMIN' }, companyA))
       .rejects.toMatchObject({ status: 400, message: /Manage Access/ });
   });
-
-  test('the company\'s own role can be copied too', async () => {
-    queueCopy({ source: { id: 80, role_name: 'LINE LEAD', description: null, company_id: 4, is_system: false } });
-    await expect(svc.copy(80, { role_name: 'NIGHT MAINT' }, companyA)).resolves.toMatchObject({ from: 'LINE LEAD' });
-  });
 });
 
-/* ─────────────────────────── default roles stay locked ─────────────────────────── */
+/* ─────────────────────────── the company's defaults are its own ─────────────────────────── */
 
-describe('defaults are locked for the company admin', () => {
-  test('rename is refused — even on the company admin\'s side of the check', async () => {
-    // loadRoleFor for a company admin already 404s a shared row; this pins it
-    mockDb.queueResponse({}, { rows: [{ id: 51, role_name: 'MAINTENANCE', is_system: true, company_id: null }] });
-    await expect(svc.update(51, { role_name: 'X' }, companyA)).rejects.toMatchObject({ status: 404 });
+describe('the company\'s default roles are its own to change', () => {
+  test('the company admin can rename its own SUPERVISOR', async () => {
+    mockDb.queueResponse(
+      {}, { rows: [{ id: 51, role_name: 'SUPERVISOR', is_system: false, company_id: 4 }] },
+      { rows: [] },                                           // name free
+      { rows: [{ id: 51, role_name: 'SHIFT LEAD' }] }, {}     // UPDATE, COMMIT
+    );
+    await expect(svc.update(51, { role_name: 'SHIFT LEAD' }, companyA))
+      .resolves.toMatchObject({ role_name: 'SHIFT LEAD' });
+  });
+
+  test('a leftover shared row cannot be touched — it reads as not found', async () => {
+    mockDb.queueResponse({}, { rows: [{ id: 19, role_name: 'SUPERVISOR', is_system: true, company_id: null }] });
+    await expect(svc.update(19, { role_name: 'X' }, companyA)).rejects.toMatchObject({ status: 404 });
     expect(sql().some(t => /UPDATE roles/.test(t))).toBe(false);
   });
 
-  test('retired roles are never listed', async () => {
+  test('retired rows are never listed — including the old shared defaults', async () => {
     mockDb.queueResponse({ rows: [] });
     await svc.list(companyA);
-    expect(mockDb.calls()[0].params[1]).toEqual(expect.arrayContaining(['MANAGER', 'OPERATOR', 'VIEWER', 'SNT_SUPER']));
+    expect(mockDb.calls()[0].params[1]).toEqual(expect.arrayContaining(
+      ['MANAGER', 'OPERATOR', 'VIEWER', 'SUPERVISOR', 'MAINTENANCE', 'QUALITY', 'SETTER', 'HR', 'SNT_SUPER']));
+    expect(mockDb.calls()[0].params[1]).not.toContain('COMPANY_ADMIN');
   });
 
-  test('retired roles cannot be assigned', async () => {
+  test('retired rows cannot be assigned', async () => {
     mockDb.queueResponse({ rows: [{ id: 20, role_name: 'OPERATOR', company_id: null, is_system: true }] });
     await expect(svc.assertAssignable(mockDb, [20], { actor: companyA, targetCompanyId: 4 }))
       .rejects.toMatchObject({ status: 403, message: /no longer in use/ });
   });
 
-  test('S&T can only make someone a company admin — not give out the defaults', async () => {
-    mockDb.queueResponse({ rows: [{ id: 51, role_name: 'MAINTENANCE', company_id: null, is_system: true }] });
+  test('S&T can only make someone a company admin — not give out the company\'s roles', async () => {
+    mockDb.queueResponse({ rows: [{ id: 51, role_name: 'MAINTENANCE', company_id: 4, is_system: false }] });
     await expect(svc.assertAssignable(mockDb, [51], { actor: sntSuper, targetCompanyId: 4 }))
       .rejects.toMatchObject({ status: 403, message: /company's admin/ });
 

@@ -30,7 +30,6 @@ const LEGACY_API_PERMISSIONS = [
 ];
 
 exports.LEGACY_API_PERMISSIONS = LEGACY_API_PERMISSIONS;
-exports.syncDefaultRoles = syncDefaultRoles;
 
 /**
  * Seed all system roles + legacy API permissions.
@@ -85,10 +84,8 @@ exports.seedPagePermissions = async () => {
        ON CONFLICT DO NOTHING`
     );
 
-    const roles = await syncDefaultRoles(client);
-
     await client.query('COMMIT');
-    return { seeded: LEGACY_API_PERMISSIONS.length, pages: pageCount, roles };
+    return { seeded: LEGACY_API_PERMISSIONS.length, pages: pageCount };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -98,78 +95,67 @@ exports.seedPagePermissions = async () => {
 };
 
 /**
- * Bring the default system roles in line with default-roles.js.
+ * Give a company its own copy of each default role (default-roles.js),
+ * holding only the pages the company has been granted. Called when S&T
+ * creates a company; from then on the roles are the company admin's to
+ * change. A name the company already uses is left as it is — that role is
+ * theirs — and no template is forced onto it.
  *
- * Runs on every start, and is authoritative for every key a default role
- * holds — page keys and the older machine.view-style keys alike: anything the
- * definition does not list is removed, not left behind. That is what makes
- * "the same roles in every company" a fact rather than a hope — these roles
- * carry company_id NULL, so one row serves every tenant and no company can
- * end up with a Supervisor that means something different.
- *
- * LEGACY_API_PERMISSIONS no longer names any default role, so the two
- * seeders never grant and revoke the same key on one pass.
- *
- * Nothing here touches a company's own roles (company_id IS NOT NULL) or the
- * roles a company was given through Manage Access. role_name is UNIQUE across
- * every company, so a company may already hold one of these names: the upsert
- * is guarded on company_id IS NULL and the lookup below repeats the guard, so
- * that company keeps its own role rather than having it turned into a system
- * one underneath it.
+ * This used to keep ONE shared, locked set of default rows for every
+ * company. The customer asked instead for each company to start with the
+ * defaults and adjust them itself, with S&T taking no action on roles.
  */
-async function syncDefaultRoles(client) {
+async function createDefaultRolesForCompany(client, companyId) {
   const { resolveDefaultRoles } = require('./default-roles');
-  const summary = [];
+  const grants = await companyPageGrants(client, companyId);
+  const created = [];
 
-  for (const role of resolveDefaultRoles()) {
-    await client.query(
-      `INSERT INTO roles (role_name, description, is_system, company_id)
-       VALUES ($1, $2, true, NULL)
-       ON CONFLICT (role_name) WHERE company_id IS NULL DO UPDATE
-         SET description = EXCLUDED.description, is_system = true, updated_at = NOW()
-       WHERE roles.company_id IS NULL`,
-      [role.name, role.description]
-    );
-
+  for (const tpl of resolveDefaultRoles()) {
     const { rows } = await client.query(
-      `SELECT id FROM roles WHERE role_name = $1 AND company_id IS NULL`, [role.name]);
-    if (!rows.length) continue;            // a company owns this name; leave it alone
-    const roleId = rows[0].id;
-
-    const keep = [...role.permissions, ...role.legacy];
-    const removed = await client.query(
-      `DELETE FROM role_permissions rp
-        USING permissions p
-        WHERE rp.role_id = $1
-          AND p.id = rp.permission_id
-          AND NOT (p.permission_key = ANY($2::text[]))`,
-      [roleId, keep]
+      `INSERT INTO roles (role_name, description, company_id, is_system)
+       VALUES ($1, $2, $3, false)
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [tpl.name, tpl.description, companyId]
     );
+    if (!rows.length) continue;              // the company already has this name
 
-    const added = await client.query(
-      `INSERT INTO role_permissions (role_id, permission_id)
-       SELECT $1, p.id FROM permissions p
-        WHERE p.permission_key = ANY($2::text[])
-       ON CONFLICT DO NOTHING`,
-      [roleId, keep]
-    );
-
-    summary.push({ role: role.name, granted: added.rowCount, revoked: removed.rowCount });
+    const { rows: pages } = await client.query(
+      `SELECT id FROM permissions WHERE permission_key = ANY($1::text[])`, [tpl.permissions]);
+    const pageIds = pages.map(p => p.id).filter(id => !grants || grants.has(id));
+    await writeRolePermissions(client, rows[0].id, pageIds);
+    created.push({ role: tpl.name, id: rows[0].id, pages: pageIds.length });
   }
-
-  return summary;
+  return created;
 }
+exports.createDefaultRolesForCompany = createDefaultRolesForCompany;
+
+/**
+ * Re-derive the older API keys for these roles from the pages they still
+ * hold. Manage Access strips a revoked page from a company's roles; without
+ * this the machine.view-style keys that page needed would stay behind, and
+ * the role-only routes that check them would keep answering.
+ */
+async function rederiveLegacyKeys(client, roleIds) {
+  for (const roleId of [...new Set(roleIds)]) {
+    const { rows } = await client.query(
+      `SELECT p.id FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = $1 AND p.permission_key LIKE 'page:%'`, [roleId]);
+    await writeRolePermissions(client, roleId, rows.map(r => r.id));
+  }
+}
+exports.rederiveLegacyKeys = rederiveLegacyKeys;
 
 /* ── The roles model (AWS-style) ───────────────────────────────
  *
- *   S&T super admin   sets what each company paid for (Manage Access) and
- *                     creates each company's admin. It does not manage a
- *                     company's roles or its ordinary users.
- *   Default roles     SUPERVISOR, MAINTENANCE, QUALITY, SETTER, HR — the
- *                     same in every company and locked (default-roles.js).
- *   Company admin     creates users, and its company's own roles — from
- *                     scratch or by copying a default — but only from pages
- *                     the company paid for.
+ *   S&T super admin   creates the company and its admin, and sets what the
+ *                     company paid for (Manage Access). No action on roles.
+ *   Default roles     SUPERVISOR, MAINTENANCE, QUALITY, SETTER, HR — each
+ *                     company gets its OWN copy when it is created, holding
+ *                     only the pages it was given (default-roles.js).
+ *   Company admin     creates users, and manages all of the company's roles:
+ *                     changes the defaults, copies, creates, deletes — but
+ *                     only ever with pages the company paid for.
  *
  * A user can open a page only if their role has it AND their company paid
  * for it (access.middleware), so no role can reach past the plan.
@@ -181,9 +167,13 @@ async function syncDefaultRoles(client) {
    a full platform admin with sight of every tenant. */
 const PLATFORM_ONLY_ROLES = ['SNT_SUPER'];
 
-/* Older system roles, superseded by the default set. No user holds them;
-   they are kept as rows rather than deleted, but never listed or granted. */
-const RETIRED_SYSTEM_ROLES = ['MANAGER', 'OPERATOR', 'VIEWER'];
+/* Shared (company_id NULL) rows that are no longer used: the old MANAGER,
+   OPERATOR and VIEWER, and the shared copies of the default roles, which
+   every company now owns separately (migration 027 moved their users and
+   removed them). Matched as system rows only, so a company's own SUPERVISOR
+   is unaffected; never listed, never granted. */
+const RETIRED_SYSTEM_ROLES = ['MANAGER', 'OPERATOR', 'VIEWER',
+                              'SUPERVISOR', 'MAINTENANCE', 'QUALITY', 'SETTER', 'HR'];
 
 /* Names the code itself treats as privileged (auth.service, role.middleware,
    access.middleware, alarm routing). A company role called one of these
@@ -284,8 +274,8 @@ async function writeRolePermissions(client, roleId, pageIds) {
 
 /**
  * Tidy and check a name for a company's own role. Two companies may each
- * have a "Line Lead"; one company may not have two, nor reuse a default
- * role's name (two "SUPERVISOR"s in one dropdown), nor take a reserved one.
+ * have a "Line Lead"; one company may not have two, nor take a reserved or
+ * system role's name.
  */
 async function assertRoleNameUsable(client, rawName, companyId, exceptRoleId = null) {
   const name = String(rawName || '').trim().replace(/\s+/g, ' ');
@@ -298,12 +288,13 @@ async function assertRoleNameUsable(client, rawName, companyId, exceptRoleId = n
   const { rows } = await client.query(
     `SELECT id, company_id FROM roles
       WHERE lower(role_name) = lower($1)
-        AND (company_id IS NULL OR company_id = $2)
+        AND ((company_id IS NULL AND NOT (role_name = ANY($4::text[])))
+             OR company_id = $2)
         AND ($3::int IS NULL OR id <> $3)`,
-    [name, companyId, exceptRoleId]
+    [name, companyId, exceptRoleId, RETIRED_SYSTEM_ROLES]
   );
   if (rows.some(r => r.company_id === null)) {
-    throw { status: 409, message: `"${name}" is a default role. Copy it instead, or choose another name.` };
+    throw { status: 409, message: `"${name}" is a system role name. Choose another name.` };
   }
   if (rows.length) throw { status: 409, message: `Your company already has a role called "${name}"` };
   return name;
@@ -518,9 +509,9 @@ exports.create = async ({ role_name, description, permission_ids } = {}, actor =
 };
 
 /**
- * Copy a role into a new role of the caller's company: a default role, or
- * one of the company's own. The copy keeps only pages the company paid for,
- * and says how many it had to leave out.
+ * Copy one of the company's roles into a new one — e.g. SUPERVISOR into a
+ * NIGHT SUPERVISOR to adjust. The copy keeps only pages the company still
+ * has, and says how many it had to leave out.
  */
 exports.copy = async (sourceId, { role_name, description } = {}, actor = {}) => {
   requireCompanyAdmin(actor);
@@ -533,13 +524,12 @@ exports.copy = async (sourceId, { role_name, description } = {}, actor = {}) => 
     const { rows: src } = await client.query(
       `SELECT id, role_name, description, company_id, is_system FROM roles WHERE id = $1`, [sourceId]);
     const source = src[0];
-    const shared = source && source.is_system && source.company_id === null
-      && ![...PLATFORM_ONLY_ROLES, ...RETIRED_SYSTEM_ROLES].includes(source.role_name);
-    const own = source && !source.is_system && source.company_id === actor.company_id;
-    // someone else's role and a missing one read the same
-    if (!shared && !own) throw { status: 404, message: 'Role not found' };
-    if (source.role_name === 'COMPANY_ADMIN') {
+    if (source && source.is_system && source.role_name === 'COMPANY_ADMIN') {
       throw { status: 400, message: 'Company Admin cannot be copied: its access comes from Manage Access, not from a list of pages.' };
+    }
+    // the company's own roles only; someone else's and a missing one read the same
+    if (!source || source.is_system || source.company_id !== actor.company_id) {
+      throw { status: 404, message: 'Role not found' };
     }
 
     name = await assertRoleNameUsable(client, role_name, actor.company_id);
@@ -578,7 +568,7 @@ exports.update = async (roleId, { role_name, description } = {}, actor = {}) => 
     /* Scoped like every other mutation: without this a company admin could
        rename another tenant's role by guessing its id. */
     const role = await loadRoleFor(client, roleId, actor, true);
-    if (role.is_system) throw forbidden('Default roles cannot be changed. Copy it to make your own version.');
+    if (role.is_system) throw forbidden('System roles cannot be changed');
 
     name = role_name === undefined || role_name === null || role_name === ''
       ? null
@@ -614,11 +604,10 @@ exports.assignPermissions = async (roleId, permissionIds, actor = {}) => {
   try {
     await client.query('BEGIN');
 
-    /* Confirms the role is the caller's to touch, and refuses a default
-       role: those are the same in every company and are re-applied from
-       default-roles.js on every start, so an edit here would be undone. */
+    /* Confirms the role is the caller's to touch, and refuses a system role
+       (Company Admin), whose access comes from Manage Access instead. */
     const role = await loadRoleFor(client, roleId, actor, true);
-    if (role.is_system) throw forbidden('Default roles cannot be changed. Copy it to make your own version.');
+    if (role.is_system) throw forbidden('System roles cannot be changed');
 
     const pageIds = await pageIdsOnly(client, cleanIds(permissionIds));
     if (pageIds.length) await assertCompanyMayGrant(client, actor.company_id, pageIds);
@@ -661,7 +650,7 @@ exports.remove = async (roleId, actor = {}) => {
        place for it anyway, since it is the role's existence being
        decided. */
     const role = await loadRoleFor(client, roleId, actor, true);
-    if (role.is_system) throw forbidden('Default roles cannot be deleted');
+    if (role.is_system) throw forbidden('System roles cannot be deleted');
 
     const { rows: [{ count }] } = await client.query(
       `SELECT COUNT(*)::int AS count
