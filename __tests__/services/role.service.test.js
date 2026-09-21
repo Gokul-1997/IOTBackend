@@ -46,14 +46,34 @@ describe('list()', () => {
     expect(sql).toMatch(/LEFT JOIN companies/);
   });
 
-  test('a company admin sees only their own company\'s roles, no system roles', async () => {
+  /* This used to filter on company_id alone, which hid every system role —
+     and the whole default set (Supervisor, Maintenance, Quality, Setter, HR)
+     lives with company_id NULL, so a company admin could see none of them
+     and had nothing to assign a new user to. */
+  test('a company admin sees their own roles AND the shared system roles', async () => {
     mockDb.queueResponse({ rows: [{ id: 10, role_name: 'SETTER', company_id: 4 }] });
     mockDb.queueResponse({ rows: [] });
-    const rows = await svc.list({ is_snt_super: false, company_id: 4 });
-    expect(rows).toHaveLength(1);
+    await svc.list({ is_snt_super: false, company_id: 4 });
     const { text: sql, params } = mockDb.calls()[0];
-    expect(sql).toMatch(/WHERE r\.company_id = \$1/);
-    expect(params).toEqual([4]);
+    expect(sql).toMatch(/r\.company_id = \$1/);
+    expect(sql).toMatch(/r\.company_id IS NULL AND r\.is_system = true/);
+    expect(params[0]).toBe(4);
+  });
+
+  test('but never SNT_SUPER — that one is the platform\'s, not a company\'s', async () => {
+    mockDb.queueResponse({ rows: [] });
+    await svc.list({ is_snt_super: false, company_id: 4 });
+    const { text: sql, params } = mockDb.calls()[0];
+    expect(sql).toMatch(/role_name <> ALL \(\$2::text\[\]\)/);
+    expect(params[1]).toContain('SNT_SUPER');
+  });
+
+  /* company_id NULL and is_system false belongs to nobody — it cannot be
+     reached through any company's list, and must not leak into one. */
+  test('an orphaned role stays hidden', async () => {
+    mockDb.queueResponse({ rows: [] });
+    await svc.list({ is_snt_super: false, company_id: 4 });
+    expect(mockDb.calls()[0].text).toMatch(/r\.company_id IS NULL AND r\.is_system = true/);
   });
 
   test('neither SNT_SUPER nor a known company: empty, not every company\'s roles', async () => {

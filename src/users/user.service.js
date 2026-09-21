@@ -60,9 +60,17 @@ exports.create = async (data, reqUser) => {
     );
 
     user = rows[0];
-    const roleIds = data.role_ids || [];
+    const roleIds = (Array.isArray(data.role_ids) ? data.role_ids : [])
+      .map(Number).filter(n => Number.isInteger(n) && n > 0);
 
     if (roleIds.length > 0) {
+      /* These used to go straight into user_roles. Nothing checked that the
+         role belonged to this company, or that the caller was allowed to
+         grant it — so a company admin could create a user holding SNT_SUPER
+         and hand themselves the whole platform. */
+      await require('../roles/role.service')
+        .assertAssignable(client, roleIds, { actor: reqUser, targetCompanyId: company_id });
+
       for (const roleId of roleIds) {
         await client.query(
           `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`,

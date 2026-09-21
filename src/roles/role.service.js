@@ -155,6 +155,48 @@ async function syncDefaultRoles(client) {
   return summary;
 }
 
+/* ── Who may be given which role ───────────────────────────────
+ *
+ * SNT_SUPER is not an ordinary role. auth.service derives the platform
+ * super-admin flag straight from holding it (`roles.includes('SNT_SUPER')`),
+ * and access.middleware lets that flag past every page and company check —
+ * so granting this one role to a user makes them a full platform admin with
+ * sight of every tenant.
+ *
+ * Both ways a role reaches a user — POST /api/roles/assign/:id and the
+ * role_ids on POST /api/users — used to allow it. The first accepted any
+ * system role, the second validated nothing at all, so any company admin
+ * could mint themselves an S&T super user. Both now come through here.
+ */
+const PLATFORM_ONLY_ROLES = ['SNT_SUPER'];
+exports.PLATFORM_ONLY_ROLES = PLATFORM_ONLY_ROLES;
+
+/**
+ * Refuse any role id the actor may not give to a user of targetCompanyId.
+ * Takes a client so callers can run it inside their own transaction.
+ */
+async function assertAssignable(client, roleIds, { actor = {}, targetCompanyId }) {
+  for (const roleId of roleIds) {
+    /* FOR UPDATE, matching the lock remove() takes: without it a role could
+       be deleted between this check and the insert, and the insert would
+       fail on the foreign key with an error nobody can act on. */
+    const { rows } = await client.query(
+      `SELECT id, role_name, company_id, is_system FROM roles WHERE id = $1 FOR UPDATE`,
+      [roleId]
+    );
+    const role = rows[0];
+    if (!role) throw { status: 404, message: `Role ${roleId} not found` };
+
+    if (PLATFORM_ONLY_ROLES.includes(role.role_name) && !actor.is_snt_super) {
+      throw { status: 403, message: `Role ${role.role_name} can only be granted by S&T` };
+    }
+    if (!role.is_system && role.company_id !== targetCompanyId) {
+      throw { status: 403, message: `Role ${roleId} belongs to another company` };
+    }
+  }
+}
+exports.assertAssignable = assertAssignable;
+
 // ── Role CRUD (company-scoped) ─────────────────────────────────
 
 /**
@@ -172,12 +214,22 @@ exports.list = async ({ company_id, is_snt_super = false } = {}) => {
               ORDER BY r.is_system DESC, r.role_name`;
     params = [];
   } else if (company_id) {
-    // Company admin only sees roles created for their company — no system roles
+    /* Their own roles, plus the system roles every company shares — the
+       default set (Supervisor, Maintenance, Quality, Setter, HR) lives with
+       company_id NULL, so filtering on company_id alone hid all of them and
+       left a company admin unable to see or assign any default role.
+
+       SNT_SUPER is excluded: it is the platform's own role, and listing it
+       here would offer a company admin a role they cannot be given anyway
+       (see assertAssignable). An orphaned role — no company and not a system
+       role — belongs to no one and stays hidden. */
     query  = `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id
               FROM roles r
-              WHERE r.company_id = $1
-              ORDER BY r.role_name`;
-    params = [company_id];
+              WHERE (r.company_id = $1
+                     OR (r.company_id IS NULL AND r.is_system = true
+                         AND r.role_name <> ALL ($2::text[])))
+              ORDER BY r.is_system DESC, r.role_name`;
+    params = [company_id, PLATFORM_ONLY_ROLES];
   } else {
     /* Neither a confirmed super admin nor a known company: this used to run
        an unfiltered query and return every role from every company. Nothing
@@ -458,21 +510,7 @@ exports.assign = async (user_id, role_ids, actor = {}) => {
       throw { status: 404, message: 'User not found' };
     }
 
-    /* A role is assignable if it belongs to the user's company or is a
-       system role shared by all. Anything else is another tenant's. */
-    for (const roleId of ids) {
-      /* FOR UPDATE, matching the lock remove() takes: without it a role
-         could be deleted between this check and the insert below, and the
-         insert would fail on the foreign key with an error nobody can
-         act on. */
-      const { rows } = await client.query(
-        `SELECT id, company_id, is_system FROM roles WHERE id = $1 FOR UPDATE`, [roleId]);
-      const role = rows[0];
-      if (!role) throw { status: 404, message: `Role ${roleId} not found` };
-      if (!role.is_system && role.company_id !== target.company_id) {
-        throw { status: 403, message: `Role ${roleId} belongs to another company` };
-      }
-    }
+    await assertAssignable(client, ids, { actor, targetCompanyId: target.company_id });
 
     await client.query(`DELETE FROM user_roles WHERE user_id = $1`, [user_id]);
     for (const r of ids) {
