@@ -184,6 +184,18 @@ exports.updateTicketStatus = async (id, company_id, { status, note, changed_by }
   }
 };
 
+/** Who a ticket can be assigned to: the company's active users. The page
+ *  used the admin-only user list, which every other role was refused — so a
+ *  MAINTENANCE user could never pick an assignee. Names only. */
+exports.getAssignees = async (company_id) => {
+  if (!company_id) return [];
+  const { rows } = await db.query(
+    `SELECT id, username FROM users WHERE company_id = $1 AND is_active = true ORDER BY username`,
+    [company_id]
+  );
+  return rows;
+};
+
 exports.assignTicket = async (id, company_id, { assigned_to, changed_by }) => {
   if (!assigned_to) throw { status: 400, message: 'assigned_to is required' };
 

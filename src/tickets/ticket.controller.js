@@ -25,3 +25,6 @@ exports.assignTicket = wrap(async (req, res) =>
 
 exports.getSummary = wrap(async (req, res) =>
   res.json({ success: true, data: await service.getSummary(req.user.company_id) }));
+
+exports.getAssignees = wrap(async (req, res) =>
+  res.json({ success: true, data: await service.getAssignees(req.user.company_id) }));
