@@ -113,16 +113,24 @@ exports.create = async (data, reqUser) => {
   return user;
 };
 
+/* S&T's side of users is company admins only. Each company creates and
+   manages its own users; S&T creates the company's admin and nothing else,
+   so it has no reason to read — or change — anyone else in a company.
+   This is the one condition every S&T query below adds. */
+const isCompanyAdmin = alias => `EXISTS (
+  SELECT 1 FROM user_roles xa JOIN roles xr ON xr.id = xa.role_id
+   WHERE xa.user_id = ${alias}.id AND xr.role_name = 'COMPANY_ADMIN' AND xr.company_id IS NULL)`;
+
 exports.list = async (reqUser) => {
   let query, params;
 
   if (reqUser.is_snt_super) {
-    // SNT_SUPER sees all users (except self)
+    // S&T sees each company's admins — not the users a company creates
     query = `SELECT u.id, u.username, u.email, u.is_active, u.company_id, u.user_type,
                     c.company_name
              FROM users u
              LEFT JOIN companies c ON c.id = u.company_id
-             WHERE u.user_type != 'snt_super'
+             WHERE u.user_type != 'snt_super' AND ${isCompanyAdmin('u')}
              ORDER BY c.company_name NULLS LAST, u.username`;
     params = [];
   } else if (reqUser.company_id) {
@@ -158,7 +166,8 @@ exports.getById = async (userId, reqUser) => {
   let query, params;
 
   if (reqUser.is_snt_super) {
-    query = `SELECT id, username, email, is_active, plant_id, company_id, user_type FROM users WHERE id = $1`;
+    query = `SELECT u.id, u.username, u.email, u.is_active, u.plant_id, u.company_id, u.user_type
+               FROM users u WHERE u.id = $1 AND ${isCompanyAdmin('u')}`;
     params = [userId];
   } else {
     query = `SELECT id, username, email, is_active, plant_id, company_id, user_type FROM users WHERE id = $1 AND company_id = $2`;
@@ -236,7 +245,7 @@ exports.update = async (userId, reqUser, data) => {
     query += updates.join(', ');
 
     if (reqUser.is_snt_super) {
-      query += ` WHERE id = $${paramIndex++}`;
+      query += ` WHERE id = $${paramIndex++} AND ${isCompanyAdmin('users')}`;
       params.push(userId);
     } else {
       query += ` WHERE id = $${paramIndex++} AND company_id = $${paramIndex++}`;
@@ -280,19 +289,24 @@ exports.remove = async (userId, reqUser) => {
   try {
     await client.query('BEGIN');
 
-    await client.query(`DELETE FROM user_roles WHERE user_id = $1`, [userId]);
+    /* Decide first whether this caller may delete this user, and only then
+       touch user_roles — the S&T check reads the user's roles, so clearing
+       them first would make every company admin look like an ordinary user.
+       Locked so the answer holds until the delete. */
+    const target = reqUser.is_snt_super
+      ? await client.query(
+          `SELECT u.id FROM users u
+            WHERE u.id = $1 AND u.user_type != 'snt_super' AND ${isCompanyAdmin('u')} FOR UPDATE`, [userId])
+      : await client.query(
+          `SELECT id FROM users WHERE id = $1 AND company_id = $2 FOR UPDATE`, [userId, reqUser.company_id]);
 
-    let result;
-    if (reqUser.is_snt_super) {
-      result = await client.query(`DELETE FROM users WHERE id = $1 AND user_type != 'snt_super'`, [userId]);
-    } else {
-      result = await client.query(`DELETE FROM users WHERE id = $1 AND company_id = $2`, [userId, reqUser.company_id]);
-    }
-
-    if (!result.rowCount) {
+    if (!target.rowCount) {
       await client.query('ROLLBACK');
       throw { status: 404, message: 'User not found' };
     }
+
+    await client.query(`DELETE FROM user_roles WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM users WHERE id = $1`, [userId]);
 
     await client.query('COMMIT');
   } catch (e) {

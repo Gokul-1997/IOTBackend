@@ -365,13 +365,14 @@ exports.list = async ({ company_id, is_snt_super = false } = {}) => {
   let query, params;
 
   if (is_snt_super) {
-    // read-only for S&T: the defaults, and every company's own roles
-    query  = `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id,
-                     c.company_name
+    /* The shared roles only — Company Admin (and S&T's own). A company's
+       roles are that company's business; S&T neither manages nor needs to
+       read them, and the S&T Users page only looks up Company Admin here. */
+    query  = `SELECT r.id, r.role_name, r.description, r.is_system, r.company_id
               FROM roles r
-              LEFT JOIN companies c ON c.id = r.company_id
-              WHERE NOT (r.is_system AND r.role_name = ANY ($1::text[]))
-              ORDER BY r.is_system DESC, c.company_name NULLS FIRST, r.role_name`;
+              WHERE r.company_id IS NULL AND r.is_system = true
+                AND NOT (r.role_name = ANY ($1::text[]))
+              ORDER BY r.role_name`;
     params = [RETIRED_SYSTEM_ROLES];
   } else if (company_id) {
     /* Their own roles, plus the system roles every company shares — the

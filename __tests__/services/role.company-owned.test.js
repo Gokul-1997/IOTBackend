@@ -50,10 +50,10 @@ describe('S&T reads roles but does not manage them', () => {
     expect(mockDb.calls()).toHaveLength(0);
   });
 
-  test('S&T still sees every role — read-only, for support', async () => {
+  test('S&T reads only the shared roles, not any company\'s', async () => {
     mockDb.queueResponse({ rows: [] });
     await svc.list({ is_snt_super: true });
-    expect(sql()[0]).toMatch(/LEFT JOIN companies/);
+    expect(sql()[0]).toMatch(/r\.company_id IS NULL/);
   });
 });
 

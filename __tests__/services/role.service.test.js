@@ -37,13 +37,16 @@ const companyB = { is_snt_super: false, company_id: 5 };
 const noCompany = { is_snt_super: false, company_id: null };
 
 describe('list()', () => {
-  test('SNT_SUPER sees every company\'s roles, joined with company_name', async () => {
-    mockDb.queueResponse({ rows: [{ id: 1, role_name: 'SETTER', company_id: 4, company_name: 'S AND T' }] });
+  /* A company's roles are that company's business. S&T gets the shared
+     roles only — its Users page just needs Company Admin's id. */
+  test('SNT_SUPER gets the shared roles only — never a company\'s', async () => {
+    mockDb.queueResponse({ rows: [{ id: 7, role_name: 'COMPANY_ADMIN', company_id: null }] });
     mockDb.queueResponse({ rows: [] }); // per-role permissions fetch
-    const rows = await svc.list({ is_snt_super: true, company_id: null });
-    expect(rows).toHaveLength(1);
-    const { text: sql } = mockDb.calls()[0];
-    expect(sql).toMatch(/LEFT JOIN companies/);
+    await svc.list({ is_snt_super: true, company_id: null });
+    const { text: sql, params } = mockDb.calls()[0];
+    expect(sql).toMatch(/r\.company_id IS NULL AND r\.is_system = true/);
+    expect(sql).not.toMatch(/company_id = \$/);
+    expect(params[0]).toEqual(expect.arrayContaining(['SUPERVISOR', 'MANAGER']));   // retired rows out
   });
 
   /* This used to filter on company_id alone, which hid every system role —
