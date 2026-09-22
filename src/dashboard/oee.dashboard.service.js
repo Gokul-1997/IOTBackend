@@ -119,7 +119,8 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
        /* quality_entries carries no company_id, so scoping is through the
           machine — without it the table is global across tenants. */
        SELECT q.machine_id,
-              SUM(COALESCE(q.reject_qty,0) + COALESCE(q.rework_qty,0))::bigint AS rejected
+              SUM(COALESCE(q.reject_qty,0) + COALESCE(q.rework_qty,0))::bigint AS rejected,
+              SUM(COALESCE(q.rework_qty,0))::bigint AS rework
          FROM quality_entries q
          JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
         WHERE q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
@@ -163,6 +164,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
             COALESCE(p.hours, 0)::int           AS hours,
             cy.cycle_seconds, cy.mult,
             COALESCE(q.rejected, 0)::bigint     AS rejected,
+            COALESCE(q.rework, 0)::bigint       AS rework,
             COALESCE(al.alarm_count, 0)::int    AS alarm_count,
             COALESCE(dt.downtime_seconds, 0)::bigint AS downtime_seconds,
             lv.machine_status, lv.alarm
@@ -236,6 +238,7 @@ function deriveOee(row, thresholds) {
     downtime_seconds:  Number(row.downtime_seconds),
     planned_seconds:   planned,
     produced, good, rejected,
+    rework:            Number(row.rework || 0),
     alarm_count:       Number(row.alarm_count),
     has_cycle_time:    cycle != null && cycle > 0,
     availability_pct:  round(availability),
@@ -307,7 +310,13 @@ function fleetOee(machines, thresholds) {
   };
 }
 
-/** Daily OEE trend, each day recomputed from that day's totals. */
+/**
+ * Daily OEE trend, each day recomputed from that day's totals — per machine
+ * then summed exactly as the fleet figure is (deriveOee, fleetOee), so a
+ * day's OEE is the same arithmetic as the tiles, just narrower. It used to
+ * carry availability alone, so the screen drew an "Availability Trend"
+ * where the design has an OEE trend.
+ */
 async function trend({ companyId, machineId, shiftId, start, end }) {
   const params = [companyId, start, end];
   const mf = machineId ? (params.push(machineId), `$${params.length}`) : null;
@@ -318,8 +327,9 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
        SELECT generate_series($2::timestamptz::date, $3::timestamptz::date, INTERVAL '1 day')::date AS day
      ),
      per_day AS (
-       SELECT (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::date AS day,
+       SELECT (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::date AS day, ph.machine_id,
               SUM(ph.run_seconds)::bigint  AS run_seconds,
+              SUM(ph.idle_seconds)::bigint AS idle_seconds,
               SUM(ph.produced_qty)::bigint AS produced,
               COUNT(*)::int                AS hours
          FROM production_hourly ph
@@ -327,28 +337,67 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
         WHERE ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
           ${mf ? `AND ph.machine_id = ${mf}` : ''}
           ${sf ? `AND ph.shift_id = ${sf}` : ''}
-        GROUP BY 1
+        GROUP BY 1, 2
+     ),
+     cycle AS (
+       SELECT mcj.machine_id,
+              MAX(EXTRACT(EPOCH FROM c.cycle_time))::numeric AS cycle_seconds,
+              MAX(COALESCE(c.multiplication_factor, 1))::numeric AS mult
+         FROM machine_current_job mcj
+         JOIN components c ON c.id = mcj.component_id
+        WHERE mcj.is_active = TRUE
+        GROUP BY mcj.machine_id
+     ),
+     qual AS (
+       SELECT q.shift_date::date AS day, q.machine_id,
+              SUM(COALESCE(q.reject_qty,0) + COALESCE(q.rework_qty,0))::bigint AS rejected
+         FROM quality_entries q
+         JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
+        WHERE q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
+          ${sf ? `AND q.shift_id = ${sf}` : ''}
+        GROUP BY 1, 2
      )
-     SELECT d.day,
-            COALESCE(p.run_seconds, 0)::bigint AS run_seconds,
-            COALESCE(p.produced, 0)::bigint    AS produced,
-            COALESCE(p.hours, 0)::int          AS hours
-       FROM days d LEFT JOIN per_day p ON p.day = d.day
+     SELECT d.day, p.machine_id,
+            COALESCE(p.run_seconds, 0)::bigint  AS run_seconds,
+            COALESCE(p.idle_seconds, 0)::bigint AS idle_seconds,
+            COALESCE(p.produced, 0)::bigint     AS produced,
+            COALESCE(p.hours, 0)::int           AS hours,
+            cy.cycle_seconds, cy.mult,
+            COALESCE(qu.rejected, 0)::bigint    AS rejected
+       FROM days d
+       LEFT JOIN per_day p ON p.day = d.day
+       LEFT JOIN cycle cy  ON cy.machine_id = p.machine_id
+       LEFT JOIN qual qu   ON qu.machine_id = p.machine_id AND qu.day = d.day
       ORDER BY d.day`,
     params
   );
 
-  return rows.map(r => {
-    const planned = Number(r.hours) * 3600;
-    const run = Number(r.run_seconds);
+  const byDay = new Map();
+  for (const r of rows) {
+    const key = String(r.day instanceof Date ? r.day.toISOString().slice(0, 10) : r.day).slice(0, 10);
+    if (!byDay.has(key)) byDay.set(key, { day: r.day, machines: [] });
+    if (r.machine_id != null) byDay.get(key).machines.push(deriveOee(r, DEFAULT_THRESHOLDS));
+  }
+  return [...byDay.values()].map(({ day, machines }) => {
+    const f = fleetOee(machines, DEFAULT_THRESHOLDS);
     return {
-      day: r.day,
-      produced: Number(r.produced),
-      run_seconds: run,
-      // a day with no recorded hours has no availability, rather than 0%
-      availability_pct: planned > 0 ? Number(Math.min(100, (run / planned) * 100).toFixed(1)) : null
+      day,
+      produced: f.produced,
+      run_seconds: f.run_seconds,
+      // a day with nothing recorded has no figures at all, rather than 0%
+      availability_pct: f.availability_pct,
+      performance_pct:  f.performance_pct,
+      quality_pct:      f.quality_pct,
+      oee_pct:          f.oee_pct
     };
   });
+}
+
+/** Change of each factor from the day before the last to the last day of the range. */
+function vsYesterday(tr) {
+  const [a, b] = tr.slice(-2);
+  const d = k => (a && b && a[k] != null && b[k] != null) ? Number((b[k] - a[k]).toFixed(2)) : null;
+  return { availability: d('availability_pct'), performance: d('performance_pct'), quality: d('quality_pct'), oee: d('oee_pct') };
 }
 
 exports.getOee = async (q = {}) => {
@@ -398,7 +447,7 @@ exports.getOee = async (q = {}) => {
       search: (q.search || '').trim() || null
     },
     thresholds,
-    kpis: fleetOee(machines, thresholds),
+    kpis: { ...fleetOee(machines, thresholds), vs_yesterday: vsYesterday(tr) },
     /* Stated because it decides how much of this screen is meaningful:
        performance and OEE need a cycle time, and most machines here
        do not have one. */
