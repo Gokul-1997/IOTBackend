@@ -118,7 +118,8 @@ async function byMachine(filter) {
        ${filter.sql}
       GROUP BY m.machine_serial_no, a.machine_id
       ORDER BY total DESC, machine_serial_no
-      LIMIT 15`,
+      LIMIT 5  -- the chart is "Top 5 Alarms By Machine"
+    `,
     filter.params
   );
   return rows;
@@ -195,7 +196,52 @@ async function trend(filter, { start, end }) {
  * machine faults, and pagination without a total order repeats rows across
  * page boundaries.
  */
-async function list(filter, { page = 1, limit = 20 }) {
+/** The single longest alarm in the selection, named on the Max Duration tile. */
+async function longest(filter) {
+  const { rows } = await pool.query(
+    `SELECT a.message, a.alarm_code, COALESCE(m.machine_serial_no, 'Unknown') AS machine_serial_no
+       FROM machine_alarms a
+       LEFT JOIN machines m ON m.id = a.machine_id
+       ${filter.sql}
+      ORDER BY (COALESCE(a.ended_at, NOW()) - a.started_at) DESC, a.id DESC
+      LIMIT 1`,
+    filter.params
+  );
+  return rows[0] || null;
+}
+
+/** Alarms hour by hour over one IST day — the design's "Alarms Trend (By Hour)". */
+async function hourlyTrend(filter, day) {
+  const params = [...filter.params, day];
+  const d = `$${params.length}`;
+  const { rows } = await pool.query(
+    `WITH hours AS (SELECT generate_series(0, 23) AS h)
+     SELECT h.h AS hour,
+            COUNT(a.id)::int                                                 AS total,
+            COUNT(a.id) FILTER (WHERE UPPER(a.severity) = '${CRITICAL}')::int AS critical
+       FROM hours h
+       LEFT JOIN machine_alarms a
+              ON (a.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${d}::date
+             AND EXTRACT(HOUR FROM a.started_at AT TIME ZONE 'Asia/Kolkata')::int = h.h
+             AND a.id IN (SELECT a2.id FROM machine_alarms a2
+                          LEFT JOIN machines m ON m.id = a2.machine_id
+                          ${filter.sql.replace(/\ba\./g, 'a2.')})
+      GROUP BY h.h
+      ORDER BY h.h`,
+    params
+  );
+  return rows;
+}
+
+/* Columns the table can be sorted on. Anything else falls back to newest
+   first; the value never reaches the SQL, only its mapped column does. */
+const SORT_COLUMNS = {
+  machine_serial_no: 'machine_serial_no', shift_name: 'shift_name', alarm_code: 'a.alarm_code',
+  message: 'a.message', severity: 'a.severity', status: 'is_open', duration_seconds: 'duration_seconds',
+  started_at: 'a.started_at', ended_at: 'a.ended_at'
+};
+
+async function list(filter, { page = 1, limit = 20, sort, dir }) {
   const pageNum  = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(200, Math.max(1, Number(limit) || 20));
   const offset   = (pageNum - 1) * limitNum;
@@ -216,7 +262,7 @@ async function list(filter, { page = 1, limit = 20 }) {
          LEFT JOIN machines m ON m.id = a.machine_id
          LEFT JOIN shifts   s ON s.id = a.shift_id
          ${filter.sql}
-        ORDER BY a.started_at DESC, a.id DESC
+        ORDER BY ${SORT_COLUMNS[sort] ? `${SORT_COLUMNS[sort]} ${dir === 'asc' ? 'ASC' : 'DESC'} NULLS LAST, ` : ''}a.started_at DESC, a.id DESC
         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       [...filter.params, limitNum, offset]
     ),
@@ -270,9 +316,13 @@ exports.getAlarms = async (q = {}) => {
     search: (q.search || '').trim(), start, end
   });
 
-  const [k, machines, shifts, severity, tr, rows, f] = await Promise.all([
+  // one day selected: the trend goes hour by hour, as the design draws it
+  const oneDay = q.from && q.to && q.from === q.to;
+
+  const [k, machines, shifts, severity, tr, rows, f, top] = await Promise.all([
     kpis(filter), byMachine(filter), byShift(filter), bySeverity(filter),
-    trend(filter, { start, end }), list(filter, q), facets(companyId, { start, end })
+    oneDay ? hourlyTrend(filter, q.from) : trend(filter, { start, end }),
+    list(filter, q), facets(companyId, { start, end }), longest(filter)
   ]);
 
   return {
@@ -282,11 +332,12 @@ exports.getAlarms = async (q = {}) => {
       alarm_type: q.alarm_type || null, alarm_code: q.alarm_code || null,
       severity: q.severity || null, search: (q.search || '').trim() || null
     },
-    kpis: k,
+    kpis: { ...k, longest: top },
     by_machine: machines,
     by_shift: shifts,
     by_severity: severity,
     trend: tr,
+    trend_by: oneDay ? 'hour' : 'day',
     alarms: rows,
     facets: f,
     updated_at: new Date().toISOString()
