@@ -449,6 +449,7 @@ exports.getExportRows = async (q = {}) => {
 };
 
 exports.resolveRange = resolveRange;
+exports.machineTotals = machineTotals;   // shared with the Operator screen
 exports.resolveThresholds = resolveThresholds;
 exports.deriveOee = deriveOee;
 exports.classify = classify;

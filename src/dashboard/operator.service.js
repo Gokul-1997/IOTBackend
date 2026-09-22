@@ -3,30 +3,44 @@
  *
  * ── The attribution problem, stated plainly ────────────────────────────
  *
- * None of the production tables carry an operator. production_hourly,
- * oee_hourly and quality_entries are all keyed by machine and shift. The
- * only link to a person is operator_machine_assignments, and in this
- * database that link is not exclusive: 10 of 41 machines have two or three
- * operators assigned at once, and every assignment has assigned_to NULL,
- * so none of them has ever been closed.
+ * None of the production tables carry an operator. production_hourly and
+ * quality_entries are keyed by machine and shift; the only link to a person
+ * is operator_machine_assignments, and that link is not exclusive — several
+ * operators can hold one machine at once, and assignments are rarely
+ * closed. So "this operator produced N parts" is not a fact the data
+ * supports; "these are the figures for the machines this operator is
+ * responsible for" is. Each row carries its machines' full figures and says
+ * how many of them are shared. Fleet totals are measured per machine, never
+ * summed across operators, which would count shared output twice.
  *
- * That means "this operator produced N parts" is not a fact the data
- * supports. What it supports is "these are the figures for the machines
- * this operator is responsible for".
+ * ── Where every figure comes from ──────────────────────────────────────
  *
- * Two tempting shortcuts are both wrong:
- *   - dividing a machine's output between its operators invents numbers
- *     nobody measured;
- *   - attributing the full amount to each and then summing double-counts
- *     the shop's entire output.
+ * Per-machine totals and the OEE arithmetic are the OEE Dashboard's own
+ * (oee.dashboard.service): OEE recomputed from summed run time, planned
+ * time, output and rejects, with performance from the cycle time on the
+ * machine's current job. This screen used to average oee_hourly instead,
+ * which is 0 or empty for almost every hour — an hour with no parts has no
+ * performance — so every operator read 0% OEE while the OEE Dashboard
+ * showed real figures for the same machines.
  *
- * So: each operator's row carries the full figures for their machines, and
- * every row carries `shared_machines` — how many of those machines they
- * share with someone else. The screen shows that count, and the totals
- * across operators are deliberately not presented as a company total.
+ *   Down Time      idle time from telemetry: the machine on, not cutting.
+ *                  The same measured time the Downtime screen reports.
+ *                  (Reasons people enter are a separate, often empty, table.)
+ *   Utilisation    run / (run + idle)
+ *   Efficiency     OEE performance: output against the cycle-time ideal
+ *   Quality rate   good / produced
+ *   Operator Score the average of utilisation, efficiency and quality rate,
+ *                  over those that could be measured — how well the
+ *                  machines in this operator's care kept running, ran at
+ *                  speed and made good parts. It ranks operators and sets
+ *                  their band.
  */
 
 const pool = require('../db');
+const oeeSvc = require('./oee.dashboard.service');
+
+/** Score bands, lowest bound of each. Below `average` needs help. */
+const SCORE_BANDS = { excellent: 75, good: 60, average: 45 };
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -55,186 +69,182 @@ function resolveRange({ from, to }) {
 }
 
 /**
- * The per-operator aggregate.
- *
- * Each source is rolled up to one row per machine *before* anything is
- * joined. Joining production_hourly, oee_hourly and quality_entries
- * together first would multiply rows against each other and inflate every
- * sum — the classic fan-out that makes a dashboard confidently wrong.
+ * Who is responsible for which machine over the period, and the shift each
+ * operator is rostered to. An assignment counts when it overlaps the
+ * window, open-ended ones included.
  */
-function operatorRowsSql({ machineFilter, shiftFilter, operatorFilter, searchFilter }) {
-  return `
-    WITH assign AS (
-      SELECT DISTINCT a.operator_id, a.machine_id
-        FROM operator_machine_assignments a
-       WHERE a.company_id = $1
-         AND a.is_active = TRUE
-         AND a.assigned_from <= $3::timestamptz
-         AND (a.assigned_to IS NULL OR a.assigned_to >= $2::timestamptz)
-         ${machineFilter}
-    ),
-    /* how many operators share each machine — the caveat that makes the
-       rest of the numbers readable */
-    sharing AS (
-      SELECT machine_id, COUNT(*)::int AS operators_on_machine
-        FROM assign GROUP BY machine_id
-    ),
-    prod AS (
-      SELECT p.machine_id,
-             SUM(p.produced_qty)::bigint   AS produced,
-             SUM(p.run_seconds)::bigint    AS run_seconds,
-             SUM(p.idle_seconds)::bigint   AS idle_seconds
-        FROM production_hourly p
-       WHERE p.company_id = $1
-         AND p.hour_start >= $2::timestamptz AND p.hour_start <= $3::timestamptz
-         ${shiftFilter.replace('%TABLE%', 'p')}
-       GROUP BY p.machine_id
-    ),
-    oee AS (
-      /* Scoped through the machine, not oee_hourly.company_id — that column
-         is NULL on 50,498 of its 50,502 rows, so filtering on it directly
-         returns almost nothing and the screen reports no OEE at all. */
-      SELECT o.machine_id,
-             AVG(o.oee)          AS oee,
-             AVG(o.performance)  AS performance,
-             AVG(o.availability) AS availability
-        FROM oee_hourly o
-        JOIN machines om ON om.id = o.machine_id AND om.company_id = $1
-       WHERE o.hour_start >= $2::timestamptz AND o.hour_start <= $3::timestamptz
-         ${shiftFilter.replace('%TABLE%', 'o')}
-       GROUP BY o.machine_id
-    ),
-    qual AS (
-      /* total_qty is NULL on every row in this database, so produced comes
-         from telemetry and only the reject counts are taken from here.
+async function assignments({ companyId, start, end, machineId, operatorId, search }) {
+  const params = [companyId, start, end];
+  const mf = machineId  ? (params.push(machineId),  ` AND a.machine_id = $${params.length}`) : '';
+  const of = operatorId ? (params.push(operatorId), ` AND op.id = $${params.length}`)        : '';
+  const sf = search
+    ? (params.push(`%${search}%`),
+       ` AND (op.operator_name ILIKE $${params.length} OR op.operator_code ILIKE $${params.length})`)
+    : '';
 
-         quality_entries has no company_id of its own, so tenant scoping has
-         to come through the machine. Without this join the table is global
-         and one company's reject counts would leak into another's. */
-      SELECT q.machine_id,
-             SUM(COALESCE(q.reject_qty, 0) + COALESCE(q.rework_qty, 0))::bigint AS rejected
-        FROM quality_entries q
-        JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
-       WHERE q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
-         ${shiftFilter.replace('%TABLE%', 'q')}
-       GROUP BY q.machine_id
-    ),
-    alarms AS (
-      SELECT al.machine_id, COUNT(*)::int AS alarm_count
-        FROM machine_alarms al
-       WHERE al.company_id = $1
-         AND al.started_at >= $2::timestamptz AND al.started_at <= $3::timestamptz
-       GROUP BY al.machine_id
-    ),
-    downtime AS (
-      SELECT d.machine_id,
-             COALESCE(SUM(EXTRACT(EPOCH FROM (
-               LEAST(COALESCE(d.ended_at, NOW()), $3::timestamptz)
-             - GREATEST(d.started_at, $2::timestamptz)))), 0)::bigint AS downtime_seconds
-        FROM downtime_events d
-       WHERE d.company_id = $1
-         AND d.started_at <= $3::timestamptz
-         AND COALESCE(d.ended_at, NOW()) >= $2::timestamptz
-       GROUP BY d.machine_id
-    )
-    SELECT
-      op.id                                     AS operator_id,
-      op.operator_code,
-      op.operator_name,
-      op.skill_level,
-      COUNT(DISTINCT a.machine_id)::int         AS machine_count,
-      COUNT(DISTINCT a.machine_id) FILTER (WHERE sh.operators_on_machine > 1)::int
-                                                AS shared_machines,
-      COALESCE(SUM(pr.produced), 0)::bigint     AS produced,
-      COALESCE(SUM(qu.rejected), 0)::bigint     AS rejected,
-      COALESCE(SUM(pr.run_seconds), 0)::bigint  AS run_seconds,
-      COALESCE(SUM(pr.idle_seconds), 0)::bigint AS idle_seconds,
-      COALESCE(SUM(dt.downtime_seconds), 0)::bigint AS downtime_seconds,
-      COALESCE(SUM(al.alarm_count), 0)::int     AS alarm_count,
-      AVG(oe.oee)                               AS oee,
-      AVG(oe.performance)                       AS performance
-    FROM operators op
-    JOIN assign a       ON a.operator_id = op.id
-    LEFT JOIN sharing sh ON sh.machine_id = a.machine_id
-    LEFT JOIN prod pr   ON pr.machine_id = a.machine_id
-    LEFT JOIN oee oe    ON oe.machine_id = a.machine_id
-    LEFT JOIN qual qu   ON qu.machine_id = a.machine_id
-    LEFT JOIN alarms al ON al.machine_id = a.machine_id
-    LEFT JOIN downtime dt ON dt.machine_id = a.machine_id
-    WHERE op.company_id = $1
-      AND op.is_active = TRUE
-      ${operatorFilter}
-      ${searchFilter}
-    GROUP BY op.id, op.operator_code, op.operator_name, op.skill_level`;
+  const { rows } = await pool.query(
+    `SELECT op.id AS operator_id, op.operator_code, op.operator_name, op.skill_level,
+            a.machine_id,
+            (SELECT string_agg(DISTINCT s.shift_name, ', ')
+               FROM operator_shift_assignments osa
+               JOIN shifts s ON s.id = osa.shift_id
+              WHERE osa.operator_id = op.id AND osa.company_id = $1 AND osa.is_active = TRUE
+                AND osa.effective_from <= $3::date
+                AND (osa.effective_to IS NULL OR osa.effective_to >= $2::date)) AS shift_name
+       FROM operators op
+       JOIN operator_machine_assignments a
+         ON a.operator_id = op.id
+        AND a.company_id = $1
+        AND a.is_active = TRUE
+        AND a.assigned_from <= $3::timestamptz
+        AND (a.assigned_to IS NULL OR a.assigned_to >= $2::timestamptz)
+        ${mf}
+      WHERE op.company_id = $1 AND op.is_active = TRUE
+        ${of}${sf}
+      GROUP BY op.id, op.operator_code, op.operator_name, op.skill_level, a.machine_id`,
+    params
+  );
+  return rows;
 }
 
-/** Turn the raw aggregate into the rates the screen reports. */
-function derive(r) {
-  const produced = Number(r.produced);
-  const rejected = Number(r.rejected);
-  const good = Math.max(0, produced - rejected);
-  const run = Number(r.run_seconds);
-  const idle = Number(r.idle_seconds);
-  const manned = run + idle;
+/** Every active operator, for the Operator filter — whatever else is set. */
+async function operatorOptions(companyId) {
+  const { rows } = await pool.query(
+    `SELECT id, operator_code, operator_name FROM operators
+      WHERE company_id = $1 AND is_active = TRUE ORDER BY operator_name`,
+    [companyId]
+  );
+  return rows.map(r => ({ id: r.id, operator_code: r.operator_code, operator_name: (r.operator_name || '').trim() }));
+}
 
-  return {
-    operator_id:      r.operator_id,
-    operator_code:    r.operator_code,
-    operator_name:    (r.operator_name || '').trim(),
-    skill_level:      r.skill_level,
-    machine_count:    Number(r.machine_count),
-    shared_machines:  Number(r.shared_machines),
+const round1 = v => v == null ? null : Number(Number(v).toFixed(1));
+
+/** The average of whichever of the three rates were measured. */
+function scoreOf({ utilization_pct, efficiency_pct, quality_rate_pct }) {
+  const parts = [utilization_pct, efficiency_pct, quality_rate_pct].filter(v => v != null);
+  return parts.length ? round1(parts.reduce((a, b) => a + b, 0) / parts.length) : null;
+}
+
+function bandOf(score) {
+  if (score == null) return 'UNRATED';
+  if (score >= SCORE_BANDS.excellent) return 'EXCELLENT';
+  if (score >= SCORE_BANDS.good)      return 'GOOD';
+  if (score >= SCORE_BANDS.average)   return 'AVERAGE';
+  return 'NEEDS_HELP';
+}
+
+/**
+ * One operator's row from the derived figures of their machines.
+ * fleetOee does the OEE sums exactly as the OEE Dashboard's fleet row does
+ * (performance weighted by run time), so the two screens agree.
+ */
+function derive(op, machines) {
+  const f = oeeSvc.fleetOee(machines, oeeSvc.DEFAULT_THRESHOLDS);
+  const run = f.run_seconds;
+  const idle = f.idle_seconds;
+  const manned = run + idle;
+  const produced = f.produced;
+
+  const r = {
+    operator_id:      op.operator_id,
+    operator_code:    op.operator_code,
+    operator_name:    (op.operator_name || '').trim(),
+    skill_level:      op.skill_level,
+    shift_name:       op.shift_name || null,
+    machines:         machines.map(m => ({ id: m.machine_id, name: m.machine_serial_no })),
+    machine_names:    machines.map(m => m.machine_serial_no).join(', '),
+    machine_count:    machines.length,
+    shared_machines:  op.shared_machines || 0,
     produced,
-    good,
-    rejected,
+    good:             f.good,
+    rejected:         f.rejected,
     run_seconds:      run,
     idle_seconds:     idle,
-    downtime_seconds: Number(r.downtime_seconds),
-    alarm_count:      Number(r.alarm_count),
-    // Every rate is null rather than 0 when its denominator is absent.
-    // "0% quality" for an operator whose machines produced nothing is a
-    // different claim from one who produced only scrap.
-    quality_rate_pct:   produced > 0 ? Number(((good / produced) * 100).toFixed(1)) : null,
-    rejection_rate_pct: produced > 0 ? Number(((rejected / produced) * 100).toFixed(1)) : null,
-    utilization_pct:    manned > 0 ? Number(((run / manned) * 100).toFixed(1)) : null,
-    oee_pct:            r.oee != null ? Number(Number(r.oee).toFixed(1)) : null,
-    efficiency_pct:     r.performance != null ? Number(Number(r.performance).toFixed(1)) : null
+    // measured, not declared: the machine on and not cutting
+    downtime_seconds: idle,
+    alarm_count:      f.alarm_count,
+    // every rate is null rather than 0 when its denominator is absent
+    utilization_pct:    manned > 0 ? round1((run / manned) * 100) : null,
+    availability_pct:   f.availability_pct,
+    efficiency_pct:     f.performance_pct,
+    quality_rate_pct:   f.quality_pct,
+    rejection_rate_pct: produced > 0 ? round1((f.rejected / produced) * 100) : null,
+    oee_pct:            f.oee_pct
   };
+  r.score = scoreOf(r);
+  r.band = bandOf(r.score);
+  return r;
 }
 
-/**
- * Rank operators for the leaderboard.
- *
- * OEE first because it already folds availability, performance and
- * quality together; produced quantity breaks ties. Operators with no OEE
- * recorded sort last rather than counting as zero — absent is not bad.
- */
-/**
- * Performance bands, on the same OEE thresholds the OEE dashboard uses.
- *
- * An operator whose machines have no OEE recorded is counted as `unrated`
- * rather than dropped into "needs help" — no measurement is not the same
- * claim as a bad measurement, and the screen says which it is.
- */
+/** Counted over every operator, so the tiles do not change with the page. */
 function band(rows) {
   const out = { excellent: 0, good: 0, average: 0, needs_help: 0, unrated: 0 };
   for (const r of rows) {
-    if (r.oee_pct == null)   { out.unrated++;    continue; }
-    if (r.oee_pct >= 85)     { out.excellent++;  continue; }
-    if (r.oee_pct >= 75)     { out.good++;       continue; }
-    if (r.oee_pct >= 60)     { out.average++;    continue; }
-    out.needs_help++;
+    const b = r.band || bandOf(r.score);
+    if (b === 'EXCELLENT') out.excellent++;
+    else if (b === 'GOOD') out.good++;
+    else if (b === 'AVERAGE') out.average++;
+    else if (b === 'NEEDS_HELP') out.needs_help++;
+    else out.unrated++;
   }
   return out;
 }
 
-function rank(rows) {
-  return [...rows].sort((a, b) => {
-    if (a.oee_pct == null && b.oee_pct == null) return b.produced - a.produced;
-    if (a.oee_pct == null) return 1;
-    if (b.oee_pct == null) return -1;
-    return b.oee_pct - a.oee_pct || b.produced - a.produced;
+/** Fields the table can be sorted on, and what they sort by. */
+const SORTABLE = new Set([
+  'operator_code', 'operator_name', 'shift_name', 'machine_names', 'score', 'run_seconds',
+  'downtime_seconds', 'utilization_pct', 'produced', 'good', 'rejected', 'quality_rate_pct',
+  'rejection_rate_pct', 'alarm_count', 'oee_pct', 'efficiency_pct'
+]);
+
+/**
+ * Sort by one field. Unmeasured values sort last in either direction — an
+ * operator with nothing measured is not the best or the worst, just unknown.
+ * Ties fall back to score, then output, then name, so the order is stable.
+ */
+function sortRows(rows, field = 'score', dir = 'desc') {
+  const key = SORTABLE.has(field) ? field : 'score';
+  const sign = dir === 'asc' ? 1 : -1;
+  const cmp = (a, b) => {
+    const x = a[key], y = b[key];
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    if (typeof x === 'string' || typeof y === 'string') return sign * String(x).localeCompare(String(y));
+    return sign * (x - y);
+  };
+  return [...rows].sort((a, b) =>
+    cmp(a, b)
+    || ((b.score ?? -1) - (a.score ?? -1))
+    || (b.produced - a.produced)
+    || a.operator_name.localeCompare(b.operator_name));
+}
+
+/** Kept for callers that rank without choosing a column: best score first. */
+const rank = rows => sortRows(rows, 'score', 'desc');
+
+/**
+ * Top 5 and Bottom 5 for one measure, over every operator rather than the
+ * page on screen. `top` is the highest values; for rejection and downtime
+ * that is the worst five. Operators with the measure unknown are left out
+ * of both — they are not the best or the worst of anything.
+ */
+function leaders(rows, field, keep = () => true) {
+  const measured = rows.filter(r => r[field] != null && keep(r));
+  const desc = sortRows(measured, field, 'desc');
+  const pick = r => ({
+    operator_id: r.operator_id,
+    operator_name: r.operator_name,
+    value: r[field],
+    availability_pct: r.availability_pct,
+    efficiency_pct: r.efficiency_pct,
+    quality_rate_pct: r.quality_rate_pct,
+    oee_pct: r.oee_pct
   });
+  return {
+    top: desc.slice(0, 5).map(pick),
+    bottom: [...desc].reverse().slice(0, 5).map(pick)
+  };
 }
 
 exports.getOperators = async (q = {}) => {
@@ -244,30 +254,41 @@ exports.getOperators = async (q = {}) => {
   const shiftId    = parseId(q.shift_id, 'shift_id');
   const operatorId = parseId(q.operator_id, 'operator_id');
   const search     = (q.search || '').trim();
+  const sort       = SORTABLE.has(q.sort) ? q.sort : 'score';
+  const dir        = q.dir === 'asc' ? 'asc' : 'desc';
 
-  const params = [companyId, start, end];
-  const machineFilter  = machineId  ? (params.push(machineId),  ` AND a.machine_id = $${params.length}`) : '';
-  const shiftFilter    = shiftId    ? (params.push(shiftId),    ` AND %TABLE%.shift_id = $${params.length}`) : '';
-  const operatorFilter = operatorId ? (params.push(operatorId), ` AND op.id = $${params.length}`) : '';
-  const searchFilter   = search
-    ? (params.push(`%${search}%`),
-       ` AND (op.operator_name ILIKE $${params.length} OR op.operator_code ILIKE $${params.length})`)
-    : '';
+  const [links, machineRows, operator_list] = await Promise.all([
+    assignments({ companyId, start, end, machineId, operatorId, search }),
+    oeeSvc.machineTotals({ companyId, machineId, shiftId, start, end }),
+    operatorOptions(companyId)
+  ]);
 
-  const { rows } = await pool.query(
-    operatorRowsSql({ machineFilter, shiftFilter, operatorFilter, searchFilter }),
-    params
+  const machinesById = new Map(
+    machineRows.map(r => [r.machine_id, oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS)])
   );
 
-  const all = rows.map(derive);
-  const ranked = rank(all);
+  // how many operators hold each machine — the caveat on every shared row
+  const holders = new Map();
+  for (const l of links) holders.set(l.machine_id, (holders.get(l.machine_id) || 0) + 1);
 
-  /*
-   * Fleet totals come from the machines, not from summing the operator
-   * rows. Ten machines are shared, so adding the rows up would count their
-   * output two or three times.
-   */
-  const machineTotals = await fleetTotals({ companyId, machineId, shiftId, start, end });
+  const byOperator = new Map();
+  for (const l of links) {
+    const m = machinesById.get(l.machine_id);
+    if (!m) continue;                               // an inactive or other-company machine
+    const e = byOperator.get(l.operator_id)
+      || { op: { ...l, shared_machines: 0 }, machines: [] };
+    e.machines.push(m);
+    if (holders.get(l.machine_id) > 1) e.op.shared_machines++;
+    byOperator.set(l.operator_id, e);
+  }
+
+  const all = [...byOperator.values()].map(e => derive(e.op, e.machines));
+  const sorted = sortRows(all, sort, dir);
+
+  // Fleet figures over the machines these operators hold, each counted once.
+  const held = [...new Set(links.map(l => l.machine_id))].map(id => machinesById.get(id)).filter(Boolean);
+  const fleet = oeeSvc.fleetOee(held, oeeSvc.DEFAULT_THRESHOLDS);
+  const producing = held.filter(m => m.produced > 0 || m.run_seconds > 0);
 
   const pageNum  = Math.max(1, Number(q.page) || 1);
   const limitNum = Math.min(200, Math.max(1, Number(q.limit) || 20));
@@ -277,85 +298,61 @@ exports.getOperators = async (q = {}) => {
     filters: {
       from: q.from || null, to: q.to || null,
       machine_id: machineId, shift_id: shiftId, operator_id: operatorId,
-      search: search || null
+      search: search || null, sort, dir
     },
-    kpis: machineTotals,
-    // the caveat the screen must show, not bury
+    kpis: {
+      produced: fleet.produced, good: fleet.good, rejected: fleet.rejected,
+      run_seconds: fleet.run_seconds, idle_seconds: fleet.idle_seconds,
+      quality_rate_pct: fleet.quality_pct,
+      utilization_pct: (fleet.run_seconds + fleet.idle_seconds) > 0
+        ? round1((fleet.run_seconds / (fleet.run_seconds + fleet.idle_seconds)) * 100) : null,
+      oee_pct: fleet.oee_pct
+    },
+    // OEE needs a cycle time; say how many of the running machines have one
+    oee_coverage: {
+      machines: producing.length,
+      with_cycle_time: producing.filter(m => m.has_cycle_time).length
+    },
     attribution: {
       operators: all.length,
       shared_machines: all.reduce((n, r) => n + (r.shared_machines > 0 ? 1 : 0), 0),
       note: 'Figures are for the machines each operator is assigned to. Machines with more than one assigned operator appear in each of their rows.'
     },
-    // Counted over every operator, not the page the client happens to be
-    // showing, so the tiles do not change as you page through the table.
+    score_bands: SCORE_BANDS,
     bands: band(all),
-    by_production: [...all].sort((a, b) => b.produced - a.produced).slice(0, 10),
-    top_performers: ranked.slice(0, 5),
+    leaders: {
+      score:     leaders(all, 'score'),
+      rejection: leaders(all, 'rejection_rate_pct'),
+      // only operators whose machines reported any time at all
+      downtime:  leaders(all, 'downtime_seconds', r => r.run_seconds + r.idle_seconds > 0),
+      oee:       leaders(all, 'oee_pct')
+    },
+    operator_list,
     operators: {
-      data: ranked.slice(offset, offset + limitNum),
-      total: ranked.length,
+      data: sorted.slice(offset, offset + limitNum),
+      total: sorted.length,
       page: pageNum,
       limit: limitNum,
-      totalPages: Math.max(1, Math.ceil(ranked.length / limitNum))
+      totalPages: Math.max(1, Math.ceil(sorted.length / limitNum))
     },
     updated_at: new Date().toISOString()
   };
 };
 
-/** Shop-level figures, measured per machine so nothing is double-counted. */
-async function fleetTotals({ companyId, machineId, shiftId, start, end }) {
-  const params = [companyId, start, end];
-  const mf = machineId ? (params.push(machineId), ` AND machine_id = $${params.length}`) : '';
-  const sf = shiftId   ? (params.push(shiftId),   ` AND shift_id = $${params.length}`)   : '';
-
-  const [{ rows: [p] }, { rows: [o] }, { rows: [q] }] = await Promise.all([
-    pool.query(
-      `SELECT COALESCE(SUM(produced_qty),0)::bigint  AS produced,
-              COALESCE(SUM(run_seconds),0)::bigint   AS run_seconds,
-              COALESCE(SUM(idle_seconds),0)::bigint  AS idle_seconds
-         FROM production_hourly
-        WHERE company_id = $1 AND hour_start >= $2::timestamptz AND hour_start <= $3::timestamptz
-        ${mf}${sf}`, params),
-    pool.query(
-      `SELECT AVG(o.oee) AS oee
-         FROM oee_hourly o
-         JOIN machines m ON m.id = o.machine_id AND m.company_id = $1
-        WHERE o.hour_start >= $2::timestamptz AND o.hour_start <= $3::timestamptz
-        ${mf.replace('machine_id', 'o.machine_id')}${sf.replace('shift_id', 'o.shift_id')}`, params),
-    pool.query(
-      `SELECT COALESCE(SUM(COALESCE(q.reject_qty,0)+COALESCE(q.rework_qty,0)),0)::bigint AS rejected
-         FROM quality_entries q
-         JOIN machines m ON m.id = q.machine_id AND m.company_id = $1
-        WHERE q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
-        ${mf.replace('machine_id', 'q.machine_id')}${sf.replace('shift_id', 'q.shift_id')}`, params)
-  ]);
-
-  const produced = Number(p.produced);
-  const rejected = Number(q.rejected);
-  const good = Math.max(0, produced - rejected);
-  const manned = Number(p.run_seconds) + Number(p.idle_seconds);
-
-  return {
-    produced, good, rejected,
-    run_seconds:  Number(p.run_seconds),
-    idle_seconds: Number(p.idle_seconds),
-    quality_rate_pct: produced > 0 ? Number(((good / produced) * 100).toFixed(1)) : null,
-    utilization_pct:  manned > 0 ? Number(((Number(p.run_seconds) / manned) * 100).toFixed(1)) : null,
-    oee_pct: o.oee != null ? Number(Number(o.oee).toFixed(1)) : null
-  };
-}
-
-/** Flat rows for Excel / CSV / PDF. */
+/** Flat rows for Excel / CSV / PDF, in the table's order and columns. */
 exports.getExportRows = async (q = {}) => {
   const d = await exports.getOperators({ ...q, page: 1, limit: 200 });
   const hhmm = s => `${Math.floor((Number(s) || 0) / 3600)}h ${String(Math.floor(((Number(s) || 0) % 3600) / 60)).padStart(2, '0')}m`;
   const pct = v => v === null || v === undefined ? '' : `${v}%`;
+  const label = { EXCELLENT: 'Excellent', GOOD: 'Good', AVERAGE: 'Avg', NEEDS_HELP: 'Help', UNRATED: 'Unrated' };
 
   return d.operators.data.map(r => ({
     'Operator ID':   r.operator_code || r.operator_id,
     'Operator':      r.operator_name,
-    'Machines':      r.machine_count,
+    'Shift':         r.shift_name || '',
+    'Machines':      r.machine_names,
     'Shared':        r.shared_machines > 0 ? `${r.shared_machines} shared` : '',
+    'Score':         pct(r.score),
     'Run time':      hhmm(r.run_seconds),
     'Down time':     hhmm(r.downtime_seconds),
     'Utilization':   pct(r.utilization_pct),
@@ -365,7 +362,8 @@ exports.getExportRows = async (q = {}) => {
     'Quality rate':  pct(r.quality_rate_pct),
     'Alarms':        r.alarm_count,
     'OEE':           pct(r.oee_pct),
-    'Efficiency':    pct(r.efficiency_pct)
+    'Efficiency':    pct(r.efficiency_pct),
+    'Status':        label[r.band] || ''
   }));
 };
 
@@ -373,3 +371,8 @@ exports.resolveRange = resolveRange;
 exports.derive = derive;
 exports.rank = rank;
 exports.band = band;
+exports.bandOf = bandOf;
+exports.scoreOf = scoreOf;
+exports.sortRows = sortRows;
+exports.leaders = leaders;
+exports.SCORE_BANDS = SCORE_BANDS;

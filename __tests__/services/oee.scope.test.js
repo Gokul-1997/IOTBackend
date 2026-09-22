@@ -71,35 +71,37 @@ describe('scopeViaMachine', () => {
   });
 });
 
+/* Factory no longer reads oee_hourly at all. Averaging it read 0% — an hour
+   with nothing made has no performance — while the OEE Dashboard showed the
+   real figure for the same plant. Factory now uses that screen's own totals. */
 describe('Factory dashboard', () => {
-  test('joins machines and filters on m.company_id', async () => {
-    await runCapturingSql(factorySvc.getFactoryDashboard, req());
-    const q = oeeQuery();
+  const totalsQuery = () => mockDb.calls().find(c => /machine_current_job/.test(c.text) && /FROM production_hourly/.test(c.text));
 
+  test('does not average oee_hourly', async () => {
+    await runCapturingSql(factorySvc.getFactoryDashboard, req());
+    expect(oeeQuery()).toBeUndefined();
+  });
+
+  test('uses the OEE Dashboard\'s machine totals, scoped to the company', async () => {
+    await runCapturingSql(factorySvc.getFactoryDashboard, req());
+    const q = totalsQuery();
     expect(q).toBeTruthy();
-    expect(q.text).toMatch(/JOIN machines m ON m\.id = o\.machine_id/);
-    expect(q.text).toMatch(/m\.company_id = \$1/);
+    expect(q.text).toMatch(/JOIN machines m ON m\.id = ph\.machine_id AND m\.company_id = \$1/);
+    expect(q.params[0]).toBe(4);
   });
 
-  test('never filters oee_hourly by its own company_id', async () => {
-    await runCapturingSql(factorySvc.getFactoryDashboard, req());
-    const q = oeeQuery();
-    // the bug: `FROM oee_hourly WHERE company_id = $1` matched no rows
-    expect(q.text).not.toMatch(/FROM oee_hourly\s+WHERE\s+company_id/);
-  });
-
-  test('a machine filter still reaches the OEE query', async () => {
+  test('a machine filter still reaches the OEE figures', async () => {
     await runCapturingSql(factorySvc.getFactoryDashboard, req({ machine_id: '7' }));
-    const q = oeeQuery();
-    expect(q.text).toMatch(/o\.machine_id = \$4/);
-    expect(q.params).toContain(7);
+    expect(totalsQuery().params).toContain(7);
   });
 
-  test('binds exactly the parameters the OEE query references', async () => {
-    await runCapturingSql(factorySvc.getFactoryDashboard, req());
-    const q = oeeQuery();
-    const highest = Math.max(...[...q.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
-    expect(q.params.length).toBe(highest);
+  test('every query binds exactly the parameters it references', async () => {
+    await runCapturingSql(factorySvc.getFactoryDashboard, req({ machine_id: '7' }));
+    for (const q of mockDb.calls()) {
+      const refs = [...q.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1]));
+      const highest = refs.length ? Math.max(...refs) : 0;
+      expect(q.params ? q.params.length : 0).toBe(highest);
+    }
   });
 });
 

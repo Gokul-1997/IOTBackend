@@ -13,7 +13,8 @@ const db = require('../db');
 // resolveWindow/scope moved to ./window.js when the Maintenance dashboard
 // needed the same filter behaviour — two screens filtered identically must
 // resolve identically, so there is one copy rather than two.
-const { resolveWindow, scope, scopeViaMachine, parseMachineId } = require('./window');
+const { resolveWindow, scope, parseMachineId } = require('./window');
+const oeeSvc = require('./oee.dashboard.service');
 
 /* Alarm severities are stored as LOW/MEDIUM/HIGH/CRITICAL, but the
    agreement asks for Critical / Non-Critical / Information. */
@@ -36,11 +37,10 @@ exports.getFactoryDashboard = async (req) => {
   const win        = await resolveWindow(companyId, req.query);
 
   const s = scope(companyId, win, machineId);
-  const sm = scopeViaMachine(companyId, win, machineId);
 
   const [
-    settingsRes, machineRes, prodRes, oeeRes,
-    shiftRes, downtimeRes, alarmRes, energyRes
+    settingsRes, machineRes, prodRes, machineTotals,
+    shiftRes, downtimeRes, alarmRes, energyRes, targetRes, yesterdayRes
   ] = await Promise.all([
 
     /* company tariff — cost is unavailable rather than zero when unset */
@@ -109,27 +109,22 @@ exports.getFactoryDashboard = async (req) => {
       FROM production_hourly WHERE ${s.sql}`, s.params
     ),
 
-    /* OEE averaged across the window.
+    /* OEE, worked out exactly as the OEE Dashboard does: from the window's
+       summed run time, planned time, output and rejects, performance from
+       the cycle time on each machine's current job.
 
-       Scoped through the machine: oee_hourly.company_id is NULL on almost
-       every row, so filtering on it returned no rows at all and this tile
-       read 0% for every company. AVG ignores NULLs, so a machine with no
-       cycle time no longer drags the average to zero — it is simply not
-       counted in performance. */
-    db.query(`
-      SELECT ROUND(AVG(o.availability)::numeric,2)::float AS availability,
-             ROUND(AVG(o.performance)::numeric,2)::float  AS performance,
-             ROUND(AVG(o.quality)::numeric,2)::float      AS quality,
-             ROUND(AVG(o.oee)::numeric,2)::float          AS oee
-      FROM oee_hourly o
-      JOIN machines m ON m.id = o.machine_id
-      WHERE ${sm.sql}`, sm.params
-    ),
+       This tile used to average oee_hourly. An hour in which a machine made
+       nothing has no performance, so nearly every hourly OEE row is 0 or
+       empty and the tile read 0% — while the OEE Dashboard showed the real
+       figure for the same machines on the same day. */
+    oeeSvc.machineTotals({ companyId, machineId, shiftId: win.shift?.id || null, start: win.from, end: win.to }),
 
-    /* shift-wise production bar chart (whole day, ignores shift filter
-       on purpose — the point of the chart is to compare shifts) */
+    /* shift-wise production (whole day, ignores the shift filter on purpose
+       — the point of the chart is to compare shifts), per machine so each
+       machine's output can be set against its own job target */
     db.query(`
-      SELECT sh.shift_code,
+      SELECT sh.id AS shift_id, sh.shift_code, sh.shift_name, sh.start_time, sh.end_time,
+             p.machine_id,
              COALESCE(SUM(p.produced_qty),0)::int AS produced
       FROM shifts sh
       LEFT JOIN production_hourly p
@@ -138,7 +133,7 @@ exports.getFactoryDashboard = async (req) => {
        AND p.hour_start >= $2 AND p.hour_start < $3
        ${machineId ? 'AND p.machine_id = $4' : ''}
       WHERE sh.company_id = $1 AND sh.is_active
-      GROUP BY sh.id, sh.shift_code
+      GROUP BY sh.id, sh.shift_code, sh.shift_name, sh.start_time, sh.end_time, p.machine_id
       ORDER BY sh.shift_code`,
       machineId
         ? [companyId, `${win.day}T00:00:00+05:30`, `${win.day}T23:59:59.999+05:30`, machineId]
@@ -172,13 +167,39 @@ exports.getFactoryDashboard = async (req) => {
       machineId ? [companyId, win.from, win.to, machineId] : [companyId, win.from, win.to]
     ),
 
-    /* hourly energy + production trend */
+    /* hourly energy + production trend, per machine and shift so output
+       can be counted in parts and set against the hourly target */
     db.query(`
-      SELECT hour_start,
+      SELECT hour_start, machine_id, shift_id,
              COALESCE(SUM(energy_kwh),0)::float AS kwh,
              COALESCE(SUM(produced_qty),0)::int AS produced
       FROM production_hourly WHERE ${s.sql}
-      GROUP BY hour_start ORDER BY hour_start`, s.params
+      GROUP BY hour_start, machine_id, shift_id ORDER BY hour_start`, s.params
+    ),
+
+    /* Each machine's target for a shift: the target quantity on its current
+       job — the same figure the live dashboard measures a shift against. */
+    db.query(`
+      SELECT j.machine_id, j.target_qty::numeric AS target,
+             COALESCE(c.multiplication_factor, 1)::numeric AS mult
+        FROM machine_current_job j
+        JOIN machines m ON m.id = j.machine_id AND m.company_id = $1 AND m.is_active
+        LEFT JOIN components c ON c.id = j.component_id
+       WHERE j.is_active = TRUE
+         ${machineId ? 'AND j.machine_id = $2' : ''}`,
+      machineId ? [companyId, machineId] : [companyId]
+    ),
+
+    /* yesterday's energy and output, for the "vs yesterday" comparisons */
+    db.query(`
+      SELECT COALESCE(SUM(energy_kwh),0)::float AS kwh,
+             COALESCE(SUM(produced_qty),0)::int AS produced
+        FROM production_hourly
+       WHERE company_id = $1
+         AND hour_start >= ($2::date - 1)::timestamp AT TIME ZONE 'Asia/Kolkata'
+         AND hour_start <  ($2::date)::timestamp AT TIME ZONE 'Asia/Kolkata'
+         ${machineId ? 'AND machine_id = $3' : ''}`,
+      machineId ? [companyId, win.day, machineId] : [companyId, win.day]
     )
   ]);
 
@@ -186,16 +207,88 @@ exports.getFactoryDashboard = async (req) => {
   const rate       = Number(settings.energy_rate_per_kwh || 0);
   const prod       = prodRes.rows[0];
 
-  /* month-to-date energy, for the monthly cost figure */
+  /* month-to-date energy, for the monthly cost figure, and the same days
+     of last month for the "vs last month" comparison */
   const monthRes = await db.query(`
-    SELECT COALESCE(SUM(energy_kwh),0)::float AS kwh
+    SELECT COALESCE(SUM(energy_kwh) FILTER (
+             WHERE hour_start >= date_trunc('month', $2::date)
+               AND hour_start <  (date_trunc('month', $2::date) + INTERVAL '1 month')), 0)::float AS kwh,
+           COALESCE(SUM(energy_kwh) FILTER (
+             WHERE hour_start >= date_trunc('month', $2::date) - INTERVAL '1 month'
+               AND hour_start <  ($2::date - INTERVAL '1 month' + INTERVAL '1 day')), 0)::float AS prev_kwh
     FROM production_hourly
     WHERE company_id = $1
-      AND hour_start >= date_trunc('month', $2::date)
+      AND hour_start >= date_trunc('month', $2::date) - INTERVAL '1 month'
       AND hour_start <  (date_trunc('month', $2::date) + INTERVAL '1 month')
       ${machineId ? 'AND machine_id = $3' : ''}`,
     machineId ? [companyId, win.day, machineId] : [companyId, win.day]
   );
+
+  /* ── OEE: the OEE Dashboard's own sums ── */
+  const derived = machineTotals.map(r => oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS));
+  const fleet = oeeSvc.fleetOee(derived, oeeSvc.DEFAULT_THRESHOLDS);
+
+  /* ── targets ── */
+  const targetOf = new Map(targetRes.rows.map(r => [r.machine_id, { target: Number(r.target) || 0, mult: Number(r.mult) || 1 }]));
+  const multOf = id => targetOf.get(id)?.mult || 1;
+  const shiftTarget = [...targetOf.values()].reduce((a, t) => a + t.target, 0);
+  const targetMachines = [...targetOf.entries()].filter(([, t]) => t.target > 0).map(([id]) => id);
+
+  /* One row per shift: all output (as before), and the output of machines
+     with a target set against the sum of those targets. */
+  const shifts = new Map();
+  for (const r of shiftRes.rows) {
+    const e = shifts.get(r.shift_id) || {
+      shift_id: r.shift_id, shift_code: r.shift_code, shift_name: r.shift_name,
+      start_time: r.start_time, end_time: r.end_time, produced: 0, actual: 0
+    };
+    e.produced += r.produced;
+    if (r.machine_id && targetMachines.includes(r.machine_id)) e.actual += Math.round(r.produced * multOf(r.machine_id));
+    shifts.set(r.shift_id, e);
+  }
+  const shiftwise = [...shifts.values()].map(e => ({ ...e, target: shiftTarget || null }));
+
+  /* Overall production against target, over the shifts in the window. */
+  const inScope = win.shift ? shiftwise.filter(r => r.shift_id === win.shift.id) : shiftwise;
+  const actualInScope = inScope.reduce((a, r) => a + r.actual, 0);
+  const targetInScope = shiftTarget * inScope.length;
+
+  /* Hourly trend: output in parts, and each hour's share of the targets —
+     a shift's target spread evenly over its hours. */
+  const shiftHours = new Map(shiftwise.map(r => {
+    const [sh, sm] = String(r.start_time).split(':').map(Number);
+    const [eh, em] = String(r.end_time).split(':').map(Number);
+    let mins = (eh * 60 + em) - (sh * 60 + sm);
+    if (mins <= 0) mins += 24 * 60;                       // overnight
+    return [r.shift_id, mins / 60];
+  }));
+  /* Rows start on the hour and on the half hour (older rows were cut on
+     IST hours, newer ones on UTC hours), so bucket by the IST clock hour —
+     otherwise every hour is drawn twice. */
+  const IST = 5.5 * 3600 * 1000, HOUR = 3600 * 1000;
+  const byHour = new Map();
+  for (const r of energyRes.rows) {
+    const t = new Date(r.hour_start).getTime();
+    const bucket = new Date(Math.floor((t + IST) / HOUR) * HOUR - IST);
+    const key = bucket.toISOString();
+    const e = byHour.get(key) || { hour: bucket, kwh: 0, produced: 0, shift_id: r.shift_id };
+    e.kwh += r.kwh;
+    e.produced += Math.round(r.produced * multOf(r.machine_id));
+    byHour.set(key, e);
+  }
+  const trend = [...byHour.values()].map(e => {
+    const hrs = shiftHours.get(e.shift_id);
+    return {
+      hour: e.hour,
+      kwh: Number(e.kwh.toFixed(3)),
+      produced: e.produced,
+      target: shiftTarget && hrs ? Math.round(shiftTarget / hrs) : null
+    };
+  });
+
+  const yday = yesterdayRes.rows[0] || { kwh: 0, produced: 0 };
+  const pctChange = (now, before) => (before > 0 ? Number((((now - before) / before) * 100).toFixed(1)) : null);
+  const perPart = (kwh, produced) => (rate && produced > 0 ? Number(((kwh * rate) / produced).toFixed(2)) : null);
 
   const alarmBy = Object.fromEntries(alarmRes.rows.map(r => [r.class, r]));
   const dtRows  = downtimeRes.rows;
@@ -213,7 +306,12 @@ exports.getFactoryDashboard = async (req) => {
     machines: machineRes.rows[0],
 
     production: {
-      produced: prod.produced
+      produced: prod.produced,
+      // against the job targets of the machines that have one; null when none do
+      actual: actualInScope,
+      target: targetInScope || null,
+      target_pct: targetInScope > 0 ? Number(((actualInScope / targetInScope) * 100).toFixed(1)) : null,
+      machines_with_target: targetMachines.length
     },
 
     time: {
@@ -222,12 +320,14 @@ exports.getFactoryDashboard = async (req) => {
       down_seconds: dtTotal
     },
 
+    // null, not 0, when a factor cannot be measured (no cycle time, nothing made)
     oee: {
-      availability: oeeRes.rows[0]?.availability ?? 0,
-      performance:  oeeRes.rows[0]?.performance  ?? 0,
-      quality:      oeeRes.rows[0]?.quality      ?? 0,
-      oee:          oeeRes.rows[0]?.oee          ?? 0,
-      target:       Number(settings.oee_target_percent || 85)
+      availability: fleet.availability_pct,
+      performance:  fleet.performance_pct,
+      quality:      fleet.quality_pct,
+      oee:          fleet.oee_pct,
+      target:       Number(settings.oee_target_percent || 85),
+      machines_measurable: fleet.machines_measurable
     },
 
     energy: {
@@ -238,10 +338,15 @@ exports.getFactoryDashboard = async (req) => {
       // null, not 0, when no tariff is configured — a zero here would
       // read as "electricity is free" rather than "not set up yet"
       cost_day:   rate ? Number((prod.energy_kwh * rate).toFixed(2)) : null,
-      cost_month: rate ? Number(((monthRes.rows[0]?.kwh || 0) * rate).toFixed(2)) : null
+      cost_month: rate ? Number(((monthRes.rows[0]?.kwh || 0) * rate).toFixed(2)) : null,
+      // comparisons, null when there is nothing to compare against
+      day_vs_yesterday_pct:   pctChange(prod.energy_kwh, yday.kwh),
+      month_vs_last_pct:      pctChange(monthRes.rows[0]?.kwh || 0, monthRes.rows[0]?.prev_kwh || 0),
+      cost_per_part:          perPart(prod.energy_kwh, prod.produced),
+      cost_per_part_vs_yesterday_pct: pctChange(perPart(prod.energy_kwh, prod.produced) || 0, perPart(yday.kwh, yday.produced) || 0)
     },
 
-    shiftwise: shiftRes.rows,
+    shiftwise,
 
     downtime: {
       total_seconds:     dtTotal,
@@ -258,10 +363,6 @@ exports.getFactoryDashboard = async (req) => {
       open:         alarmRes.rows.reduce((a, r) => a + r.open, 0)
     },
 
-    trend: energyRes.rows.map(r => ({
-      hour:     r.hour_start,
-      kwh:      Number(r.kwh.toFixed(3)),
-      produced: r.produced
-    }))
+    trend
   };
 };
