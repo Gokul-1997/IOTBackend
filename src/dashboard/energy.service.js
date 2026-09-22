@@ -147,12 +147,15 @@ async function perMachine({ companyId, machineId, start, end }) {
         GROUP BY ph.machine_id
      ),
      peak AS (
-       /* Highest instantaneous power seen, for the overload check. */
-       SELECT t.machine_id, MAX(t.power) AS peak_kw
+       /* Highest instantaneous power, for the overload check, and the average
+          supply voltage and current — read in the same pass over telemetry. */
+       SELECT t.machine_id, MAX(t.power) AS peak_kw,
+              AVG(t.voltage) AS avg_voltage, AVG(t.current) AS avg_current,
+              COUNT(t.voltage)::bigint AS voltage_readings, COUNT(t.current)::bigint AS current_readings
          FROM telemetry_raw t
         WHERE t.company_id = $1
           AND t.received_at >= $2::timestamptz AND t.received_at <= $3::timestamptz
-          AND t.power IS NOT NULL
+          AND (t.power IS NOT NULL OR t.voltage IS NOT NULL OR t.current IS NOT NULL)
           ${mf}
         GROUP BY t.machine_id
      )
@@ -160,7 +163,7 @@ async function perMachine({ companyId, machineId, start, end }) {
             pm.kwh, pm.days, pm.readings,
             COALESCE(r.run_seconds, 0)::bigint AS run_seconds,
             COALESCE(r.produced, 0)::bigint    AS produced,
-            pk.peak_kw
+            pk.peak_kw, pk.avg_voltage, pk.avg_current, pk.voltage_readings, pk.current_readings
        FROM machines m
        LEFT JOIN per_machine pm ON pm.machine_id = m.id
        LEFT JOIN run r          ON r.machine_id = m.id
@@ -284,6 +287,10 @@ exports.getEnergy = async (q = {}) => {
       kwh_per_part: (kwh != null && produced > 0) ? round(kwh / produced, 4) : null,
       cost: (kwh != null && rate != null) ? round(kwh * rate) : null,
       peak_kw: round(peak),
+      avg_voltage: r.avg_voltage == null ? null : round(r.avg_voltage, 1),
+      avg_current: r.avg_current == null ? null : round(r.avg_current, 1),
+      voltage_readings: Number(r.voltage_readings || 0),
+      current_readings: Number(r.current_readings || 0),
       overload_kw: overloadKw,
       is_overloaded: (peak != null && overloadKw != null) ? peak > overloadKw : false
     };
@@ -307,19 +314,43 @@ exports.getEnergy = async (q = {}) => {
   const offset   = (pageNum - 1) * limitNum;
   const sorted = [...machines].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1));
 
+  /* Volts and amps averaged over the readings, each machine weighted by how
+     many readings it sent; null when no machine sends them. */
+  const weighted = (valKey, nKey) => {
+    const src = machines.filter(m => m[valKey] != null && m[nKey] > 0);
+    const n = src.reduce((a, m) => a + m[nKey], 0);
+    return n ? round(src.reduce((a, m) => a + m[valKey] * m[nKey], 0) / n, 1) : null;
+  };
+
+  /* The last day in the range against the one before it — the design's
+     "vs Yesterday". Only when both days had a reporting machine. */
+  const [prevDay, lastDay] = trend.slice(-2);
+  const vsYesterday = (prevDay && lastDay && prevDay.machines > 0 && lastDay.machines > 0 && prevDay.kwh > 0)
+    ? round(((lastDay.kwh - prevDay.kwh) / prevDay.kwh) * 100, 1) : null;
+
+  // the machine furthest over its limit, for the Overload tile
+  const worst = machines.filter(m => m.is_overloaded)
+    .sort((a, b) => (b.peak_kw - b.overload_kw) - (a.peak_kw - a.overload_kw))[0];
+
   return {
     filters: {
       from: q.from || null, to: q.to || null,
       machine_id: machineId, search: (q.search || '').trim() || null
     },
     currency: settings.currency,
+    // the company tariff, so the cost trend can price each day, week or month
+    rate_per_kwh: settings.company?.cost_per_kwh != null ? Number(settings.company.cost_per_kwh) : null,
     kpis: {
       total_kwh: reporting.length ? round(totalKwh) : null,
       total_operating_seconds: totalRun,
       total_produced: totalProduced,
       kwh_per_part: (reporting.length && totalProduced > 0) ? round(totalKwh / totalProduced, 4) : null,
       total_cost: hasAnyCost ? round(totalCost) : null,
-      overload_alerts: machines.filter(m => m.is_overloaded).length
+      avg_voltage: weighted('avg_voltage', 'voltage_readings'),
+      avg_current: weighted('avg_current', 'current_readings'),
+      kwh_vs_yesterday_pct: vsYesterday,
+      overload_alerts: machines.filter(m => m.is_overloaded).length,
+      overload_top: worst ? { machine_serial_no: worst.machine_serial_no, exceeded_kw: round(worst.peak_kw - worst.overload_kw, 1) } : null
     },
     /* Stated up front because it decides whether any of this means
        anything: energy is only known for machines that report the counter. */
