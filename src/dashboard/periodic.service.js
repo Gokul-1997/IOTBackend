@@ -210,7 +210,7 @@ async function technicianWorkload(companyId, machineId) {
 }
 
 /** The next occurrences due, whether or not they have slipped yet. */
-async function upcoming(companyId, machineId, limit = 10) {
+async function upcoming(companyId, machineId, limit = 50) {   // enough for the page's This Month view
   const { rows } = await pool.query(
     `SELECT t.id, t.title, t.due_date, t.priority, t.status,
             s.frequency, m.machine_serial_no,
