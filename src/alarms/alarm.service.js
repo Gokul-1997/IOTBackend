@@ -83,23 +83,46 @@ exports.createAlarmNotification = async (company_id, machine_id, alarm_type, mes
     );
     const machineName = machineRes.rows[0]?.machine_serial_no || `Machine #${machine_id}`;
 
-    // Get all active users in this company — none while it is turned off
+    /* Who is told, and where their alert takes them.
+
+       Only people whose role can see alarms — the company admin, or a role
+       holding the Alarms page, the Alarm Report or the Live Dashboard — and
+       who have not switched Alarms off in Settings. Everyone in the company
+       used to get every alarm, HR and Setter included, with a link to the
+       Live Dashboard most of them could not open. Each alert now links to
+       the first alarm page its recipient can open. */
     const usersRes = await db.query(
-      `SELECT u.id FROM users u
+      `SELECT u.id,
+              CASE
+                WHEN bool_or(r.role_name = 'COMPANY_ADMIN' AND r.company_id IS NULL)
+                  OR bool_or(p.permission_key = 'page:alarms:view')           THEN '/alarms'
+                WHEN bool_or(p.permission_key = 'page:analytics-alarms:view') THEN '/alarm-report'
+                ELSE '/dashboard'
+              END AS link
+         FROM users u
          JOIN companies c ON c.id = u.company_id AND c.is_active = true
-        WHERE u.company_id = $1 AND u.is_active = true`, [company_id]
+         JOIN user_roles ur ON ur.user_id = u.id
+         JOIN roles r ON r.id = ur.role_id
+         LEFT JOIN role_permissions rp ON rp.role_id = r.id
+         LEFT JOIN permissions p ON p.id = rp.permission_id
+         LEFT JOIN notification_preferences np ON np.user_id = u.id
+        WHERE u.company_id = $1 AND u.is_active = true
+          AND COALESCE(np.notify_alarm, true)
+        GROUP BY u.id
+       HAVING bool_or(r.role_name = 'COMPANY_ADMIN' AND r.company_id IS NULL)
+           OR bool_or(p.permission_key IN ('page:alarms:view', 'page:analytics-alarms:view', 'page:dashboard:view'))`,
+      [company_id]
     );
     if (!usersRes.rowCount) return;
 
-    const values = usersRes.rows.map(u =>
-      `(${company_id}, ${u.id}, '${alarm_type === 'ALARM' ? 'ALARM' : 'WARNING'}',
-        '${alarm_type} — ${machineName}',
-        '${message || ''}', '/dashboard')`
-    ).join(',');
-
+    /* Parameters, not string-built SQL: the message comes from the machine
+       controller, and one containing an apostrophe used to break the insert. */
     await db.query(
       `INSERT INTO notifications (company_id, user_id, type, title, message, link)
-       VALUES ${values}`
+       SELECT $1, t.user_id, $2, $3, $4, t.link
+         FROM unnest($5::int[], $6::text[]) AS t(user_id, link)`,
+      [company_id, alarm_type === 'ALARM' ? 'ALARM' : 'WARNING', `${alarm_type} — ${machineName}`,
+       message || '', usersRes.rows.map(u => u.id), usersRes.rows.map(u => u.link)]
     );
   } catch (err) {
     console.error('createAlarmNotification error:', err.message);

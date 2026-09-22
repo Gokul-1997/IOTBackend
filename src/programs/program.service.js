@@ -179,9 +179,12 @@ async function notifyTransfer({ companyId, userId, ok, direction, programName, m
     : `"${programName}" could not be ${direction === 'DOWNLOAD' ? 'received from' : 'sent to'} ${machineSerial}. ${reason || ''}`.trim();
 
   try {
+    // unless the person switched Program transfer off in Settings
     await pool.query(
       `INSERT INTO notifications (company_id, user_id, type, title, message, link)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       SELECT $1, $2, $3, $4, $5, $6
+        WHERE NOT EXISTS (SELECT 1 FROM notification_preferences
+                           WHERE user_id = $2 AND notify_program_transfer = false)`,
       [companyId, userId, ok ? 'INFO' : 'WARNING', title, message, '/programs']
     );
   } catch (err) {
