@@ -20,7 +20,8 @@
  * agree with each other.
  */
 const db = require('../db');
-const { resolveWindow, scope, scopeViaMachine, parseMachineId } = require('./window');
+const { resolveWindow, scope, parseMachineId } = require('./window');
+const oeeSvc = require('./oee.dashboard.service');
 
 /* Stored as LOW/MEDIUM/HIGH/CRITICAL; the agreement asks for
    Critical / Non-Critical / Information. */
@@ -46,7 +47,6 @@ exports.getMaintenanceDashboard = async (req) => {
   const machineId = parseMachineId(req.query.machine_id);
   const win       = await resolveWindow(companyId, req.query);
   const s         = scope(companyId, win, machineId);
-  const sm        = scopeViaMachine(companyId, win, machineId);
 
   const alarmParams = machineId
     ? [companyId, win.from, win.to, machineId]
@@ -179,19 +179,11 @@ exports.getMaintenanceDashboard = async (req) => {
       GROUP BY 1`, alarmParams
     ),
 
-    /* average OEE across the window */
-    db.query(`
-      /* Scoped through the machine — oee_hourly.company_id is NULL on
-         almost every row, so the company filter matched nothing and this
-         tile read 0% for every company. */
-      SELECT ROUND(AVG(o.availability)::numeric,2)::float AS availability,
-             ROUND(AVG(o.performance)::numeric,2)::float  AS performance,
-             ROUND(AVG(o.quality)::numeric,2)::float      AS quality,
-             ROUND(AVG(o.oee)::numeric,2)::float          AS oee
-      FROM oee_hourly o
-      JOIN machines m ON m.id = o.machine_id
-      WHERE ${sm.sql}`, sm.params
-    ),
+    /* OEE over the window, worked out as the OEE Dashboard does (summed
+       run/planned time, output, rejects; performance from the job's cycle
+       time). Averaging oee_hourly read 0 — an hour with no parts has no
+       performance — while the OEE Dashboard showed the real figure. */
+    oeeSvc.machineTotals({ companyId, machineId, shiftId: win.shift ? win.shift.id : null, start: win.from, end: win.to }),
 
     /* production status for the window */
     db.query(`
@@ -260,7 +252,7 @@ exports.getMaintenanceDashboard = async (req) => {
     machines,
     health,
     alarms,
-    oee:        oeeRes.rows[0]  || { availability: null, performance: null, quality: null, oee: null },
+    oee:        oeeOf(oeeRes),
     production: prodRes.rows[0] || { produced: 0, run_seconds: 0, idle_seconds: 0 },
     rows:       rowsRes.rows,
     condition_trend: conditionRes.rows,
@@ -273,6 +265,12 @@ exports.getMaintenanceDashboard = async (req) => {
     unavailable: unavailableSignals(rowsRes.rows)
   };
 };
+
+/** The machine totals as the four OEE figures, null where unmeasurable. */
+function oeeOf(machineRows) {
+  const f = oeeSvc.fleetOee(machineRows.map(r => oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS)), oeeSvc.DEFAULT_THRESHOLDS);
+  return { availability: f.availability_pct, performance: f.performance_pct, quality: f.quality_pct, oee: f.oee_pct };
+}
 
 /* Which telemetry columns back each condition signal on Screen 2. */
 const SIGNAL_COLUMNS = {

@@ -106,20 +106,21 @@ describe('Factory dashboard', () => {
 });
 
 describe('Maintenance dashboard', () => {
-  test('joins machines and filters on m.company_id', async () => {
-    await runCapturingSql(maintSvc.getMaintenanceDashboard, req());
-    const q = oeeQuery();
+  const totalsQuery = () => mockDb.calls().find(c => /machine_current_job/.test(c.text) && /FROM production_hourly/.test(c.text));
 
-    expect(q).toBeTruthy();
-    expect(q.text).toMatch(/JOIN machines m ON m\.id = o\.machine_id/);
-    expect(q.text).toMatch(/m\.company_id = \$1/);
-    expect(q.text).not.toMatch(/FROM oee_hourly\s+WHERE\s+company_id/);
+  test('does not average oee_hourly — it uses the OEE Dashboard\'s totals', async () => {
+    await runCapturingSql(maintSvc.getMaintenanceDashboard, req({ machine_id: '7' }));
+    expect(oeeQuery()).toBeUndefined();
+    expect(totalsQuery().text).toMatch(/m\.company_id = \$1/);
+    expect(totalsQuery().params).toContain(7);
   });
 
-  test('binds exactly the parameters the OEE query references', async () => {
-    await runCapturingSql(maintSvc.getMaintenanceDashboard, req());
-    const q = oeeQuery();
-    const highest = Math.max(...[...q.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
-    expect(q.params.length).toBe(highest);
+  test('every query binds exactly the parameters it references', async () => {
+    await runCapturingSql(maintSvc.getMaintenanceDashboard, req({ machine_id: '7' }));
+    for (const q of mockDb.calls()) {
+      const refs = [...q.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1]));
+      const highest = refs.length ? Math.max(...refs) : 0;
+      expect(q.params ? q.params.length : 0).toBe(highest);
+    }
   });
 });
