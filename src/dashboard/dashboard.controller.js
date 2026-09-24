@@ -1,4 +1,5 @@
 const svc = require('./dashboard.service');
+const timelineSvc = require('./timeline.service');
 const factorySvc = require('./factory.service');
 const maintenanceSvc = require('./maintenance.service');
 const preventiveSvc  = require('./preventive.service');
@@ -44,6 +45,20 @@ exports.dashboard = async (req, res) => {
    MACHINE DETAIL
    GET /dashboard/:machine_id/detail
 ===================================================== */
+/* The current shift as Running / Idle / Alarm / Off periods, with its
+   breaks — the machine page's shift timeline. */
+exports.machineTimeline = async (req, res) => {
+  try {
+    const data = await timelineSvc.machineTimeline(req.params.machine_id, req.user.company_id);
+    if (!data) return res.status(404).json({ status: 'error', message: 'Machine not found' });
+    return res.json({ status: 'success', data });
+  } catch (err) {
+    if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
+    console.error('Machine timeline error:', err);
+    return res.status(500).json({ status: 'error', message: 'Failed to load the shift timeline' });
+  }
+};
+
 exports.machineDetail = async (req, res) => {
 
   try {

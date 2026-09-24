@@ -15,5 +15,8 @@ router.post('/', auth, permit('shift.create'), validate({
 router.put('/:id', auth, permit('shift.update'), ctrl.updateShift);
 router.patch('/:id/status', auth, permit('shift.update'), ctrl.toggleShift);
 router.delete('/:id', auth, permit('shift.update'), ctrl.deleteShift);
+// when the breaks happen, for the machine page's shift timeline
+router.get('/:id/breaks', auth, permit('shift.view'), ctrl.getBreaks);
+router.put('/:id/breaks', auth, permit('shift.update'), ctrl.saveBreaks);
 
 module.exports = router;

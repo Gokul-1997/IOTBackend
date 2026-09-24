@@ -56,3 +56,22 @@ exports.toggleShift = async (req, res) => {
     res.status(400).json({ status: 'error', message: e.message });
   }
 };
+
+/* Break windows: a clean status for every refusal — 400 bad input,
+   404 not this company's shift, 503 before migration 028. */
+exports.getBreaks = async (req, res) => {
+  try {
+    res.json({ status: 'success', data: await service.getBreaks(req.params.id, req.user.company_id) });
+  } catch (e) {
+    res.status(e.status || 500).json({ status: 'error', message: e.message });
+  }
+};
+
+exports.saveBreaks = async (req, res) => {
+  try {
+    const data = await service.saveBreaks(req.params.id, req.user.company_id, req.body?.breaks);
+    res.json({ status: 'success', data });
+  } catch (e) {
+    res.status(e.status || 500).json({ status: 'error', message: e.message });
+  }
+};

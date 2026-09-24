@@ -249,3 +249,102 @@ exports.toggleShift = async (req) => {
   `, [is_active, id, req.user.company_id]);
 
 };
+/* =====================================================
+   BREAK WINDOWS (migration 028)
+
+   When the breaks in a shift happen — "Tea Break 11:00–11:15" — for the
+   machine page's shift timeline. break_minutes stays the planned-time
+   total OEE uses; these do not change it.
+
+   The whole list is saved at once: a shift has a handful of breaks, and
+   replacing them together is the only way to check they do not overlap.
+===================================================== */
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
+const MAX_BREAKS = 10;
+const hm = t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+const breakError = (message, status = 400) => Object.assign(new Error(message), { status });
+
+/* Before 028 is applied the table does not exist; say so rather than 500. */
+const NOT_SET_UP = 'Break times are not set up on this server yet (database update 028 is pending).';
+const notSetUp = err => (err && err.code === '42P01') ? breakError(NOT_SET_UP, 503) : err;
+
+async function ownShift(shiftId, companyId) {
+  const id = Number(shiftId);
+  if (!Number.isInteger(id) || id <= 0) throw breakError('Shift not found', 404);
+  const { rows } = await pool.query(
+    `SELECT id, start_time, end_time FROM shifts WHERE id = $1 AND company_id = $2`, [id, companyId]);
+  if (!rows.length) throw breakError('Shift not found', 404);
+  return rows[0];
+}
+
+/** Minutes from shift start, and length — a break after midnight in a night
+ *  shift is later in the shift, not earlier in the day. */
+function placeInShift(shift, start, end) {
+  const s0  = hm(shift.start_time);
+  const len = ((hm(shift.end_time) - s0 + 1440) % 1440) || 1440;
+  const off = (hm(start) - s0 + 1440) % 1440;
+  const dur = (hm(end) - hm(start) + 1440) % 1440;
+  return { off, dur, len };
+}
+
+exports.getBreaks = async (shiftId, companyId) => {
+  const shift = await ownShift(shiftId, companyId);
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `SELECT id, break_name, to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time
+         FROM shift_breaks WHERE shift_id = $1 AND company_id = $2`, [shift.id, companyId]));
+  } catch (err) { throw notSetUp(err); }
+  return rows
+    .map(b => ({ ...b, ...placeInShift(shift, b.start_time, b.end_time) }))
+    .sort((a, b) => a.off - b.off)
+    .map(({ off, dur, len, ...b }) => ({ ...b, minutes: dur }));
+};
+
+exports.saveBreaks = async (shiftId, companyId, list) => {
+  const shift = await ownShift(shiftId, companyId);
+  if (!Array.isArray(list)) throw breakError('breaks must be a list');
+  if (list.length > MAX_BREAKS) throw breakError(`A shift can have at most ${MAX_BREAKS} breaks`);
+
+  const clean = list.map((b, i) => {
+    const name = String(b?.break_name ?? '').trim();
+    if (!name) throw breakError(`Break ${i + 1} needs a name`);
+    if (name.length > 60) throw breakError(`"${name.slice(0, 20)}…" is longer than 60 characters`);
+    if (!HHMM.test(String(b.start_time)) || !HHMM.test(String(b.end_time))) {
+      throw breakError(`${name}: start and end must be times, like 11:00`);
+    }
+    const start = String(b.start_time).slice(0, 5), end = String(b.end_time).slice(0, 5);
+    const { off, dur, len } = placeInShift(shift, start, end);
+    if (dur === 0) throw breakError(`${name}: the end must be after the start`);
+    if (off + dur > len) {
+      const f = t => String(t).slice(0, 5);
+      throw breakError(`${name} must fall inside the shift (${f(shift.start_time)}–${f(shift.end_time)})`);
+    }
+    return { name, start, end, off, dur };
+  }).sort((a, b) => a.off - b.off);
+
+  for (let i = 1; i < clean.length; i++) {
+    if (clean[i].off < clean[i - 1].off + clean[i - 1].dur) {
+      throw breakError(`${clean[i].name} overlaps ${clean[i - 1].name}`);
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM shift_breaks WHERE shift_id = $1 AND company_id = $2`, [shift.id, companyId]);
+    for (const b of clean) {
+      await client.query(
+        `INSERT INTO shift_breaks (company_id, shift_id, break_name, start_time, end_time)
+         VALUES ($1, $2, $3, $4, $5)`, [companyId, shift.id, b.name, b.start, b.end]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw notSetUp(err);
+  } finally {
+    client.release();
+  }
+  return exports.getBreaks(shift.id, companyId);
+};

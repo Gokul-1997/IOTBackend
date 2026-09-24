@@ -77,6 +77,7 @@ router.get('/maintenance-report', auth, access('page:maintenance-report:view'), 
 router.get('/maintenance-report/export/:format', auth, access('page:maintenance-report:export'), ctrl.exportMaintenanceReport);
 
 router.get('/live/:machine_id', auth, access('page:dashboard:live:view'), ctrl.machineDetail);
+router.get('/live/:machine_id/timeline', auth, access('page:dashboard:live:view'), ctrl.machineTimeline);
 
 
 
