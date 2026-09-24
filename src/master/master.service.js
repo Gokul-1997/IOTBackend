@@ -1,8 +1,9 @@
 const db = require("../db");
 
 const getMachineListService = async (plant_id, company_id) => {
+  // line_id lets a list of every machine be grouped by line (Quality's "All lines")
   const query = `
-    SELECT id, machine_serial_no
+    SELECT id, machine_serial_no, line_id
     FROM machines
     WHERE company_id = $1
       AND is_active = true
