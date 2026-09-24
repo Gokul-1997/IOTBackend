@@ -1,6 +1,42 @@
 const db = require('../db');
 
 const VALID_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
+const VALID_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+const VALID_ISSUE_TYPES = ['BREAKDOWN', 'ALARM', 'INSPECTION', 'OTHER'];
+
+/* An alarm's severity is the machine's word for how bad it is — CRITICAL or
+   NORMAL on these controllers, INFORMATION on others. A ticket's priority is
+   ours, and the column is an enum. Raising a ticket from an alarm passed the
+   severity straight through, so every NORMAL alarm (850 of 885 in the field)
+   failed with Postgres's own "invalid input value for enum ticket_priority".
+   The two vocabularies are translated here, in the one place both the web and
+   the mobile app go through. */
+const SEVERITY_TO_PRIORITY = {
+  CRITICAL: 'CRITICAL', FATAL: 'CRITICAL', EMERGENCY: 'CRITICAL',
+  MAJOR: 'HIGH', HIGH: 'HIGH', ALARM: 'HIGH',
+  NORMAL: 'MEDIUM', 'NON-CRITICAL': 'MEDIUM', NON_CRITICAL: 'MEDIUM',
+  WARNING: 'MEDIUM', MEDIUM: 'MEDIUM',
+  MINOR: 'LOW', LOW: 'LOW', INFO: 'LOW', INFORMATION: 'LOW', INFORMATIONAL: 'LOW'
+};
+
+/** A priority the column will accept, or a 400 saying what is allowed —
+ *  never a raw Postgres enum error. */
+function toPriority(value, fallback = 'MEDIUM') {
+  if (value === undefined || value === null || value === '') return fallback;
+  const v = String(value).trim().toUpperCase();
+  if (VALID_PRIORITIES.includes(v)) return v;
+  if (SEVERITY_TO_PRIORITY[v]) return SEVERITY_TO_PRIORITY[v];
+  throw { status: 400, message: `priority must be one of ${VALID_PRIORITIES.join(', ')}` };
+}
+
+function toIssueType(value, fallback = 'BREAKDOWN') {
+  if (value === undefined || value === null || value === '') return fallback;
+  const v = String(value).trim().toUpperCase();
+  if (VALID_ISSUE_TYPES.includes(v)) return v;
+  throw { status: 400, message: `issue_type must be one of ${VALID_ISSUE_TYPES.join(', ')}` };
+}
+
+exports.toPriority = toPriority;
 
 exports.getTickets = async ({ company_id, machine_id, status, priority, assigned_to, page = 1, limit = 20 }) => {
   const conditions = [`t.company_id = $1`];
@@ -88,7 +124,7 @@ exports.createTicket = async ({ company_id, machine_id, alarm_id, title, descrip
          (company_id, machine_id, alarm_id, title, description, issue_type, priority, status, assigned_to, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [company_id, machine_id, alarm_id || null, title, description || null,
-       issue_type || 'BREAKDOWN', priority || 'MEDIUM', status, assigned_to || null, created_by]
+       toIssueType(issue_type), toPriority(priority), status, assigned_to || null, created_by]
     );
     const ticket = res.rows[0];
 
@@ -110,6 +146,11 @@ exports.createTicket = async ({ company_id, machine_id, alarm_id, title, descrip
 
 exports.updateTicket = async (id, company_id, fields) => {
   const { title, description, issue_type, priority, parts_used, downtime_minutes } = fields;
+  /* null leaves the column as it is (COALESCE below); anything given is
+     checked here rather than by the enum, which answers with a 500. */
+  const unset = v => v === undefined || v === null || v === '';
+  const newPriority  = unset(priority)   ? null : toPriority(priority);
+  const newIssueType = unset(issue_type) ? null : toIssueType(issue_type);
   const res = await db.query(
     `UPDATE maintenance_tickets
      SET title = COALESCE($1, title),
@@ -121,7 +162,7 @@ exports.updateTicket = async (id, company_id, fields) => {
          updated_at = NOW()
      WHERE id = $7 AND company_id = $8
      RETURNING *`,
-    [title, description, issue_type, priority, parts_used, downtime_minutes, id, company_id]
+    [title, description, newIssueType, newPriority, parts_used, downtime_minutes, id, company_id]
   );
   if (!res.rowCount) throw { status: 404, message: 'Ticket not found' };
   return res.rows[0];

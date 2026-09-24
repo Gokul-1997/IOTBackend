@@ -230,3 +230,70 @@ describe('ticket.service.getTicketById', () => {
     expect(ticket.history[1].to_status).toBe('ASSIGNED');
   });
 });
+
+/*
+ * Alarm severity is not ticket priority. Raising a ticket from a NORMAL alarm
+ * sent "NORMAL" into the ticket_priority enum, and Postgres answered
+ * "invalid input value for enum ticket_priority" — so 850 of the 885 alarms
+ * in the field could not be ticketed at all, while a CRITICAL one worked by
+ * coincidence.
+ */
+describe('ticket priority is translated from alarm severity', () => {
+  const queueCreate = () => mockDb.queueResponse(
+    { rows: [], rowCount: 0 },
+    { rows: [{ id: 1 }], rowCount: 1 },
+    { rows: [], rowCount: 0 },
+    { rows: [], rowCount: 0 }
+  );
+  const priorityOf = () => mockDb.calls()[1].params[6];
+
+  test.each([
+    ['NORMAL', 'MEDIUM'], ['normal', 'MEDIUM'], ['CRITICAL', 'CRITICAL'],
+    ['INFORMATION', 'LOW'], ['WARNING', 'MEDIUM'], ['MAJOR', 'HIGH'], ['HIGH', 'HIGH']
+  ])('a %s alarm becomes a %s ticket', async (severity, expected) => {
+    queueCreate();
+    await svc.createTicket({ company_id, machine_id: 5, title: 'Alarm', issue_type: 'ALARM', priority: severity, created_by: 9 });
+    expect(priorityOf()).toBe(expected);
+  });
+
+  test('the four real priorities pass through untouched', async () => {
+    for (const p of ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']) {
+      resetDb();
+      queueCreate();
+      await svc.createTicket({ company_id, machine_id: 5, title: 't', priority: p, created_by: 9 });
+      expect(priorityOf()).toBe(p);
+    }
+  });
+
+  test('no priority given still defaults to MEDIUM', async () => {
+    queueCreate();
+    await svc.createTicket({ company_id, machine_id: 5, title: 't', created_by: 9 });
+    expect(priorityOf()).toBe('MEDIUM');
+  });
+
+  test('a word that is neither is a 400, not a database error', async () => {
+    await expect(svc.createTicket({ company_id, machine_id: 5, title: 't', priority: 'URGENT', created_by: 9 }))
+      .rejects.toMatchObject({ status: 400, message: 'priority must be one of LOW, MEDIUM, HIGH, CRITICAL' });
+  });
+
+  test('an unknown issue_type is a 400 as well', async () => {
+    await expect(svc.createTicket({ company_id, machine_id: 5, title: 't', issue_type: 'FIRE', created_by: 9 }))
+      .rejects.toMatchObject({ status: 400, message: 'issue_type must be one of BREAKDOWN, ALARM, INSPECTION, OTHER' });
+  });
+
+  test('updating a ticket translates severity and leaves blanks alone', async () => {
+    mockDb.queueResponse({ rows: [{ id: 1 }], rowCount: 1 });
+    await svc.updateTicket(1, company_id, { priority: 'NORMAL' });
+    expect(mockDb.calls()[0].params[3]).toBe('MEDIUM');
+
+    resetDb();
+    mockDb.queueResponse({ rows: [{ id: 1 }], rowCount: 1 });
+    await svc.updateTicket(1, company_id, { title: 'only the title' });
+    expect(mockDb.calls()[0].params[3]).toBeNull();   // priority untouched
+    expect(mockDb.calls()[0].params[2]).toBeNull();   // issue_type untouched
+  });
+
+  test('updating with a word that is neither is a 400', async () => {
+    await expect(svc.updateTicket(1, company_id, { priority: 'SUPER' })).rejects.toMatchObject({ status: 400 });
+  });
+});
