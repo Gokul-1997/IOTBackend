@@ -251,3 +251,75 @@ describe('export', () => {
     expect(rows[0]['Duration']).toBe('0h 10m');
   });
 });
+
+/*
+ * Clicking a KPI card narrows the Alarms Details table to the alarms behind
+ * that card (?show=). Only the table and its export — the cards and charts
+ * keep the whole picture — and each narrowing is the card's own definition,
+ * so the table total always equals the number on the card that was clicked.
+ */
+describe('KPI card drill-down', () => {
+  const listCall  = () => mockDb.calls().find(c => /LIMIT \$\d+ OFFSET/.test(c.text));
+  const countCall = () => mockDb.calls().find(c => /SELECT COUNT\(\*\)::int AS total\s+FROM machine_alarms/.test(c.text));
+  const kpiCall   = () => mockDb.calls().find(c => /AS max_duration_seconds/.test(c.text));
+
+  test.each([
+    ['critical', /UPPER\(a\.severity\) = 'CRITICAL'/],
+    ['normal',   /UPPER\(a\.severity\) <> 'CRITICAL'/],
+    ['open',     /a\.ended_at IS NULL/]
+  ])('show=%s narrows the table and its count the way the card counts', async (show, clause) => {
+    queueAll();
+    await svc.getAlarms({ company_id, show });
+    const tail = sql => sql.slice(sql.indexOf('WHERE'));
+    expect(tail(listCall().text)).toMatch(clause);
+    expect(tail(countCall().text)).toMatch(clause);
+    // the card itself reads the same definition
+    expect(kpiCall().text).toMatch(clause);
+  });
+
+  test('the cards and charts are not narrowed, so the other cards keep their figures', async () => {
+    queueAll();
+    await svc.getAlarms({ company_id, show: 'critical' });
+    for (const call of mockDb.calls()) {
+      if (call === listCall() || call === countCall()) continue;
+      expect(call.text).not.toMatch(/AND UPPER\(a\.severity\) = 'CRITICAL'\s*(LIMIT|ORDER|GROUP|$)/);
+    }
+    expect(kpiCall().text).toMatch(/COUNT\(\*\) FILTER \(WHERE UPPER\(a\.severity\) <> 'CRITICAL'\)/);
+  });
+
+  test('all, blank or missing leave the table whole', async () => {
+    for (const show of ['all', '', undefined]) {
+      resetDb(); queueAll();
+      await svc.getAlarms({ company_id, show });
+      expect(listCall().text).not.toMatch(/ended_at IS NULL(?!\))/);
+      expect(listCall().text).not.toMatch(/WHERE[\s\S]*AND UPPER\(a\.severity\)/);
+    }
+  });
+
+  test('is case-insensitive and echoed back, so the screen can say what it shows', async () => {
+    queueAll();
+    const res = await svc.getAlarms({ company_id, show: 'OPEN' });
+    expect(res.filters.show).toBe('open');
+  });
+
+  test('anything else is a 400 naming what is allowed, never SQL', async () => {
+    await expect(svc.getAlarms({ company_id, show: "open' OR 1=1 --" }))
+      .rejects.toMatchObject({ status: 400, message: 'show must be one of all, critical, normal, open' });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('binds exactly the parameters it references, with every other filter on', async () => {
+    const highest = sql => Math.max(0, ...[...String(sql).matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
+    queueAll();
+    await svc.getAlarms({ company_id, show: 'open', from: '2026-09-01', to: '2026-09-10', machine_id: 36,
+                          severity: 'CRITICAL', search: 'x', page: 2, limit: 50 });
+    for (const call of mockDb.calls()) expect(call.params.length).toBe(highest(call.text));
+  });
+
+  test('the export is what the table shows: narrowed and in the same order', async () => {
+    mockDb.queueResponse({ rows: [] }, { rows: [{ total: 0 }] });
+    await svc.getExportRows({ company_id, show: 'critical', sort: 'duration_seconds', dir: 'desc' });
+    expect(listCall().text).toMatch(/UPPER\(a\.severity\) = 'CRITICAL'/);
+    expect(listCall().text).toMatch(/ORDER BY duration_seconds DESC NULLS LAST/);
+  });
+});

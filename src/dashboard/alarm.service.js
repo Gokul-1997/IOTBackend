@@ -85,6 +85,26 @@ function buildFilter({ companyId, machineId, shiftId, alarmType, alarmCode, seve
   return { sql, params };
 }
 
+/*
+ * Clicking a KPI card narrows the Alarm Details table to the alarms behind
+ * that card. Only the table (and its export): the cards and charts keep the
+ * whole picture, so clicking "Critical" does not zero the "Normal" card the
+ * user is comparing it with. Each clause is the card's own definition in
+ * kpis() below, so the table's total always equals the number on the card.
+ */
+const SHOW_CLAUSES = {
+  critical: `UPPER(a.severity) = '${CRITICAL}'`,
+  normal:   `UPPER(a.severity) <> '${CRITICAL}'`,
+  open:     `a.ended_at IS NULL`
+};
+
+function narrow(filter, show) {
+  if (show === undefined || show === null || show === '' || show === 'all') return filter;
+  const clause = SHOW_CLAUSES[String(show).toLowerCase()];
+  if (!clause) throw httpError(`show must be one of all, ${Object.keys(SHOW_CLAUSES).join(', ')}`, 400);
+  return { sql: `${filter.sql} AND ${clause}`, params: filter.params };
+}
+
 /** Total, critical, normal, open, and the longest single alarm. */
 async function kpis(filter) {
   const { rows: [r] } = await pool.query(
@@ -316,13 +336,16 @@ exports.getAlarms = async (q = {}) => {
     search: (q.search || '').trim(), start, end
   });
 
+  // checked before any query is sent: a bad value must cost nothing
+  const tableFilter = narrow(filter, q.show);
+
   // one day selected: the trend goes hour by hour, as the design draws it
   const oneDay = q.from && q.to && q.from === q.to;
 
   const [k, machines, shifts, severity, tr, rows, f, top] = await Promise.all([
     kpis(filter), byMachine(filter), byShift(filter), bySeverity(filter),
     oneDay ? hourlyTrend(filter, q.from) : trend(filter, { start, end }),
-    list(filter, q), facets(companyId, { start, end }), longest(filter)
+    list(tableFilter, q), facets(companyId, { start, end }), longest(filter)
   ]);
 
   return {
@@ -330,7 +353,8 @@ exports.getAlarms = async (q = {}) => {
       from: q.from || null, to: q.to || null,
       machine_id: machineId, shift_id: shiftId,
       alarm_type: q.alarm_type || null, alarm_code: q.alarm_code || null,
-      severity: q.severity || null, search: (q.search || '').trim() || null
+      severity: q.severity || null, search: (q.search || '').trim() || null,
+      show: q.show && q.show !== 'all' ? String(q.show).toLowerCase() : null
     },
     kpis: { ...k, longest: top },
     by_machine: machines,
@@ -356,8 +380,9 @@ exports.getExportRows = async (q = {}) => {
   });
 
   // Bounded: an unbounded export on a year of alarms is a request that
-  // never returns and a spreadsheet nobody can open.
-  const rows = await list(filter, { page: 1, limit: 200 });
+  // never returns and a spreadsheet nobody can open. Narrowed by the card
+  // the user clicked, and sorted as the table is, so the file matches it.
+  const rows = await list(narrow(filter, q.show), { page: 1, limit: 200, sort: q.sort, dir: q.dir });
 
   const hhmm = s => {
     const n = Number(s) || 0;

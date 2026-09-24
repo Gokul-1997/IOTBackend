@@ -9,16 +9,11 @@
  * exists at all.
  */
 const db = require('../db');
-const { parseDate, parseMachineId, httpError } = require('./window');
+const { severityClass } = require('./severity');
+const { parseRange, parseMachineId, httpError } = require('./window');
 
-/* Stored LOW/MEDIUM/HIGH/CRITICAL; the agreement reports Critical /
-   Non-Critical / Information, same mapping as Screens 1 and 2. */
-const SEVERITY_CLASS = `
-  CASE
-    WHEN severity = 'CRITICAL'         THEN 'CRITICAL'
-    WHEN severity IN ('HIGH','MEDIUM') THEN 'NON_CRITICAL'
-    ELSE 'INFORMATION'
-  END`;
+/* Critical / Non-Critical / Information — one definition, see severity.js. */
+const SEVERITY_CLASS = severityClass('severity');
 
 const OPEN_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS'];
 const TREND_DAYS = 7;
@@ -33,19 +28,34 @@ function parsePaging({ page, limit }) {
 exports.getPreventiveDashboard = async (req) => {
   const companyId = req.user.company_id;
   const machineId = parseMachineId(req.query.machine_id);
-  const day       = parseDate(req.query.date);
   const search    = (req.query.search || '').trim();
   const { limit, page, offset } = parsePaging(req.query);
 
-  /* The date filter bounds the day in plant time, matching Screens 1 and 2
-     so the same date means the same window everywhere. */
-  const from = `${day}T00:00:00+05:30`;
-  const to   = `${day}T23:59:59.999+05:30`;
+  /* A From–To range, as the design draws it ("18 Jun 2026 - 18 Jul 2026");
+     it was a single day, which could not show a week or a month at all.
+     Bounded in plant time, like Screens 1 and 2. A legacy ?date= still
+     means that one day. */
+  const range = parseRange(req.query);
+  const { start: from, end: to } = range;
 
   const alarmScope   = machineId ? 'AND a.machine_id = $4'  : '';
   const alarmParams  = machineId ? [companyId, from, to, machineId] : [companyId, from, to];
-  const ticketScope  = machineId ? 'AND t.machine_id = $2'  : '';
-  const ticketParams = machineId ? [companyId, machineId]   : [companyId];
+
+  /* The ticket cards count PM tickets raised in the range, so every card
+     moves with the dates: "3 open of 12 raised" is then about the same 12.
+     They used to ignore the date entirely, so changing it changed nothing. */
+  const ticketScope  = `AND t.created_at >= $2 AND t.created_at <= $3 ${machineId ? 'AND t.machine_id = $4' : ''}`;
+  const ticketParams = machineId ? [companyId, from, to, machineId] : [companyId, from, to];
+  const statusIdx    = ticketParams.length + 1;
+
+  /* The critical alarm trend covers the range, and never fewer than the
+     seven days the agreement names — a one-day range still shows its week. */
+  const trendFrom = range.days >= TREND_DAYS ? range.from
+    : new Date(Date.parse(`${range.to}T00:00:00Z`) - (TREND_DAYS - 1) * 86400000).toISOString().slice(0, 10);
+
+  /* The ticket list is the backlog to work through, so it is not bounded by
+     the dates: a ticket raised last month and still open needs doing today. */
+  const listBase = machineId ? [companyId, machineId] : [companyId];
 
   /* Ticket list: optional free-text search across the fields a technician
      would actually search by. ILIKE with a leading wildcard cannot use a
@@ -58,7 +68,7 @@ exports.getPreventiveDashboard = async (req) => {
     ${machineId ? 'AND t.machine_id = $2' : ''}
     ${search ? `AND (t.title ILIKE $${searchIdx} OR m.machine_serial_no ILIKE $${searchIdx}
                      OR COALESCE(al.alarm_type,'') ILIKE $${searchIdx})` : ''}`;
-  const listParams = search ? [...ticketParams, `%${search}%`] : [...ticketParams];
+  const listParams = search ? [...listBase, `%${search}%`] : [...listBase];
 
   const [
     alarmKpiRes, ticketKpiRes, resolutionRes, trendRes,
@@ -66,7 +76,7 @@ exports.getPreventiveDashboard = async (req) => {
     listRes, listCountRes, triggerRes
   ] = await Promise.all([
 
-    /* critical alarms for the selected day */
+    /* critical alarms in the range */
     db.query(`
       SELECT COUNT(*)::int AS total,
              COUNT(*) FILTER (WHERE a.is_resolved IS NOT TRUE)::int AS open
@@ -75,22 +85,20 @@ exports.getPreventiveDashboard = async (req) => {
         AND a.severity = 'CRITICAL' ${alarmScope}`, alarmParams
     ),
 
-    /* PM ticket counts. Deliberately not date-filtered: an open ticket
-       raised last week still needs attention today, and the requirement is
-       "total open", not "opened on this date". */
+    /* PM tickets raised in the range: how many, and where they stand now */
     db.query(`
       SELECT
         COUNT(*)::int                                                          AS generated,
-        COUNT(*) FILTER (WHERE t.status = ANY($${machineId ? 3 : 2}::ticket_status[]))::int AS open,
+        COUNT(*) FILTER (WHERE t.status = ANY($${statusIdx}::ticket_status[]))::int AS open,
         COUNT(*) FILTER (WHERE t.status IN ('RESOLVED','CLOSED'))::int         AS completed,
-        COUNT(*) FILTER (WHERE t.status = ANY($${machineId ? 3 : 2}::ticket_status[])
+        COUNT(*) FILTER (WHERE t.status = ANY($${statusIdx}::ticket_status[])
                            AND t.due_date IS NOT NULL AND t.due_date < NOW())::int AS overdue
       FROM maintenance_tickets t
       WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
       [...ticketParams, OPEN_STATUSES]
     ),
 
-    /* average time from raised to resolved */
+    /* average time from raised to resolved, for tickets raised in the range */
     db.query(`
       SELECT ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600)::numeric, 1)::float
                AS avg_resolution_hours,
@@ -100,27 +108,30 @@ exports.getPreventiveDashboard = async (req) => {
         AND t.resolved_at IS NOT NULL ${ticketScope}`, ticketParams
     ),
 
-    /* critical alarm trend, last 7 days ending on the selected date.
+    /* critical alarm trend, one point per plant-time day across the range.
        generate_series so days with no alarms appear as zero rather than
-       vanishing and making the line lie about the shape. */
+       vanishing and making the line lie about the shape. Days are cut at
+       IST midnight: comparing to a bare date used the database session's
+       zone, which put a 02:00 IST alarm on the previous day. */
     db.query(`
       WITH days AS (
-        SELECT generate_series(($2::date - INTERVAL '${TREND_DAYS - 1} days')::date, $2::date, '1 day') AS d
+        SELECT generate_series($2::date, $3::date, '1 day')::date AS d
       )
-      SELECT days.d::date AS day,
+      SELECT days.d AS day,
              COUNT(a.id)::int AS critical
       FROM days
       LEFT JOIN machine_alarms a
         ON a.company_id = $1
        AND a.severity = 'CRITICAL'
-       AND a.started_at >= days.d
-       AND a.started_at <  days.d + INTERVAL '1 day'
-       ${machineId ? 'AND a.machine_id = $3' : ''}
+       AND a.started_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+       AND a.started_at <  (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+       AND (a.started_at AT TIME ZONE 'Asia/Kolkata')::date = days.d
+       ${machineId ? 'AND a.machine_id = $4' : ''}
       GROUP BY days.d ORDER BY days.d`,
-      machineId ? [companyId, day, machineId] : [companyId, day]
+      machineId ? [companyId, trendFrom, range.to, machineId] : [companyId, trendFrom, range.to]
     ),
 
-    /* alarms by severity class for the day */
+    /* alarms by severity class in the range */
     db.query(`
       SELECT ${SEVERITY_CLASS} AS class, COUNT(*)::int AS total
       FROM machine_alarms a
@@ -151,8 +162,9 @@ exports.getPreventiveDashboard = async (req) => {
       LIMIT 10`, alarmParams
     ),
 
-    /* PM ticket status split — the three the agreement names, with the rest
-       folded in so the parts always sum to the whole */
+    /* PM ticket status split for tickets raised in the range — the three
+       the agreement names, with the rest folded in so the parts always sum
+       to the whole */
     db.query(`
       SELECT
         COUNT(*) FILTER (WHERE t.status = 'OPEN')::int                    AS open,
@@ -222,6 +234,7 @@ exports.getPreventiveDashboard = async (req) => {
         SELECT COUNT(*)::int AS tickets
         FROM maintenance_tickets t2
         WHERE t2.threshold_id = th.id
+          AND t2.created_at >= $2 AND t2.created_at <= $3
       ) tk ON TRUE
       WHERE th.company_id = $1
       ORDER BY occurrences DESC, th.alarm_type`,
@@ -239,7 +252,11 @@ exports.getPreventiveDashboard = async (req) => {
   const total = listCountRes.rows[0].total;
 
   return {
-    filters: { date: day, machine_id: machineId, search: search || null },
+    filters: {
+      from: range.from, to: range.to, days: range.days,
+      date: range.to,               // older clients read this
+      machine_id: machineId, search: search || null
+    },
     updated_at: new Date().toISOString(),
 
     kpis: {

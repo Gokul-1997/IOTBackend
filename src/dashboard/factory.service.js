@@ -10,20 +10,15 @@
  * the factory-level view that sits above it.
  */
 const db = require('../db');
+const { severityClass } = require('./severity');
 // resolveWindow/scope moved to ./window.js when the Maintenance dashboard
 // needed the same filter behaviour — two screens filtered identically must
 // resolve identically, so there is one copy rather than two.
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
 
-/* Alarm severities are stored as LOW/MEDIUM/HIGH/CRITICAL, but the
-   agreement asks for Critical / Non-Critical / Information. */
-const SEVERITY_CLASS = `
-  CASE
-    WHEN severity = 'CRITICAL'        THEN 'CRITICAL'
-    WHEN severity IN ('HIGH','MEDIUM') THEN 'NON_CRITICAL'
-    ELSE 'INFORMATION'
-  END`;
+/* Critical / Non-Critical / Information — one definition, see severity.js. */
+const SEVERITY_CLASS = severityClass('severity');
 
 /**
  * Resolve the reporting window.

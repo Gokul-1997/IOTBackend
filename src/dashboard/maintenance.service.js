@@ -20,17 +20,12 @@
  * agree with each other.
  */
 const db = require('../db');
+const { severityClass } = require('./severity');
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
 
-/* Stored as LOW/MEDIUM/HIGH/CRITICAL; the agreement asks for
-   Critical / Non-Critical / Information. */
-const SEVERITY_CLASS = `
-  CASE
-    WHEN severity = 'CRITICAL'         THEN 'CRITICAL'
-    WHEN severity IN ('HIGH','MEDIUM') THEN 'NON_CRITICAL'
-    ELSE 'INFORMATION'
-  END`;
+/* Critical / Non-Critical / Information — one definition, see severity.js. */
+const SEVERITY_CLASS = severityClass('severity');
 
 /*
  * Any telemetry_raw read needs a received_at bound. It is a Timescale

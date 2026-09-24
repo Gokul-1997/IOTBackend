@@ -147,3 +147,45 @@ describe('scope', () => {
     expect(s.sql).toBe('company_id = $2 AND hour_start >= $3 AND hour_start < $4 AND machine_id = $5');
   });
 });
+
+describe('parseRange', () => {
+  const { parseRange, plantToday } = require('../../src/dashboard/window');
+
+  test('from and to become plant-time bounds, inclusive of the last day', () => {
+    expect(parseRange({ from: '2026-09-01', to: '2026-09-24' })).toEqual({
+      from: '2026-09-01', to: '2026-09-24', days: 24,
+      start: '2026-09-01T00:00:00+05:30', end: '2026-09-24T23:59:59.999+05:30'
+    });
+  });
+
+  test('nothing given is the last 7 days ending today in plant time', () => {
+    const r = parseRange({});
+    expect(r.to).toBe(plantToday());
+    expect(r.days).toBe(7);
+  });
+
+  test('a legacy single date is that one day', () => {
+    expect(parseRange({ date: '2026-09-20' })).toMatchObject({ from: '2026-09-20', to: '2026-09-20', days: 1 });
+  });
+
+  test('from alone runs to today; to alone is that one day', () => {
+    expect(parseRange({ from: '2026-09-20' }).to).toBe(plantToday());
+    expect(parseRange({ to: '2026-09-20' })).toMatchObject({ from: '2026-09-20', to: '2026-09-20' });
+  });
+
+  test('crosses a month and a leap day correctly', () => {
+    expect(parseRange({ from: '2028-02-27', to: '2028-03-01' }).days).toBe(4);
+  });
+
+  test('refuses a backwards range and one longer than a year', () => {
+    expect(() => parseRange({ from: '2026-09-24', to: '2026-09-01' })).toThrow('from must not be after to');
+    expect(() => parseRange({ from: '2025-09-01', to: '2026-09-24' })).toThrow('at most 366 days');
+    expect(parseRange({ from: '2025-09-24', to: '2026-09-24' }).days).toBe(366);
+  });
+
+  test('today is taken in plant time, not UTC', () => {
+    const real = Date.now;
+    Date.now = () => Date.parse('2026-09-23T20:00:00Z');   // 01:30 on the 24th in IST
+    try { expect(plantToday()).toBe('2026-09-24'); } finally { Date.now = real; }
+  });
+});

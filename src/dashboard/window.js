@@ -138,4 +138,47 @@ function scopeViaMachine(companyId, win, machineId, startIdx = 1) {
   return { sql, params };
 }
 
-module.exports = { resolveWindow, scope, scopeViaMachine, parseDate, parseMachineId, httpError };
+/** Today's date in plant time. toISOString() is UTC, which before 05:30 IST
+ *  is still yesterday. */
+function plantToday() {
+  return new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+const MAX_RANGE_DAYS = 366;
+
+/**
+ * A From–To date range in plant time, for the screens the design draws with
+ * one ("18 Jun 2026 - 18 Jul 2026").
+ *
+ *  - from/to are validated as real calendar dates;
+ *  - a legacy single `date` is read as that one day, so an older client or
+ *    a saved link keeps working;
+ *  - nothing given means the last 7 days ending today;
+ *  - from after to, or a range over a year, is refused as a 400 — an
+ *    unbounded range is the query that works in testing and stops
+ *    returning once there is a year of alarms behind it.
+ */
+function parseRange({ from, to, date } = {}) {
+  let f, t;
+  if (from || to) {
+    t = to ? parseDate(to) : plantToday();
+    f = from ? parseDate(from) : t;
+  } else if (date) {
+    f = t = parseDate(date);
+  } else {
+    t = plantToday();
+    f = new Date(Date.parse(`${t}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+  }
+  if (f > t) throw httpError('from must not be after to', 400);
+
+  const days = Math.round((Date.parse(`${t}T00:00:00Z`) - Date.parse(`${f}T00:00:00Z`)) / 86400000) + 1;
+  if (days > MAX_RANGE_DAYS) throw httpError(`a date range can cover at most ${MAX_RANGE_DAYS} days`, 400);
+
+  return {
+    from: f, to: t, days,
+    start: `${f}T00:00:00+05:30`,
+    end:   `${t}T23:59:59.999+05:30`
+  };
+}
+
+module.exports = { resolveWindow, scope, scopeViaMachine, parseDate, parseRange, plantToday, parseMachineId, httpError };
