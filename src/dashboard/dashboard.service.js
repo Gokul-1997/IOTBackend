@@ -673,6 +673,20 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
 
     const live = liveRows[0] || {};
 
+    /* The alarm the controller is in, so the screen can name it. The machine
+       list shows an alarm as its own flag beside Running/Idle — a CNC in
+       alarm usually stops, so it reads IDLE — but this response dropped the
+       flag, and the machine page showed a plain "IDLE" for a machine the list
+       was flashing red. Open rows only, newest first; the machine was checked
+       against the caller's company above. */
+    const { rows: activeAlarms } = await db.query(`
+      SELECT alarm_code, alarm_type, message, severity, started_at
+        FROM machine_alarms
+       WHERE machine_id = $1 AND ended_at IS NULL
+       ORDER BY started_at DESC
+       LIMIT 5
+    `, [machineId]);
+
     /* ================= ACCEPTED QTY ================= */
     /*
      * Use production_hourly.produced_qty as the source — same as dashboard.
@@ -811,6 +825,9 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       live: {
         // Use derived status (same OFFLINE threshold as dashboard card)
         machine_status:  detailStatus,
+        // the same rule the machine list uses for its red card
+        alarm:           !!live.alarm,
+        active_alarms:   activeAlarms,
         mode:            live?.mode || null,
         spindle_load:    isOnline ? Number(live?.spindle_load || 0) : 0,
         feed_rate:       isOnline ? Number(live?.feed_rate    || 0) : 0,
