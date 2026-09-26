@@ -26,6 +26,7 @@
  *    TC-QE-08  rework_qty defaults to 0 when not sent
  *    TC-QE-09  401 when no auth token
  *    TC-QE-10  negative reject_qty rejected by validate middleware
+ *    TC-QE-13  403 when the company has not been granted quality edit
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
@@ -38,12 +39,20 @@ beforeEach(() => resetDb());
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-function makeApp(user = fakeUser()) {
+/**
+ * POST /entry also checks page:quality:edit against the company's grants,
+ * read from the Redis cache (the in-memory stand-in from
+ * __tests__/setup/isolate.js). Seeding it here keeps the queued DB rows for
+ * the handler. These tests used to pass only when the production Redis
+ * happened to hold company 4's real grants.
+ */
+function makeApp(user = fakeUser(), grants = ['page:quality', 'page:quality:edit']) {
   jest.resetModules();
   jest.doMock('../../src/middleware/auth.middleware', () =>
     (req, _res, next) => { req.user = user; next(); });
   jest.doMock('../../src/db', () => mockDb);
   const router = require('../../src/quality/quality.routes');
+  require('../../src/redis').set(`company_grants:${user.company_id}`, JSON.stringify(grants), 'EX', 60);
   return buildApp({ mountPath: '/api/quality', router });
 }
 
@@ -314,5 +323,14 @@ describe('POST /api/quality/entry', () => {
     const insertCall = calls.find(c => c.text.includes('INSERT INTO quality_entries'));
     expect(insertCall.params).toContain('2026-05-06');
     expect(insertCall.text).toMatch(/shift_date/);
+  });
+
+  test('TC-QE-13 403 when the company has not been granted quality edit', async () => {
+    const res = await request(makeApp(fakeUser(), ['page:quality', 'page:quality:view']))
+      .post('/api/quality/entry')
+      .send(VALID_BODY);
+
+    expect(res.status).toBe(403);
+    expect(mockDb.calls().some(c => /quality_entries/.test(c.text))).toBe(false);
   });
 });

@@ -13,15 +13,19 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-(async () => {
-  try {
-    const client = await pool.connect();
-    console.log('✅ DB connected successfully');
-    client.release();
-  } catch (err) {
-    console.error('❌ DB connection failed:', err.message);
-    process.exit(1); // fail fast
-  }
-})();
+// Check the connection at start-up — not under tests, where exiting the
+// process would take the test worker (and every test file in it) down.
+if (process.env.NODE_ENV !== 'test') {
+  (async () => {
+    try {
+      const client = await pool.connect();
+      console.log('✅ DB connected successfully');
+      client.release();
+    } catch (err) {
+      console.error('❌ DB connection failed:', err.message);
+      process.exit(1); // fail fast
+    }
+  })();
+}
 
 module.exports = pool;

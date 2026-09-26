@@ -16,6 +16,10 @@ const redis = new Redis(redisUrl, {
   // Optional performance
   enableAutoPipelining: true,
 
+  // Under tests, connect only if a command is actually sent (tests use an
+  // in-memory stand-in; loading this file must not open a connection)
+  lazyConnect: process.env.NODE_ENV === 'test',
+
   // Controlled reconnect backoff
   retryStrategy: (times) => {
     // times = number of reconnect attempts
