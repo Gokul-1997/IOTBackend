@@ -11,7 +11,7 @@ exports.getAlarms = async (req, res) => {
     });
     res.json({ success: true, ...result });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    res.status(e.status || 500).json({ success: false, message: e.message });
   }
 };
 

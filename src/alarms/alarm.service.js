@@ -141,21 +141,50 @@ exports.resolveAlarm = async ({ alarm_id, resolved_by, resolution_note, company_
   return result.rows[0];
 };
 
-exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, page = 1, limit = 20 }) => {
+/*
+ * The alarm list. Besides machine and resolved:
+ *  - active=true: alarms the controller has not cleared yet (ended_at is
+ *    null) — "active now". "Unresolved" alone counted every alarm nobody
+ *    had clicked Resolve on, hundreds of them long cleared;
+ *  - severity=CRITICAL | NORMAL (NORMAL = anything not critical, the way
+ *    the Alarm Report counts it).
+ * Bad input is a 400, not a 500: page=abc reached the SQL as NaN.
+ */
+const badRequest = message => ({ status: 400, message });
+const positiveInt = (v, label) => {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) throw badRequest(`${label} must be a positive whole number`);
+  return n;
+};
+const flag = (v, label) => {
+  if (v === undefined || v === null || v === '') return null;
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false') return false;
+  throw badRequest(`${label} must be true or false`);
+};
+
+exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, active, severity, page = 1, limit = 20 }) => {
+  const machineId = positiveInt(machine_id, 'machine_id');
+  const resolved = flag(is_resolved, 'is_resolved');
+  const isActive = flag(active, 'active');
+  const sev = severity === undefined || severity === '' ? null : String(severity).toUpperCase();
+  if (sev !== null && sev !== 'CRITICAL' && sev !== 'NORMAL') throw badRequest('severity must be CRITICAL or NORMAL');
+  const pageNum = positiveInt(page, 'page') ?? 1;
+  const limitNum = Math.min(100, positiveInt(limit, 'limit') ?? 20);
+
   const conditions = [];
   const params = [];
   let i = 1;
 
   if (!is_snt_super) { conditions.push(`a.company_id = $${i++}`); params.push(company_id); }
-  if (machine_id)    { conditions.push(`a.machine_id = $${i++}`); params.push(machine_id); }
-  if (is_resolved !== undefined && is_resolved !== '') {
-    conditions.push(`a.is_resolved = $${i++}`);
-    params.push(is_resolved === 'true' || is_resolved === true);
-  }
+  if (machineId)     { conditions.push(`a.machine_id = $${i++}`); params.push(machineId); }
+  if (resolved !== null) { conditions.push(`a.is_resolved = $${i++}`); params.push(resolved); }
+  if (isActive !== null) conditions.push(isActive ? 'a.ended_at IS NULL' : 'a.ended_at IS NOT NULL');
+  if (sev === 'CRITICAL') conditions.push(`UPPER(a.severity) = 'CRITICAL'`);
+  if (sev === 'NORMAL')   conditions.push(`UPPER(a.severity) <> 'CRITICAL'`);
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, parseInt(limit) || 20);
   const offset = (pageNum - 1) * limitNum;
 
   const countRes = await db.query(`SELECT COUNT(*) FROM machine_alarms a ${where}`, params);
@@ -167,7 +196,7 @@ exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, 
      JOIN machines m ON m.id = a.machine_id
      LEFT JOIN users u ON u.id = a.resolved_by
      ${where}
-     ORDER BY a.started_at DESC
+     ORDER BY (a.ended_at IS NULL) DESC, a.started_at DESC, a.id DESC
      LIMIT $${i++} OFFSET $${i++}`,
     [...params, limitNum, offset]
   );
