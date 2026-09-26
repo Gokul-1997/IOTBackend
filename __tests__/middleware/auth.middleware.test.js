@@ -14,6 +14,9 @@
  *  TC-AM-10  SNT_SUPER role derived from JWT
  *  TC-AM-11  is_snt_super true when decoded.is_snt_super is true
  *  TC-AM-12  401 when an unexpected error is thrown
+ *  TC-AM-13  Redis read failing falls back to the database
+ *  TC-AM-14  Redis write failing still lets the request through
+ *  TC-AM-15  an inactive account is still refused when Redis is down
  */
 
 jest.mock('../../src/db',    () => require('../helpers/mockDb').mockDb);
@@ -262,7 +265,7 @@ test('TC-AM-11 is_snt_super = true when decoded.is_snt_super flag is true', asyn
 
 test('TC-AM-12 401 when an unexpected error occurs during processing', async () => {
   jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockRejectedValue(new Error('Redis down'));
+  mockDb.query.mockRejectedValueOnce(new Error('database down'));
 
   const res  = makeRes();
   const next = jest.fn();
@@ -272,4 +275,48 @@ test('TC-AM-12 401 when an unexpected error occurs during processing', async () 
   expect(next).not.toHaveBeenCalled();
   expect(res._status).toBe(401);
   expect(res._body.message).toMatch(/Unauthorized/i);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Redis is a cache: slow or down must not sign anyone out
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ACTIVE_ROW = { id: 1, username: 'u', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: true, company_active: true };
+
+test('TC-AM-13 Redis read failing falls back to the database and lets the request through', async () => {
+  jwt.verify.mockReturnValue({ ...DECODED_BASE });
+  redis.get.mockRejectedValue(new Error('Command timed out'));
+  mockDb.queueResponse({ rows: [ACTIVE_ROW] });
+
+  const res  = makeRes();
+  const next = jest.fn();
+  await middleware(makeReq('valid-token'), res, next);
+
+  expect(next).toHaveBeenCalled();
+  expect(res._status).toBeNull();
+});
+
+test('TC-AM-14 Redis write failing still lets the request through', async () => {
+  jwt.verify.mockReturnValue({ ...DECODED_BASE });
+  redis.setex.mockRejectedValueOnce(new Error('Command timed out'));
+  mockDb.queueResponse({ rows: [ACTIVE_ROW] });
+
+  const res  = makeRes();
+  const next = jest.fn();
+  await middleware(makeReq('valid-token'), res, next);
+
+  expect(next).toHaveBeenCalled();
+});
+
+test('TC-AM-15 an inactive account is still refused when Redis is down', async () => {
+  jwt.verify.mockReturnValue({ ...DECODED_BASE });
+  redis.get.mockRejectedValue(new Error('Command timed out'));
+  mockDb.queueResponse({ rows: [{ ...ACTIVE_ROW, is_active: false }] });
+
+  const res  = makeRes();
+  const next = jest.fn();
+  await middleware(makeReq('valid-token'), res, next);
+
+  expect(next).not.toHaveBeenCalled();
+  expect(res._status).toBe(403);
 });

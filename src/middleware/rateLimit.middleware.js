@@ -15,11 +15,16 @@ function makeStore(prefix) {
 
 const isRedisReady = () => redis.status === 'ready';
 
+/* skip covers Redis being disconnected; passOnStoreError covers it being
+   connected but slow — a timed-out store call used to fail every request
+   with a 500. Either way requests go through unlimited rather than not at all. */
+
 const standardLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 1000,
   store: makeStore('rl:standard:'),
   skip: (req) => req.method === 'OPTIONS' || !isRedisReady(),
+  passOnStoreError: true,
   keyGenerator: (req) => ipKeyGenerator(req.ip), // IPv6-safe fallback
   standardHeaders: true,
   legacyHeaders: false,
@@ -31,6 +36,7 @@ const authLimiter = rateLimit({
   limit: 20,
   store: makeStore('rl:auth:'),
   skip: (req) => req.method === 'OPTIONS' || !isRedisReady(),
+  passOnStoreError: true,
   keyGenerator: (req) => ipKeyGenerator(req.ip),
   standardHeaders: true,
   legacyHeaders: false,

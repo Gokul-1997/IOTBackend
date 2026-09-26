@@ -31,9 +31,13 @@ module.exports = async (req, res, next) => {
     const permissions  = decoded.permissions || [];
     const is_snt_super = roles.includes('SNT_SUPER') || decoded.is_snt_super === true;
 
-    // Check Redis cache before hitting DB
+    // Check Redis cache before hitting DB. The cache is best effort: a slow
+    // or unreachable Redis used to throw here, and the catch below answered
+    // 401 — the web app then signed every user out. Now it is a cache miss.
     const cacheKey = `user:${decoded.user_id}`;
-    const cached = await redis.get(cacheKey);
+    let cached = null;
+    try { cached = await redis.get(cacheKey); }
+    catch (err) { console.warn('AUTH cache read skipped:', err.message); }
 
     if (cached) {
       const user = JSON.parse(cached);
@@ -72,16 +76,18 @@ module.exports = async (req, res, next) => {
     const user = rows[0];
     if (!user.is_active) return res.status(403).json({ message: 'Account inactive' });
 
-    // Cache the DB record for 60 seconds
-    await redis.setex(cacheKey, 60, JSON.stringify({
-      id:        user.id,
-      username:  user.username,
-      plant_id:  user.plant_id,
-      company_id: user.company_id,
-      user_type: user.user_type,
-      is_active: user.is_active,
-      company_active: user.company_active
-    }));
+    // Cache the DB record for 60 seconds (best effort, as the read above)
+    try {
+      await redis.setex(cacheKey, 60, JSON.stringify({
+        id:        user.id,
+        username:  user.username,
+        plant_id:  user.plant_id,
+        company_id: user.company_id,
+        user_type: user.user_type,
+        is_active: user.is_active,
+        company_active: user.company_active
+      }));
+    } catch (err) { console.warn('AUTH cache write skipped:', err.message); }
 
     if (user.company_active === false) return companyDisabled(res);
 
