@@ -220,3 +220,61 @@ describe('maintenance dashboard — condition signals', () => {
     expect(res.condition_trend).toEqual([{ hour_start: '2026-08-06T09:00:00Z', servo_temp_x: 27 }]);
   });
 });
+
+/*
+ * The screen as the design draws it (2026-09-29): the selected machine's
+ * last reading of the day, its photo, and cycle time hour by hour.
+ */
+describe('maintenance dashboard — machine card and cycle time', () => {
+
+  test('one machine selected: its readings are the latest within the day, not the last hour', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req({ machine_id: '7' }));
+    const rowsSql = sqlOf(1);
+    // a machine that stopped at 6 pm still shows its last condition at 8 pm
+    expect(rowsSql).toMatch(/t\.machine_id = \$4 AND t\.received_at >= \$2 AND t\.received_at < \$3/);
+    expect(rowsSql).not.toMatch(/NOW\(\) - INTERVAL '1 hour'/);
+  });
+
+  test('no machine selected: the fleet readings keep the one-hour bound', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req());
+    expect(sqlOf(1)).toMatch(/received_at > NOW\(\) - INTERVAL '1 hour'/);
+  });
+
+  test('the machine card gets the machine photo', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req());
+    expect(sqlOf(1)).toMatch(/m\.image_url/);
+  });
+
+  test('cycle time is queried only for one machine, bounded to the window', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req());
+    expect(mockDb.calls().some(c => /GROUP BY hour_start ORDER BY hour_start/.test(c.text))).toBe(false);
+
+    resetDb();
+    queueAll();
+    mockDb.queueResponse({ rows: [] }); // condition trend
+    await svc.getMaintenanceDashboard(req({ machine_id: '7' }));
+    const call = mockDb.calls().find(c => /GROUP BY hour_start ORDER BY hour_start/.test(c.text));
+    expect(call).toBeTruthy();
+    expect(call.text).toMatch(/hour_start >= \$2 AND hour_start < \$3 AND machine_id = \$4/);
+    const highest = Math.max(...[...call.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
+    expect(call.params.length).toBe(highest);
+    expect(call.params[0]).toBe(company_id);
+  });
+
+  test('cycle time is run time per part; an hour with no part has none, not zero', () => {
+    expect(svc.cycleTrend([
+      { hour_start: 'h1', produced: 2, run_seconds: 97 },
+      { hour_start: 'h2', produced: 0, run_seconds: 3600 },
+      { hour_start: 'h3', produced: '3', run_seconds: '150' }
+    ])).toEqual([
+      { hour_start: 'h1', produced: 2, cycle_seconds: 48.5 },
+      { hour_start: 'h2', produced: 0, cycle_seconds: null },
+      { hour_start: 'h3', produced: 3, cycle_seconds: 50 }
+    ]);
+    expect(svc.cycleTrend(null)).toEqual([]);
+  });
+});

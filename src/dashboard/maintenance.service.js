@@ -4,16 +4,14 @@
  * Machine-condition view: how healthy the fleet is right now, what is
  * alarming, and per-machine detail for whatever the operator selected.
  *
- * SCOPE NOTE — read before adding widgets.
- * The agreement also asks for servo load per axis, machine temperature,
- * CNC/APC battery voltage, insulation resistance (+ its trend) and cooling
- * fan / amplifier status. None of those exist: telemetry_raw carries 19
- * columns and none of them is a servo, temperature, battery, insulation or
- * fan reading, and no other table in the database has one either. The MQTT
- * collector that writes telemetry_raw is not in this repository, so adding
- * them is a change to that service plus a migration, not a change here.
- * Those panels are deliberately absent rather than filled with invented
- * numbers. See the Phase 2 gap list.
+ * Condition signals come from the FOCAS collector (pms-backend, columns added
+ * by migration 021): spindle speed/load/temperature, servo load and
+ * temperature per axis, encoder temperature, insulation resistance, CNC/APC
+ * battery voltage and fan status. Controllers differ in what they supply —
+ * in September 2026 no machine sent insulation resistance, batteries or
+ * fans — so every value is nullable and `unavailable` names the signals no
+ * machine has reported. The screen draws a "not reported" state for those,
+ * never an invented number.
  *
  * Everything below reads the same rollup tables as Screens 1 and the
  * machine dashboard (production_hourly, oee_hourly) so the three always
@@ -35,6 +33,11 @@ const SEVERITY_CLASS = severityClass('severity');
  * freshness rule, so it cannot change any machine's computed state.
  */
 const TELEMETRY_LOOKBACK = `INTERVAL '1 hour'`;
+/* For one selected machine the readings are its latest within the selected
+   day or shift instead: after a machine stops, the screen keeps showing its
+   last condition (with the time it was taken) rather than going blank an
+   hour later. One machine over one day is bounded and indexed — ~0.1 s
+   measured on production. */
 const FRESH_WINDOW       = `INTERVAL '60 seconds'`;
 
 exports.getMaintenanceDashboard = async (req) => {
@@ -47,7 +50,7 @@ exports.getMaintenanceDashboard = async (req) => {
     ? [companyId, win.from, win.to, machineId]
     : [companyId, win.from, win.to];
 
-  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, conditionRes] = await Promise.all([
+  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, conditionRes, cycleRes] = await Promise.all([
 
     /* fleet health: how many machines are reporting and not alarming.
        "Health" is not defined in the agreement, so it is stated plainly
@@ -110,8 +113,9 @@ exports.getMaintenanceDashboard = async (req) => {
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
         WHERE m.company_id = $1 AND m.is_active
-          AND t.received_at > NOW() - ${TELEMETRY_LOOKBACK}
-          ${machineId ? 'AND t.machine_id = $4' : ''}
+          ${machineId
+            ? 'AND t.machine_id = $4 AND t.received_at >= $2 AND t.received_at < $3'
+            : `AND t.received_at > NOW() - ${TELEMETRY_LOOKBACK}`}
         ORDER BY t.machine_id, t.received_at DESC
       ),
       runtime AS (
@@ -124,6 +128,7 @@ exports.getMaintenanceDashboard = async (req) => {
       SELECT
         m.id AS machine_id,
         m.machine_serial_no,
+        m.image_url,
         j.component_id,
         j.part_name,
         j.target_qty,
@@ -212,6 +217,19 @@ exports.getMaintenanceDashboard = async (req) => {
              AND t.received_at >= $2 AND t.received_at < $3
            GROUP BY 1 ORDER BY 1`,
           [companyId, win.from, win.to, machineId])
+      : Promise.resolve({ rows: [] }),
+
+    /* cycle time, hour by hour: run time over parts made in that hour, for
+       the one machine selected. An hour with no part has no cycle time
+       (null), not a cycle of zero. */
+    machineId
+      ? db.query(`
+          SELECT hour_start,
+                 COALESCE(SUM(produced_qty), 0)::int AS produced,
+                 COALESCE(SUM(run_seconds), 0)::int  AS run_seconds
+            FROM production_hourly
+           WHERE ${s.sql}
+           GROUP BY hour_start ORDER BY hour_start`, s.params)
       : Promise.resolve({ rows: [] })
   ]);
 
@@ -251,6 +269,7 @@ exports.getMaintenanceDashboard = async (req) => {
     production: prodRes.rows[0] || { produced: 0, run_seconds: 0, idle_seconds: 0 },
     rows:       rowsRes.rows,
     condition_trend: conditionRes.rows,
+    cycle_trend: cycleTrend(cycleRes.rows),
 
     /* Measured, not declared. This used to be a fixed list, true only while
        nothing could store these signals. Now a signal is named here when no
@@ -260,6 +279,21 @@ exports.getMaintenanceDashboard = async (req) => {
     unavailable: unavailableSignals(rowsRes.rows)
   };
 };
+
+/** Hourly cycle time in seconds: run time per part, null for an hour with none. */
+function cycleTrend(rows) {
+  return (Array.isArray(rows) ? rows : []).map(r => {
+    const produced = Number(r.produced) || 0;
+    const run = Number(r.run_seconds) || 0;
+    return {
+      hour_start: r.hour_start,
+      produced,
+      cycle_seconds: produced > 0 ? Math.round((run / produced) * 10) / 10 : null
+    };
+  });
+}
+
+exports.cycleTrend = cycleTrend;
 
 /** The machine totals as the four OEE figures, null where unmeasurable. */
 function oeeOf(machineRows) {
