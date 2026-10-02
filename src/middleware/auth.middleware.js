@@ -106,8 +106,15 @@ module.exports = async (req, res, next) => {
 
     next();
   } catch (err) {
+    /* The token was valid (a bad one is answered above); what failed is the
+       look-up of the account — the database out of reach for a moment.
+       401 here made the web app sign everyone out on a network blip, as an
+       unreachable Redis used to; 503 says "try again", and the session stays. */
     console.error('AUTH ERROR:', err);
-    return res.status(401).json({ message: 'Unauthorized' });
+    return res.status(503).json({
+      message: 'The server could not check your session just now. Try again in a moment.',
+      code: 'AUTH_UNAVAILABLE'
+    });
   }
 };
 

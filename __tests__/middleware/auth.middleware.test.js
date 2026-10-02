@@ -13,7 +13,7 @@
  *  TC-AM-09  req.user populated correctly from DB
  *  TC-AM-10  SNT_SUPER role derived from JWT
  *  TC-AM-11  is_snt_super true when decoded.is_snt_super is true
- *  TC-AM-12  401 when an unexpected error is thrown
+ *  TC-AM-12  503 (not 401: the session stays) when the account cannot be checked
  *  TC-AM-13  Redis read failing falls back to the database
  *  TC-AM-14  Redis write failing still lets the request through
  *  TC-AM-15  an inactive account is still refused when Redis is down
@@ -263,7 +263,7 @@ test('TC-AM-11 is_snt_super = true when decoded.is_snt_super flag is true', asyn
 // Unexpected error path
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('TC-AM-12 401 when an unexpected error occurs during processing', async () => {
+test('TC-AM-12 503, not 401, when the database cannot be reached — nobody is signed out', async () => {
   jwt.verify.mockReturnValue({ ...DECODED_BASE });
   mockDb.query.mockRejectedValueOnce(new Error('database down'));
 
@@ -273,8 +273,9 @@ test('TC-AM-12 401 when an unexpected error occurs during processing', async () 
   await middleware(makeReq('valid-token'), res, next);
 
   expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(401);
-  expect(res._body.message).toMatch(/Unauthorized/i);
+  expect(res._status).toBe(503);
+  expect(res._body.code).toBe('AUTH_UNAVAILABLE');
+  expect(res._body.message).toMatch(/try again/i);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
