@@ -1,5 +1,6 @@
 const svc = require('./dashboard.service');
 const timelineSvc = require('./timeline.service');
+const spindleSvc = require('./spindle.service');
 const factorySvc = require('./factory.service');
 const maintenanceSvc = require('./maintenance.service');
 const preventiveSvc  = require('./preventive.service');
@@ -56,6 +57,20 @@ exports.machineTimeline = async (req, res) => {
     if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
     console.error('Machine timeline error:', err);
     return res.status(500).json({ status: 'error', message: 'Failed to load the shift timeline' });
+  }
+};
+
+/* Spindle load, speed and feed: the latest reading and a trend over
+   ?range=15m|1h|4h|12h|24h — the machine page's spindle panel. */
+exports.machineSpindle = async (req, res) => {
+  try {
+    const data = await spindleSvc.machineSpindle(req.params.machine_id, req.user.company_id, req.query.range || '1h');
+    if (!data) return res.status(404).json({ status: 'error', message: 'Machine not found' });
+    return res.json({ status: 'success', data });
+  } catch (err) {
+    if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
+    console.error('Machine spindle error:', err);
+    return res.status(500).json({ status: 'error', message: 'Failed to load the spindle readings' });
   }
 };
 
