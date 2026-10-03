@@ -8,9 +8,13 @@
  * The subtraction has one trap worth testing hard. MAX(energy) - MIN(energy)
  * over a period looks equivalent to differencing and is not: it cannot see
  * a counter reset that happens inside the period. A meter replaced mid-day
- * reading 500, 520, 0, 5 has MAX 520 and MIN 0, giving 520 kWh for a
- * machine that used 25. This was written that way first, and an end-to-end
+ * reading 500, 520, 3, 5 has MAX 520 and MIN 3, giving 517 kWh for a
+ * machine that used 22. This was written that way first, and an end-to-end
  * run against real rows caught it.
+ *
+ * Real meters also misread: a 0 between two real readings, or a jump no
+ * machine could draw. Differencing those booked a whole meter total
+ * (107 million kWh) into one interval, so both count nothing.
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
@@ -45,7 +49,8 @@ describe('consumption comes from differences, not sums', () => {
     await svc.getEnergy({ company_id });
 
     const sql = executable(mockDb.calls()[0].text);
-    expect(sql).toMatch(/LAG\(energy\) OVER \(PARTITION BY machine_id ORDER BY received_at\)/);
+    expect(sql).toMatch(/LAG\(t\.energy\)\s+OVER w/);
+    expect(sql).toMatch(/WINDOW w AS \(PARTITION BY t\.machine_id ORDER BY t\.received_at\)/);
     // MAX-MIN cannot see a reset inside the period
     expect(sql).not.toMatch(/MAX\(energy\)\s*-\s*MIN\(energy\)/);
   });
@@ -54,7 +59,24 @@ describe('consumption comes from differences, not sums', () => {
     queueAll();
     await svc.getEnergy({ company_id });
     // a machine cannot un-consume electricity
-    expect(mockDb.calls()[0].text).toMatch(/GREATEST\(energy - LAG\(energy\)[\s\S]*?, 0\)/);
+    expect(executable(mockDb.calls()[0].text)).toMatch(/WHEN energy <= prev_energy THEN 0/);
+  });
+
+  test('a 0 is a dropped read, so the climb back from it is not consumption', async () => {
+    queueAll();
+    await svc.getEnergy({ company_id });
+    // VMC - 13 - M sent 0 in most messages; 0 → 107,615,280 is not 107 million kWh
+    const sql = executable(mockDb.calls()[0].text);
+    expect(sql).toMatch(/AND t\.energy > 0/);
+    expect(sql).not.toMatch(/energy IS NOT NULL/);
+  });
+
+  test('a rise no machine could draw is a misread and counts nothing', async () => {
+    queueAll();
+    await svc.getEnergy({ company_id });
+    // over 2,000 kW since the last reading, measured over at least five minutes
+    expect(executable(mockDb.calls()[0].text)).toMatch(
+      /energy - prev_energy\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM received_at - prev_at\), 300\) \/ 3600\.0 THEN 0/);
   });
 
   test('a machine with a single reading has no interval and so no consumption', async () => {

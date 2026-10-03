@@ -24,10 +24,12 @@
  *
  * ── State of the data ──────────────────────────────────────────────────
  *
- * telemetry_raw.energy is NULL on every row in this database: no device
- * has ever sent it. Everything here is correct and returns nothing until
- * that changes. The screen says so rather than showing zeros that look
- * like a very efficient factory.
+ * Meters misread. VMC - 13 - M has sent 0, 2.718 and 107.6 million in
+ * turn, and plain differencing booked its whole meter total several times
+ * a day. So a 0 is a dropped read and a rise no machine could draw counts
+ * nothing (see DAILY_ENERGY_CTE): a misread costs one interval, not a
+ * meter total. A machine with no readings still shows "not reported"
+ * rather than a zero that looks like a very efficient factory.
  */
 
 const pool = require('../db');
@@ -57,6 +59,12 @@ function resolveRange({ from, to }) {
   return { start, end };
 }
 
+/* Far beyond what any machine tool draws: a rise implying more is a misread.
+   The collector applies the same two numbers to production_hourly
+   (pms-backend src/lib/energy-step.js), so Reports and this screen agree. */
+const MAX_KW = 2000;
+const MIN_WINDOW_SEC = 300;
+
 /**
  * Per-machine-per-day consumption from the cumulative counter.
  *
@@ -65,34 +73,51 @@ function resolveRange({ from, to }) {
  * of them and gets slower every day.
  */
 const DAILY_ENERGY_CTE = `
+  readings AS (
+    /*
+     * Real meter readings only. A 0 is a dropped read, not a meter at zero:
+     * counting the climb back from 0 would book the whole meter total as
+     * one interval.
+     */
+    SELECT t.machine_id, t.received_at, t.energy,
+           LAG(t.energy)      OVER w AS prev_energy,
+           LAG(t.received_at) OVER w AS prev_at
+      FROM telemetry_raw t
+     WHERE t.company_id = $1
+       AND t.received_at >= $2::timestamptz
+       AND t.received_at <= $3::timestamptz
+       AND t.energy > 0
+       %MACHINE%
+    WINDOW w AS (PARTITION BY t.machine_id ORDER BY t.received_at)
+  ),
   deltas AS (
     /*
      * Consumption between one reading and the next.
      *
      * MAX(energy) - MIN(energy) over a period looks equivalent and is not:
      * it cannot see a counter reset that happens inside the period. A meter
-     * replaced mid-day reading 500, 520, 0, 5 has MAX 520 and MIN 0, giving
-     * 520 kWh for a machine that actually used 25.
+     * replaced mid-day reading 500, 520, 3, 5 has MAX 520 and MIN 3, giving
+     * 517 kWh for a machine that actually used 22.
      *
      * Differencing consecutive readings and keeping only the rises gives
-     * 20 + (reset, dropped) + 5 = 25. GREATEST(..., 0) is what discards the
-     * reset, because a machine cannot un-consume electricity.
+     * 20 + (reset, nothing) + 2 = 22, because a machine cannot un-consume
+     * electricity. A rise faster than ${MAX_KW} kW since the last reading
+     * (measured over at least ${MIN_WINDOW_SEC / 60} minutes) is a misread
+     * and counts nothing either.
      *
      * The delta is attributed to the day of the later reading, so overnight
      * consumption lands on the day it finished rather than being lost.
      */
     SELECT machine_id,
            (received_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
-           GREATEST(energy - LAG(energy) OVER (PARTITION BY machine_id ORDER BY received_at), 0) AS delta
-      FROM (
-        SELECT t.machine_id, t.received_at, t.energy
-          FROM telemetry_raw t
-         WHERE t.company_id = $1
-           AND t.received_at >= $2::timestamptz
-           AND t.received_at <= $3::timestamptz
-           AND t.energy IS NOT NULL
-           %MACHINE%
-      ) r
+           CASE
+             WHEN prev_energy IS NULL THEN NULL
+             WHEN energy <= prev_energy THEN 0
+             WHEN energy - prev_energy
+                  > ${MAX_KW} * GREATEST(EXTRACT(EPOCH FROM received_at - prev_at), ${MIN_WINDOW_SEC}) / 3600.0 THEN 0
+             ELSE energy - prev_energy
+           END AS delta
+      FROM readings
   ),
   daily AS (
     SELECT machine_id, day,
