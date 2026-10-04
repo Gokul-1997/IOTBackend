@@ -11,6 +11,7 @@ const downtimeSvc   = require('./downtime.service');
 const operatorSvc   = require('./operator.service');
 const oeeDashSvc    = require('./oee.dashboard.service');
 const energySvc     = require('./energy.service');
+const meterSvc      = require('./energy-meter.service');
 const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
@@ -73,6 +74,28 @@ exports.machineSpindle = async (req, res) => {
     return res.status(500).json({ status: 'error', message: 'Failed to load the spindle readings' });
   }
 };
+
+/* The energy meter's own readings: on the Energy screen (any machine of the
+   company that has a meter) and on the machine page (that machine). */
+async function sendMeter(res, args) {
+  try {
+    const data = await meterSvc.meterReadings(args);
+    if (!data) return res.status(404).json({ status: 'error', message: 'Machine not found' });
+    return res.json({ status: 'success', data });
+  } catch (err) {
+    if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
+    console.error('Energy meter error:', err);
+    return res.status(500).json({ status: 'error', message: 'Failed to load the energy meter readings' });
+  }
+}
+
+exports.energyMeter = (req, res) => sendMeter(res, {
+  companyId: req.user.company_id, machineId: req.query.machine_id, range: req.query.range || '24h'
+});
+
+exports.machineMeter = (req, res) => sendMeter(res, {
+  companyId: req.user.company_id, machineId: req.params.machine_id, range: req.query.range || '24h'
+});
 
 exports.machineDetail = async (req, res) => {
 

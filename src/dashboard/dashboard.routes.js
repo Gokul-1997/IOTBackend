@@ -62,6 +62,8 @@ router.get('/oee/export/:format', auth, export_('oee'), ctrl.exportOee);
 /* Phase 2 · Screen 9 — Energy Monitoring. */
 router.get('/energy', auth, view('energy'), ctrl.energy);
 router.get('/energy/settings', auth, view('energy'), ctrl.getEnergySettings);
+/* Phase 2 · Screen 9 — every value a machine's energy meter reports */
+router.get('/energy/meter', auth, view('energy'), ctrl.energyMeter);
 /* Was permit('page:dashboard') — an exact match against a key that has never
    existed in the permissions table (only page:dashboard:view and the widget
    keys do), so it could not pass for any company user. Saving a tariff worked
@@ -79,6 +81,7 @@ router.get('/maintenance-report/export/:format', auth, access('page:maintenance-
 router.get('/live/:machine_id', auth, access('page:dashboard:live:view'), ctrl.machineDetail);
 router.get('/live/:machine_id/timeline', auth, access('page:dashboard:live:view'), ctrl.machineTimeline);
 router.get('/live/:machine_id/spindle', auth, access('page:dashboard:live:view'), ctrl.machineSpindle);
+router.get('/live/:machine_id/meter', auth, access('page:dashboard:live:view'), ctrl.machineMeter);
 
 
 
