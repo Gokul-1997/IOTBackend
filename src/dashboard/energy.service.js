@@ -173,8 +173,11 @@ async function perMachine({ companyId, machineId, start, end }) {
      ),
      peak AS (
        /* Highest instantaneous power, for the overload check, and the average
-          supply voltage and current — read in the same pass over telemetry. */
-       SELECT t.machine_id, MAX(t.power) AS peak_kw,
+          supply voltage and current — read in the same pass over telemetry.
+          The size of the power, not its sign: a meter whose current
+          transformers face the wrong way reports a running machine as
+          negative kW (VMC - 1 - F did), which MAX alone would never flag. */
+       SELECT t.machine_id, MAX(ABS(t.power)) AS peak_kw,
               AVG(t.voltage) AS avg_voltage, AVG(t.current) AS avg_current,
               COUNT(t.voltage)::bigint AS voltage_readings, COUNT(t.current)::bigint AS current_readings
          FROM telemetry_raw t

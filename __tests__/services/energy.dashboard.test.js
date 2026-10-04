@@ -182,6 +182,14 @@ describe('overload alerts', () => {
     expect(d.machines.data[0].is_overloaded).toBe(false);
   });
 
+  test('peak power is the size of the reading, whatever its sign', async () => {
+    // VMC - 1 - F's meter reports a running machine as negative kW (its
+    // current transformers face the wrong way); MAX alone would never flag it
+    queueAll();
+    await svc.getEnergy({ company_id });
+    expect(mockDb.calls()[0].text).toMatch(/MAX\(ABS\(t\.power\)\) AS peak_kw/);
+  });
+
   test('never flags when no threshold is configured', async () => {
     // an unconfigured threshold must not read as a threshold of zero, or
     // every machine alerts the moment it draws any power at all
