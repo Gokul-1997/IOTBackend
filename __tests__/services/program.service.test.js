@@ -1,673 +1,159 @@
 /*
- * Unit tests for programs/program.service covering the full transfer flow
- * with a mocked FTP client (no real CNC machine needed):
- *  - createProgram: rejects without a file, inserts with metadata
- *  - transferProgram: SUCCESS path updates the log row
- *  - transferProgram: FTP failure writes error_message + status FAILED (502)
- *  - transferProgram: missing program / machine → error
- *  - deleteProgram: not found → error
- *  - testConnection: blank password falls back to stored one (write-only)
- *  - cleanupStuckTransfers: marks stale PENDING rows FAILED
- *  - the supervisor authorisation gate on uploadOne
- *
- * The OTP gate itself is covered in authorization.service.test.js; here it
- * is mocked so these tests stay about the transfer mechanics, with two
- * exceptions that assert the two are actually wired together.
+ * Program Transfer, the people's side: uploads into a machine's folder,
+ * jobs for its device, and device tokens.
  */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-svc-'));
+process.env.PROGRAM_TRANSFER_DIR = path.join(TMP, 'ProgramTransfer');
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
-jest.mock('../../src/programs/program.transfer', () => ({
-  sendProgramToMachine:    jest.fn(),
-  fetchProgramFromMachine: jest.fn(),
-  listMachineFiles:        jest.fn(),
-  machineFileExists:       jest.fn(),
-  testMachineConnection:   jest.fn()
-}));
-jest.mock('../../src/programs/authorization.service', () => ({
-  assertAuthorized: jest.fn()
-}));
 
 const { mockDb, resetDb } = require('../helpers/mockDb');
-const {
-  sendProgramToMachine, fetchProgramFromMachine, machineFileExists, testMachineConnection
-} = require('../../src/programs/program.transfer');
-const { assertAuthorized } = require('../../src/programs/authorization.service');
 const svc = require('../../src/programs/program.service');
+const storage = require('../../src/programs/storage');
+const deviceToken = require('../../src/programs/device-token');
 
-const user = { id: 7, company_id: 3 };
+afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
+beforeEach(() => resetDb());
 
-/** Shape assertAuthorized resolves to: the verified authorisation row. */
-const VERIFIED = { id: 77, supervisor_id: 42 };
+const one = row => ({ rows: [row], rowCount: 1 });
+const none = { rows: [], rowCount: 0 };
+const machine7 = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3' };
+const machine8 = { id: 8, company_id: 5, machine_serial_no: 'VMC-2', ip_address: '192.168.200.4' };
+const program = Buffer.from('%\nO1234\nG0 X0\nM30\n%\n');
 
-beforeEach(() => {
-  resetDb();
-  sendProgramToMachine.mockReset();
-  fetchProgramFromMachine.mockReset();
-  machineFileExists.mockReset();
-  testMachineConnection.mockReset();
-  assertAuthorized.mockReset();
-  // default: nothing on the controller, so transfers are not blocked
-  machineFileExists.mockResolvedValue(false);
-  // default: the supervisor has authorised this transfer
-  assertAuthorized.mockResolvedValue(VERIFIED);
-});
+const user = (perms = ['page:programs:view', 'page:programs:upload', 'page:programs:transfer', 'page:programs:fetch', 'page:programs:delete']) =>
+  ({ id: 2, username: 'Priya', company_id: 5, permissions: perms });
+const req = (o = {}) => ({ user: user(), params: {}, query: {}, body: {}, headers: {}, ip: '10.0.0.5', ...o });
+const jobRow = (o = {}) => ({ id: '11', company_id: 5, machine_id: 7, machine_serial: 'VMC-1', action: 'SEND', program_name: 'O1234.nc',
+  status: 'QUEUED', requested_by: 2, file_stored_name: null, backup_stored_name: null, ...o });
 
-describe('program.service.createProgram', () => {
-  test('throws when no file is uploaded', async () => {
-    await expect(svc.createProgram({ user, body: {}, file: undefined }))
-      .rejects.toThrow(/no program file/i);
+const folderFiles = m => {
+  const dir = path.join(storage.ROOT, storage.machineFolder(m));
+  return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+};
+
+describe('uploading a program', () => {
+  const upload = (body, perms) => req({
+    user: user(perms), body: { machine_id: '7', ...body },
+    file: { originalname: 'O1234.nc', buffer: program }
   });
 
-  test('inserts program with name, size and uploader', async () => {
-    const file = { originalname: 'O1234.nc', buffer: Buffer.from('G0 X0 Y0'), size: 8 };
-    mockDb.queueResponse({
-      rows: [{ id: 1, name: 'Flange Roughing', file_name: 'O1234.nc', file_size: 8 }],
-      rowCount: 1
-    });
-
-    const result = await svc.createProgram({
-      user, file, body: { name: 'Flange Roughing', description: 'op10' }
-    });
-
-    expect(result.id).toBe(1);
-    const insert = mockDb.calls()[0];
-    expect(insert.text).toMatch(/INSERT INTO programs/i);
-    expect(insert.params).toEqual([3, 'Flange Roughing', 'O1234.nc', file.buffer, 8, 'op10', 7]);
+  test('send without the transfer permission is refused before anything is written', async () => {
+    await expect(svc.uploadFile(upload({ send: 'true' }, ['page:programs:upload'])))
+      .rejects.toMatchObject({ status: 403 });
+    expect(mockDb.calls()).toHaveLength(0);
   });
 
-  test('falls back to file name when no display name given', async () => {
-    const file = { originalname: 'O55.prg', buffer: Buffer.from('M30'), size: 3 };
-    mockDb.queueResponse({ rows: [{ id: 2 }], rowCount: 1 });
-
-    await svc.createProgram({ user, file, body: {} });
-
-    expect(mockDb.calls()[0].params[1]).toBe('O55.prg');
+  test('already on the controller: 409 FILE_EXISTS, and no file is left behind', async () => {
+    mockDb.queueResponse(one(machine7), none, one({ files: [{ name: 'O1234' }] }));
+    await expect(svc.uploadFile(upload({ send: 'true' })))
+      .rejects.toMatchObject({ status: 409, code: 'FILE_EXISTS', names: ['O1234.nc'] });
+    expect(folderFiles(machine7)).toEqual([]);
   });
-});
 
-describe('program.service.transferProgram', () => {
-  const req = { user, params: { id: '10', machineId: '20' } };
+  test('already waiting to be sent: 409 DUPLICATE_JOB', async () => {
+    mockDb.queueResponse(one(machine7), one({ program_name: 'o1234' }));
+    await expect(svc.uploadFile(upload({ send: 'true', overwrite: 'true' })))
+      .rejects.toMatchObject({ status: 409, code: 'DUPLICATE_JOB' });
+  });
 
-  const programRow = {
-    id: 10, name: 'Flange Roughing', file_name: 'O1234.nc',
-    content: Buffer.from('G0 X0')
-  };
-  const machineRow = {
-    id: 20, machine_serial_no: 'VMC-01', ip_address: '192.168.1.101',
-    ftp_port: 21, ftp_user: 'cnc', ftp_pass: 'secret', ftp_dir: '/PROGRAM'
-  };
-
-  test('SUCCESS: uploads via FTP and marks the log row SUCCESS', async () => {
+  test('upload and send: the file is kept as NEW and a SEND job is queued for the device', async () => {
     mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },        // program lookup
-      { rows: [machineRow], rowCount: 1 },        // machine lookup
-      { rows: [{ id: 99 }], rowCount: 1 },        // insert PENDING log
-      { rows: [], rowCount: 1 }                   // update SUCCESS
+      one(machine7), none, none,
+      one({ id: '40', machine_id: 7, folder: 'company-5/192.168.200.3', stored_name: 'x', program_name: 'O1234.nc', kind: 'NEW' }),
+      one({ id: '11' }), one(jobRow())
     );
-    sendProgramToMachine.mockResolvedValue();
-
-    const result = await svc.transferProgram(req);
-
-    // nothing was on the machine, so there was nothing to back up
-    expect(result).toEqual({ transfer_id: 99, status: 'SUCCESS', backup: null });
-    expect(sendProgramToMachine).toHaveBeenCalledWith(
-      machineRow, programRow.content, 'O1234.nc', expect.any(Function)
-    );
-
-    const update = mockDb.calls()[3];
-    expect(update.text).toMatch(/SET status = 'SUCCESS'/);
-    expect(update.params).toEqual([99]);
-  });
-
-  test('FAILED: FTP error is saved to error_message and rethrown as 502', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 100 }], rowCount: 1 },       // insert PENDING log
-      { rows: [], rowCount: 1 }                   // update FAILED
-    );
-    sendProgramToMachine.mockRejectedValue(new Error('connect ETIMEDOUT 192.168.1.101:21'));
-
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({
-      status: 502,
-      message: /Transfer failed: connect ETIMEDOUT/
-    });
-
-    const update = mockDb.calls()[3];
-    expect(update.text).toMatch(/SET status = 'FAILED'/);
-    expect(update.params).toEqual([100, 'connect ETIMEDOUT 192.168.1.101:21']);
-  });
-
-  test('refuses to overwrite a program already on the controller', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 }
-    );
-    machineFileExists.mockResolvedValue(true);
-
-    // Silently replacing a file the operator may be mid-cut on is the
-    // failure this guard exists to prevent.
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({
-      status: 409,
-      code: 'FILE_EXISTS'
-    });
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-  });
-
-  test('overwrite:true backs the old program up, then sends', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 500, name: 'O1234.nc backup', file_size: 12 }], rowCount: 1 },  // backup INSERT
-      { rows: [{ id: 101 }], rowCount: 1 },                                          // transfer row
-      { rows: [], rowCount: 1 }                                                      // mark SUCCESS
-    );
-    machineFileExists.mockResolvedValue(true);
-    fetchProgramFromMachine.mockResolvedValue(Buffer.from('O1234\nOLD\nM30'));
-    sendProgramToMachine.mockResolvedValue();
-
-    const result = await svc.transferProgram({ ...req, body: { overwrite: true } });
-
-    expect(result.status).toBe('SUCCESS');
-    expect(result.backup).toEqual({ id: 500, name: 'O1234.nc backup', file_size: 12 });
-
-    // order is the whole safety property: read the old one before writing over it
-    const order = [
-      fetchProgramFromMachine.mock.invocationCallOrder[0],
-      sendProgramToMachine.mock.invocationCallOrder[0]
-    ];
-    expect(order[0]).toBeLessThan(order[1]);
-  });
-
-  test('throws when program not found', async () => {
-    mockDb.queueResponse(
-      { rows: [], rowCount: 0 },                  // program missing
-      { rows: [machineRow], rowCount: 1 }
-    );
-
-    await expect(svc.transferProgram(req)).rejects.toThrow(/program not found/i);
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-  });
-
-  test('throws when machine not found', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [], rowCount: 0 }                   // machine missing
-    );
-
-    await expect(svc.transferProgram(req)).rejects.toThrow(/machine not found/i);
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-  });
-
-  test('an unauthorised transfer never reaches the controller', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 }
-    );
-    const denied = Object.assign(new Error('needs supervisor authorisation'), {
-      status: 403, code: 'APPROVAL_REQUIRED'
-    });
-    assertAuthorized.mockRejectedValue(denied);
-
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({
-      status: 403, code: 'APPROVAL_REQUIRED'
-    });
-
-    // The gate must sit in front of the FTP layer entirely — not even the
-    // existence probe should open a session against the machine.
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-    expect(machineFileExists).not.toHaveBeenCalled();
-    // ...and nothing may be written to the transfer log either.
-    expect(mockDb.calls().some(c => /INSERT INTO program_transfers/i.test(c.text))).toBe(false);
-  });
-
-  test('records who authorised alongside who initiated', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 102 }], rowCount: 1 },
-      { rows: [], rowCount: 1 }
-    );
-    sendProgramToMachine.mockResolvedValue();
-
-    await svc.transferProgram({ ...req, body: { authorization_id: 77, authorization_code: '123456' } });
-
-    expect(assertAuthorized).toHaveBeenCalledWith(
-      machineRow, user, { authorization_id: 77, code: '123456' }
-    );
-
-    const insert = mockDb.calls()[2];
-    expect(insert.text).toMatch(/authorized_by, authorization_id, authorized_at/);
-    // transferred_by is the operator who clicked; authorized_by the
-    // supervisor who signed it off. The agreement requires both.
-    expect(insert.params.slice(-4, -1)).toEqual([user.id, VERIFIED.supervisor_id, VERIFIED.id]);
-    expect(insert.params.at(-1)).toBeNull();   // nothing was replaced
+    const r = await svc.uploadFile(upload({ send: 'true', overwrite: 'false', note: 'rev C' }));
+    expect(r.job).toMatchObject({ id: '11', action: 'SEND', status: 'QUEUED' });
+    expect(folderFiles(machine7)).toEqual([expect.stringMatching(/^\d{8}-\d{6}_NEW_O1234\.nc$/)]);
+    const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
+    expect(job.params).toEqual([5, 7, 'VMC-1', 'SEND', 'O1234.nc', '40', false, 2]);
   });
 });
 
-describe('program.service.transferBatch', () => {
-  const programRow = { id: 10, name: 'Flange', file_name: 'O1.nc', content: Buffer.from('G0') };
-  const machineRow = { id: 20, machine_serial_no: 'VMC-01' };
-
-  test('reports a blocked machine as APPROVAL_REQUIRED, not a generic failure', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 }
-    );
-    assertAuthorized.mockRejectedValue(Object.assign(new Error('needs authorisation'), {
-      status: 403, code: 'APPROVAL_REQUIRED'
-    }));
-
-    const res = await svc.transferBatch({
-      user, body: { program_ids: [10], machine_ids: [20] }
-    });
-
-    // Collapsing this into FAILED would tell the operator to retry, when
-    // what they actually need is a code from their supervisor.
-    expect(res.results[0]).toMatchObject({
-      machine_serial: 'VMC-01', status: 'APPROVAL_REQUIRED', code: 'APPROVAL_REQUIRED'
-    });
-    expect(res.succeeded).toBe(0);
+describe('jobs', () => {
+  test('FETCH needs the fetch permission', async () => {
+    await expect(svc.createJobs(req({ user: user(['page:programs:view']), body: { action: 'FETCH', machine_id: 7, program_names: ['O1'] } })))
+      .rejects.toMatchObject({ status: 403 });
   });
 
-  test('a wrong code costs one attempt for the whole batch, not one per program', async () => {
-    const threePrograms = [
-      { id: 10, name: 'A', file_name: 'A.nc', content: Buffer.from('G0') },
-      { id: 11, name: 'B', file_name: 'B.nc', content: Buffer.from('G0') },
-      { id: 12, name: 'C', file_name: 'C.nc', content: Buffer.from('G0') }
-    ];
+  test('a program sent to another machine is copied into that machine\'s folder first', async () => {
+    const saved = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O2001.nc', buffer: program });
     mockDb.queueResponse(
-      ...threePrograms.map(p => ({ rows: [p], rowCount: 1 })),
-      { rows: [machineRow], rowCount: 1 }
+      one({ id: '50', company_id: 5, machine_id: 7, folder: saved.folder, stored_name: saved.storedName, program_name: 'O2001.nc', kind: 'NEW' }),
+      one(machine8), none, none,
+      one({ id: '51', machine_id: 8, folder: 'company-5/192.168.200.4', stored_name: 'y', program_name: 'O2001.nc', kind: 'NEW' }),
+      one({ id: '12' }), one(jobRow({ id: '12', machine_id: 8, program_name: 'O2001.nc' }))
     );
-    assertAuthorized.mockRejectedValue(Object.assign(new Error('Incorrect code. 4 attempts remaining.'), {
-      status: 403, code: 'INVALID_CODE'
-    }));
-
-    const res = await svc.transferBatch({
-      user, body: { program_ids: [10, 11, 12], machine_ids: [20] }
-    });
-
-    // Verifying per program would spend 3 of the 5 attempts on a single
-    // mistyped code, and 5 selected programs would lock it outright.
-    expect(assertAuthorized).toHaveBeenCalledTimes(1);
-    // Every program still has to be reported, or the operator sees a
-    // partial list and assumes the rest went through.
-    expect(res.results).toHaveLength(3);
-    expect(res.results.every(r => r.status === 'APPROVAL_REQUIRED')).toBe(true);
+    const r = await svc.createJobs(req({ body: { action: 'SEND', file_ids: [50], machine_ids: [8] } }));
+    expect(r.jobs).toHaveLength(1);
+    expect(folderFiles(machine8)).toEqual([expect.stringMatching(/_NEW_O2001\.nc$/)]);
+    const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
+    expect(job.params.slice(1, 6)).toEqual([8, 'VMC-2', 'SEND', 'O2001.nc', '51']);
   });
 
-  test('an unassigned machine is reported distinctly from a missing code', async () => {
+  test('one refusal queues nothing', async () => {
     mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 }
+      one({ id: '50', company_id: 5, machine_id: 7, folder: 'f', stored_name: 's', program_name: 'O2001.nc' }),
+      one(machine7), one(machine8),
+      none, none,                                  // VMC-1: free
+      none, one({ files: [{ name: 'O2001.nc' }] }) // VMC-2: already there
     );
-    assertAuthorized.mockRejectedValue(Object.assign(new Error('no supervisor'), {
-      status: 403, code: 'NO_SUPERVISOR_ASSIGNED'
-    }));
+    await expect(svc.createJobs(req({ body: { action: 'SEND', file_ids: [50], machine_ids: [7, 8] } })))
+      .rejects.toMatchObject({ code: 'FILE_EXISTS', names: ['O2001.nc on VMC-2'] });
+    expect(mockDb.calls().some(c => /INSERT INTO program_jobs/.test(c.text))).toBe(false);
+  });
 
-    const res = await svc.transferBatch({
-      user, body: { program_ids: [10], machine_ids: [20] }
-    });
+  test('a job the device already took cannot be cancelled', async () => {
+    mockDb.queueResponse(one(jobRow({ status: 'DELIVERED' })));
+    await expect(svc.cancelJob(req({ params: { id: '11' } })))
+      .rejects.toMatchObject({ status: 409, message: /already taken/ });
+  });
 
-    // This one an admin has to fix, so it must not look like "enter a code".
-    expect(res.results[0].status).toBe('NO_SUPERVISOR');
+  test("another company's job is not found", async () => {
+    mockDb.queueResponse(one(jobRow({ company_id: 6 })));
+    await expect(svc.cancelJob(req({ params: { id: '11' } }))).rejects.toMatchObject({ status: 404 });
   });
 });
 
-describe('program.service.deleteProgram', () => {
-  test('throws when program does not belong to company', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 });
-    await expect(svc.deleteProgram({ user, params: { id: '5' } }))
-      .rejects.toThrow(/not found or access denied/i);
+test('a file waiting to be sent cannot be deleted', async () => {
+  mockDb.queueResponse(one({ id: '40', company_id: 5, folder: 'f', stored_name: 's' }), one({ id: '11' }));
+  await expect(svc.deleteFile(req({ params: { id: '40' } }))).rejects.toMatchObject({ status: 409, code: 'IN_USE' });
+});
+
+describe('device tokens', () => {
+  test('a new token replaces the old one; only its hash and prefix are stored or logged', async () => {
+    mockDb.queueResponse(
+      one(machine7),
+      {},                                                       // BEGIN
+      { rows: [], rowCount: 1 },                                // revoke the old token
+      one({ id: 9, machine_id: 7, label: null, token_prefix: 'mxd_abcdefgh', created_at: 'now' }),
+      {}                                                        // COMMIT
+    );
+    const r = await svc.createDeviceToken(req({ params: { machineId: '7' } }));
+    expect(r.token).toMatch(deviceToken.SHAPE);
+    expect(r.device.folder).toBe('company-5/192.168.200.3');
+
+    const calls = mockDb.calls();
+    expect(calls.find(c => /UPDATE program_devices SET revoked_at/.test(c.text)).params).toEqual([7, 2]);
+    const ins = calls.find(c => /INSERT INTO program_devices/.test(c.text));
+    expect(ins.params).toContain(deviceToken.hash(r.token));
+    expect(ins.params).not.toContain(r.token);
+    const auditCall = calls.find(c => /INSERT INTO audit_logs/.test(c.text));
+    expect(JSON.stringify(auditCall.params)).not.toContain(r.token);
   });
 
-  test('soft-deletes the program', async () => {
-    mockDb.queueResponse({ rows: [{ id: 5 }], rowCount: 1 });
-    await svc.deleteProgram({ user, params: { id: '5' } });
-    expect(mockDb.calls()[0].text).toMatch(/SET is_active = false/);
+  test('revoking a machine without a token: 404', async () => {
+    mockDb.queueResponse(one(machine7), none);
+    await expect(svc.revokeDeviceToken(req({ params: { machineId: '7' } }))).rejects.toMatchObject({ status: 404 });
   });
 });
 
-describe('program.service.testConnection', () => {
-  test('blank password falls back to the stored one (write-only password)', async () => {
-    mockDb.queueResponse({
-      rows: [{ ip_address: '192.168.1.101', ftp_port: 21, ftp_user: 'cnc', ftp_pass: 'stored-secret' }],
-      rowCount: 1
-    });
-    testMachineConnection.mockResolvedValue();
-
-    await svc.testConnection({
-      user,
-      body: { machine_id: 20, ip_address: '192.168.1.101', ftp_user: 'cnc', ftp_pass: '' }
-    });
-
-    expect(testMachineConnection).toHaveBeenCalledWith(
-      expect.objectContaining({ ftp_pass: 'stored-secret' })
-    );
-  });
-
-  test('form values override stored ones when provided', async () => {
-    mockDb.queueResponse({
-      rows: [{ ip_address: '10.0.0.1', ftp_port: 21, ftp_user: 'old', ftp_pass: 'old-pass' }],
-      rowCount: 1
-    });
-    testMachineConnection.mockResolvedValue();
-
-    await svc.testConnection({
-      user,
-      body: { machine_id: 20, ip_address: '192.168.1.200', ftp_user: 'new', ftp_pass: 'new-pass' }
-    });
-
-    expect(testMachineConnection).toHaveBeenCalledWith({
-      ip_address: '192.168.1.200', ftp_port: 21, ftp_user: 'new', ftp_pass: 'new-pass'
-    });
-  });
-
-  test('works without machine_id (new machine, nothing saved yet)', async () => {
-    testMachineConnection.mockResolvedValue();
-
-    await svc.testConnection({
-      user,
-      body: { ip_address: '192.168.1.50', ftp_port: 21, ftp_user: 'cnc', ftp_pass: 'pw' }
-    });
-
-    expect(mockDb.calls()).toHaveLength(0);   // no DB lookup needed
-    expect(testMachineConnection).toHaveBeenCalledWith(
-      expect.objectContaining({ ip_address: '192.168.1.50' })
-    );
-  });
-
-  test('throws when machine_id given but machine not found', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 });
-    await expect(svc.testConnection({ user, body: { machine_id: 999 } }))
-      .rejects.toThrow(/machine not found/i);
-  });
-
-  /*
-   * The endpoint takes an address from the request body so the machine
-   * form can be tested before it is saved, which without a guard makes it
-   * a port scanner: any logged-in user can aim the server at a host and
-   * learn from the reply whether the port answered.
-   */
-  describe('will not probe off the shop floor', () => {
-    test.each([
-      ['a public address',        '8.8.8.8'],
-      ['EC2 instance metadata',   '169.254.169.254'],
-      ['loopback',                '127.0.0.1'],
-      ['just outside 172.16/12',  '172.32.0.1']
-    ])('refuses %s', async (_label, ip) => {
-      await expect(svc.testConnection({ user, body: { ip_address: ip } }))
-        .rejects.toMatchObject({ status: 400, code: 'ADDRESS_NOT_PRIVATE' });
-      expect(testMachineConnection).not.toHaveBeenCalled();
-    });
-
-    test('rejects a malformed address before it reaches the FTP client', async () => {
-      await expect(svc.testConnection({ user, body: { ip_address: '10.0.0.999' } }))
-        .rejects.toMatchObject({ status: 400, code: 'BAD_ADDRESS' });
-      expect(testMachineConnection).not.toHaveBeenCalled();
-    });
-
-    test.each([['10.4.1.9'], ['172.16.0.1'], ['172.31.255.254'], ['192.168.1.50']])(
-      'allows %s', async (ip) => {
-        testMachineConnection.mockResolvedValue();
-        await svc.testConnection({ user, body: { ip_address: ip } });
-        expect(testMachineConnection).toHaveBeenCalled();
-      }
-    );
-
-    test('a stored address is trusted — only body values are screened', async () => {
-      // An admin set this through the machine form; re-validating it here
-      // would lock a customer out of their own machine over a policy the
-      // machine form never enforced.
-      mockDb.queueResponse({
-        rows: [{ ip_address: '8.8.8.8', ftp_port: 21, ftp_user: 'cnc', ftp_pass: 'pw' }],
-        rowCount: 1
-      });
-      testMachineConnection.mockResolvedValue();
-
-      await svc.testConnection({ user, body: { machine_id: 20 } });
-
-      expect(testMachineConnection).toHaveBeenCalledWith(
-        expect.objectContaining({ ip_address: '8.8.8.8' })
-      );
-    });
-  });
-});
-
-/*
- * A CNC's embedded FTP server accepts one control session. Two transfers
- * overlapping is not an abstract race — it is two operators clicking Send
- * within a few seconds of each other — and the result on some controllers
- * is a truncated program file rather than a clean refusal.
- */
-describe('program.service — one transfer at a time per machine', () => {
-  const programRow = { id: 1, name: 'Flange', file_name: 'O1234.nc', content: Buffer.from('G0') };
-  const machineRow = { id: 20, machine_serial_no: 'VMC-01', ip_address: '192.168.1.101' };
-  const req = { user, params: { id: 1, machineId: 20 }, body: {} };
-
-  test('refuses a second transfer while one is running, without touching FTP', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 }
-    );
-    mockDb.denyAdvisoryLock();
-
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({
-      status: 409,
-      code: 'MACHINE_BUSY'
-    });
-    // the whole point: no second session is opened against the controller
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-    expect(machineFileExists).not.toHaveBeenCalled();
-  });
-
-  test('takes the lock on the machine id and releases it on success', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 99 }], rowCount: 1 },
-      { rows: [], rowCount: 1 }
-    );
-    sendProgramToMachine.mockResolvedValue();
-
-    await svc.transferProgram(req);
-
-    const locks = mockDb.allCalls().filter(c => /advisory/.test(c.text));
-    expect(locks).toHaveLength(2);
-    expect(locks[0].text).toMatch(/pg_try_advisory_lock/);
-    expect(locks[0].params[1]).toBe(20);        // keyed by machine, not program
-    expect(locks[1].text).toMatch(/pg_advisory_unlock/);
-    expect(locks[1].params).toEqual(locks[0].params);
-  });
-
-  test('releases the lock when the transfer fails', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 100 }], rowCount: 1 },
-      { rows: [], rowCount: 1 }
-    );
-    sendProgramToMachine.mockRejectedValue(new Error('connect ETIMEDOUT'));
-
-    await expect(svc.transferProgram(req)).rejects.toThrow(/Transfer failed/);
-
-    // a failed transfer that kept the lock would wedge the machine until
-    // the API process restarted
-    expect(mockDb.allCalls().some(c => /pg_advisory_unlock/.test(c.text))).toBe(true);
-  });
-
-  test('an unauthorised caller never takes the lock', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 }
-    );
-    const denied = Object.assign(new Error('Supervisor code required'), {
-      status: 403, code: 'APPROVAL_REQUIRED'
-    });
-    assertAuthorized.mockRejectedValue(denied);
-
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({ code: 'APPROVAL_REQUIRED' });
-
-    // otherwise a stream of unauthorised attempts would hold the machine
-    // busy against the operators who are allowed to use it
-    expect(mockDb.allCalls().some(c => /advisory/.test(c.text))).toBe(false);
-  });
-});
-
-describe('program.service.cleanupStuckTransfers', () => {
-  test('marks stale PENDING rows as FAILED and returns the count', async () => {
-    mockDb.queueResponse({ rows: [{ id: 1 }, { id: 2 }], rowCount: 2 });
-
-    const fixed = await svc.cleanupStuckTransfers();
-
-    expect(fixed).toBe(2);
-    const q = mockDb.calls()[0].text;
-    expect(q).toMatch(/SET status = 'FAILED'/);
-    expect(q).toMatch(/status = 'PENDING'/);
-    expect(q).toMatch(/INTERVAL '5 minutes'/);
-  });
-});
-
-/*
- * Backup before overwrite.
- *
- * A program on a controller is not necessarily a copy of anything in the
- * library — operators edit at the panel, and those edits often exist
- * nowhere else. So the old program is read off the machine and stored
- * before the new one is sent, and if that read fails nothing is sent at
- * all. Overwriting something we failed to back up would destroy exactly
- * what the backup exists to protect.
- */
-describe('program.service — backup before overwrite', () => {
-  const req = { user, params: { id: '10', machineId: '20' }, body: { overwrite: true } };
-  const programRow = { id: 10, name: 'Flange', file_name: 'O1234.nc', content: Buffer.from('G0 X0') };
-  const machineRow = { id: 20, machine_serial_no: 'VMC-01', ip_address: '192.168.1.101' };
-
-  const lookups = () => mockDb.queueResponse(
-    { rows: [programRow], rowCount: 1 },
-    { rows: [machineRow], rowCount: 1 }
-  );
-
-  test('nothing on the machine means no backup and no wasted read', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 }, { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 99 }], rowCount: 1 }, { rows: [], rowCount: 1 }
-    );
-    machineFileExists.mockResolvedValue(false);
-    sendProgramToMachine.mockResolvedValue();
-
-    const result = await svc.transferProgram(req);
-
-    expect(result.backup).toBeNull();
-    expect(fetchProgramFromMachine).not.toHaveBeenCalled();
-  });
-
-  test('the backup is stored against the machine it came from', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 }, { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 500, name: 'bk', file_size: 9 }], rowCount: 1 },
-      { rows: [{ id: 101 }], rowCount: 1 }, { rows: [], rowCount: 1 }
-    );
-    machineFileExists.mockResolvedValue(true);
-    fetchProgramFromMachine.mockResolvedValue(Buffer.from('OLD PROG'));
-    sendProgramToMachine.mockResolvedValue();
-
-    await svc.transferProgram(req);
-
-    const insert = mockDb.calls().find(c => /is_backup/.test(c.text));
-    expect(insert.text).toMatch(/INSERT INTO programs/i);
-    expect(insert.params).toContain(machineRow.id);      // backup_of_machine_id
-    expect(insert.params).toContain(programRow.id);      // which program replaced it
-    expect(insert.params.some(p => Buffer.isBuffer(p) && p.toString() === 'OLD PROG')).toBe(true);
-  });
-
-  test('the transfer row records which backup belongs to it', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 }, { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 500, name: 'bk', file_size: 9 }], rowCount: 1 },
-      { rows: [{ id: 101 }], rowCount: 1 }, { rows: [], rowCount: 1 }
-    );
-    machineFileExists.mockResolvedValue(true);
-    fetchProgramFromMachine.mockResolvedValue(Buffer.from('OLD'));
-    sendProgramToMachine.mockResolvedValue();
-
-    await svc.transferProgram(req);
-
-    const transferInsert = mockDb.calls().find(c => /INSERT INTO program_transfers/i.test(c.text));
-    expect(transferInsert.text).toMatch(/backup_program_id/);
-    expect(transferInsert.params.at(-1)).toBe(500);
-  });
-
-  test('a failed backup stops the transfer — nothing is sent', async () => {
-    lookups();
-    machineFileExists.mockResolvedValue(true);
-    fetchProgramFromMachine.mockRejectedValue(new Error('EW_BUSY'));
-
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({
-      code: 'BACKUP_FAILED', status: 502
-    });
-
-    // the old program on the machine is still there, untouched
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-  });
-
-  test('an empty read counts as a failed backup', async () => {
-    lookups();
-    machineFileExists.mockResolvedValue(true);
-    fetchProgramFromMachine.mockResolvedValue(Buffer.alloc(0));
-
-    // Storing zero bytes would look like a backup and restore nothing.
-    await expect(svc.transferProgram(req)).rejects.toMatchObject({ code: 'BACKUP_FAILED' });
-    expect(sendProgramToMachine).not.toHaveBeenCalled();
-  });
-
-  test('the failure message says the transfer did not happen', async () => {
-    lookups();
-    machineFileExists.mockResolvedValue(true);
-    fetchProgramFromMachine.mockRejectedValue(new Error('timeout'));
-
-    await expect(svc.transferProgram(req)).rejects.toThrow(/nothing was sent/i);
-  });
-});
-
-describe('program.service.getPrograms', () => {
-  test('backups are kept out of the list operators send from', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [{ total: 0 }], rowCount: 1 });
-
-    await svc.getPrograms({ user, query: {} });
-
-    // one row per overwrite would bury the programs people actually curate
-    expect(mockDb.calls()[0].text).toMatch(/is_backup = false/);
-  });
-});
-
-describe('program.service.getBackups', () => {
-  test('lists only backups, newest first', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [{ total: 0 }], rowCount: 1 });
-
-    await svc.getBackups({ user, query: {} });
-
-    const q = mockDb.calls()[0].text;
-    expect(q).toMatch(/is_backup = true/);
-    expect(q).toMatch(/ORDER BY p\.backup_taken_at DESC/);
-  });
-
-  test('filters to one machine when asked', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [{ total: 0 }], rowCount: 1 });
-
-    await svc.getBackups({ user, query: { machine_id: 20 } });
-
-    expect(mockDb.calls()[0].text).toMatch(/backup_of_machine_id = \$2/);
-    expect(mockDb.calls()[0].params).toContain(20);
-  });
-
-  test('scoped to the caller company', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [{ total: 0 }], rowCount: 1 });
-
-    await svc.getBackups({ user, query: {} });
-
-    expect(mockDb.calls()[0].text).toMatch(/p\.company_id = \$1/);
-    expect(mockDb.calls()[0].params[0]).toBe(user.company_id);
-  });
+test('"O1234.nc" and "o1234" are the same program to a controller', () => {
+  expect(svc._internal.sameProgram('O1234.nc', 'o1234')).toBe(true);
+  expect(svc._internal.sameProgram('O1234.nc', 'O12345')).toBe(false);
 });

@@ -1,6 +1,5 @@
 const db = require('../db');
 const pwd = require('../utils/password');
-const { setSupervisedMachines, listSupervisedMachines } = require('../programs/authorization.service');
 
 exports.create = async (data, reqUser) => {
   /* A company's admin is made with the company, and that admin adds
@@ -94,16 +93,6 @@ exports.create = async (data, reqUser) => {
     client.release();
   }
 
-  // Machines this user supervises — the people who authorise program
-  // transfers to them. Applied after the user transaction commits so the
-  // two never share a client, and skipped entirely when the caller did
-  // not send the field.
-  if (Array.isArray(data.supervised_machine_ids)) {
-    user.supervised_machine_ids = await setSupervisedMachines(
-      user.id, user.company_id, data.supervised_machine_ids, reqUser.id
-    );
-  }
-
   return user;
 };
 
@@ -191,7 +180,6 @@ exports.getById = async (userId, reqUser) => {
     [userId]
   );
   user.roles = roleRes.rows;
-  user.supervised_machine_ids = await listSupervisedMachines(userId, user.company_id);
   return user;
 };
 
@@ -207,7 +195,6 @@ exports.update = async (userId, reqUser, data) => {
   }
 
   const client = await db.connect();
-  const wantsSupervisorChange = Array.isArray(data.supervised_machine_ids);
   let user;
 
   try {
@@ -244,15 +231,10 @@ exports.update = async (userId, reqUser, data) => {
       }
     }
 
-    if (!updates.length && !wantsSupervisorChange) {
+    if (!updates.length) {
       await client.query('ROLLBACK');
       throw { status: 400, message: 'No fields to update' };
     }
-
-    // Changing only the supervised machines touches no user column, but the
-    // statement still has to run so the company-scoped WHERE below decides
-    // whether this caller may see the user at all (and 404s if not).
-    if (!updates.length) updates.push('username = username');
 
     query += updates.join(', ');
 
@@ -285,12 +267,6 @@ exports.update = async (userId, reqUser, data) => {
     throw e;
   } finally {
     client.release();
-  }
-
-  if (wantsSupervisorChange) {
-    user.supervised_machine_ids = await setSupervisedMachines(
-      user.id, user.company_id, data.supervised_machine_ids, reqUser.id
-    );
   }
 
   return user;

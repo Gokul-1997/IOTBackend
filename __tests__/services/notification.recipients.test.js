@@ -15,27 +15,11 @@
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 jest.mock('../../src/utils/nodemailer', () => ({ sendBulkEmails: jest.fn(), sendEmail: jest.fn(async () => {}) }));
-jest.mock('../../src/programs/program.transfer', () => ({
-  sendProgramToMachine:    jest.fn(),
-  fetchProgramFromMachine: jest.fn(),
-  listMachineFiles:        jest.fn(),
-  machineFileExists:       jest.fn(),
-  testMachineConnection:   jest.fn()
-}));
-jest.mock('../../src/programs/authorization.service', () => ({ assertAuthorized: jest.fn() }));
-
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const alarms = require('../../src/alarms/alarm.service');
-const programs = require('../../src/programs/program.service');
-const { sendProgramToMachine, machineFileExists } = require('../../src/programs/program.transfer');
-const { assertAuthorized } = require('../../src/programs/authorization.service');
+const jobs = require('../../src/programs/jobs');
 
-beforeEach(() => {
-  resetDb();
-  sendProgramToMachine.mockReset().mockResolvedValue();
-  machineFileExists.mockReset().mockResolvedValue(false);
-  assertAuthorized.mockReset().mockResolvedValue({ id: 77, supervisor_id: 42 });
-});
+beforeEach(() => resetDb());
 
 const recipientsQuery = () => mockDb.calls().find(c => /FROM users u/.test(c.text));
 const insertCall = () => mockDb.calls().find(c => /INSERT INTO notifications/.test(c.text));
@@ -120,25 +104,29 @@ describe('alarm notifications', () => {
 });
 
 describe('program transfer notifications', () => {
-  const req = { user: { id: 7, company_id: 3 }, params: { id: '10', machineId: '20' } };
-  const programRow = { id: 10, name: 'Flange Roughing', file_name: 'O1234.nc', content: Buffer.from('G0 X0') };
-  const machineRow = { id: 20, machine_serial_no: 'VMC-01', ip_address: '192.168.1.101',
-                       ftp_port: 21, ftp_user: 'cnc', ftp_pass: 'secret', ftp_dir: '/PROGRAM' };
+  const job = { id: '5', company_id: 3, requested_by: 7, action: 'SEND', status: 'DONE', program_name: 'O1234.nc',
+                machine_serial: 'VMC-01', message: null, backup_stored_name: '20261005-103020_BACKUP_O1234.nc' };
 
-  test('the sender is told, unless they switched Program transfer off', async () => {
-    mockDb.queueResponse(
-      { rows: [programRow], rowCount: 1 },
-      { rows: [machineRow], rowCount: 1 },
-      { rows: [{ id: 99 }], rowCount: 1 },
-      { rows: [], rowCount: 1 }
-    );
-    await programs.transferProgram(req);
-
+  test('the person who asked is told, unless they switched Program transfer off', async () => {
+    await jobs.announce(job);
     const ins = insertCall();
     expect(ins).toBeDefined();
     expect(ins.text).toMatch(/WHERE NOT EXISTS \(SELECT 1 FROM notification_preferences\s+WHERE user_id = \$2 AND notify_program_transfer = false\)/);
     expect(ins.params.slice(0, 3)).toEqual([3, 7, 'INFO']);
     expect(ins.params[3]).toBe('Program sent to VMC-01');
-    expect(ins.params[5]).toBe('/programs');
+    expect(ins.params[4]).toMatch(/kept as 20261005-103020_BACKUP_O1234\.nc/);
+  });
+
+  test('a failure says why, as a warning', async () => {
+    await jobs.announce({ ...job, status: 'FAILED', message: 'Controller memory full.', backup_stored_name: null });
+    const ins = insertCall();
+    expect(ins.params[2]).toBe('WARNING');
+    expect(ins.params[3]).toBe('Program transfer failed — VMC-01');
+    expect(ins.params[4]).toBe('"O1234.nc" was not sent to VMC-01. Controller memory full.');
+  });
+
+  test('a job still under way is not a notification', async () => {
+    await jobs.announce({ ...job, status: 'DELIVERED' });
+    expect(insertCall()).toBeUndefined();
   });
 });

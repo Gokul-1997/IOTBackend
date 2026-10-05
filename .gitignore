@@ -1,3 +1,6 @@
 /node_modules
 .env
 .DS_Store
+
+# Program Transfer files (PROGRAM_TRANSFER_DIR defaults here); they belong to the server, not the repo
+/storage/

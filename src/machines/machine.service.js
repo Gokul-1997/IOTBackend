@@ -19,11 +19,7 @@ exports.createMachine = async (req) => {
     controller,
     spindle_rpm,
     image_url,
-    ip_address,
-    ftp_port,
-    ftp_user,
-    ftp_pass,
-    ftp_dir
+    ip_address
   } = req.body;
 
   if (!machine_serial_no) {
@@ -81,14 +77,10 @@ exports.createMachine = async (req) => {
       spindle_rpm,
       image_url,
       ip_address,
-      ftp_port,
-      ftp_user,
-      ftp_pass,
-      ftp_dir,
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
     )
     RETURNING id, machine_serial_no, api_key
     `,
@@ -110,11 +102,7 @@ exports.createMachine = async (req) => {
       controller,
       spindle_rpm,
       image_url,
-      ip_address || null,
-      ftp_port || 21,
-      ftp_user || null,
-      ftp_pass || null,
-      ftp_dir || null,
+      ip_address ? String(ip_address).trim() : null,
       apiKey
     ]
   );
@@ -202,9 +190,6 @@ exports.getMachines = async (req) => {
       m.controller,
       m.spindle_rpm,
       m.ip_address,
-      m.ftp_port,
-      m.ftp_user,
-      m.ftp_dir,
       m.api_key,
       m.is_active,
       m.created_at
@@ -300,11 +285,7 @@ exports.updateMachine = async (req) => {
     'controller',
     'spindle_rpm',
     'image_url',
-    'ip_address',
-    'ftp_port',
-    'ftp_user',
-    'ftp_pass',
-    'ftp_dir'
+    'ip_address'
   ];
 
   const fields = [];
@@ -313,9 +294,6 @@ exports.updateMachine = async (req) => {
 
   for (const key of allowedFields) {
     if (req.body[key] !== undefined) {
-      // ftp_pass is write-only (never returned by the API); an empty value
-      // means "keep the existing password", not "clear it"
-      if (key === 'ftp_pass' && !req.body[key]) continue;
       fields.push(`${key} = $${index}`);
       values.push(req.body[key]);
       index++;
@@ -342,7 +320,7 @@ exports.updateMachine = async (req) => {
     throw new Error('Machine not found or access denied');
   }
 
-  // ftp_pass is write-only — never send it back to the client
-  const { ftp_pass: _omitted, ...machine } = result.rows[0];
+  // the old Program Transfer's FTP settings are no longer used (migration 030)
+  const { ftp_pass: _p, ftp_port: _o, ftp_user: _u, ftp_dir: _d, ...machine } = result.rows[0];
   return machine;
 };

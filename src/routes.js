@@ -38,6 +38,9 @@ module.exports = app => {
   app.use('/api/tickets',          require('./tickets/ticket.routes'));
   app.use('/api/programs',         require('./programs/program.routes'));
 
+  // ── Machine-side devices (own token, not a user's sign-in) ────
+  app.use('/api/device/v1',        require('./programs/device.routes'));
+
   // ── File Upload ───────────────────────────────────────────────
   app.use('/api/upload',       require('./upload/upload.routes'));
 };

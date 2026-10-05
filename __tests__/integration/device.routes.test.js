@@ -1,0 +1,252 @@
+/*
+ * /api/device/v1 end to end over HTTP: token, job hand-out, file download,
+ * tagged uploads, results and the controller list. The database is the mock;
+ * files go to a temporary ProgramTransfer folder.
+ */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-dev-'));
+process.env.PROGRAM_TRANSFER_DIR = path.join(TMP, 'ProgramTransfer');
+process.env.PROGRAM_MAX_MB = '1';
+
+jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
+
+const express = require('express');
+const request = require('supertest');
+const { mockDb, resetDb } = require('../helpers/mockDb');
+const deviceToken = require('../../src/programs/device-token');
+const storage = require('../../src/programs/storage');
+
+const app = express();
+app.use(express.json());
+app.use('/api/device/v1', require('../../src/programs/device.routes'));
+
+afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
+beforeEach(() => resetDb());
+
+const { token } = deviceToken.generate();
+const AUTH = { Authorization: `Bearer ${token}` };
+const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3' };
+
+const authRow = () => mockDb.queueResponse({ rows: [{
+  id: 3, company_id: 5, machine_id: 7, last_seen_at: new Date().toISOString(), last_seen_ip: '::ffff:127.0.0.1',
+  agent_version: null, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', machine_active: true,
+  machine_company_id: 5, company_active: true
+}], rowCount: 1 });
+
+const jobRow = (o = {}) => ({
+  id: '11', company_id: 5, machine_id: 7, machine_serial: 'VMC-1', action: 'SEND', program_name: 'O1234.nc',
+  overwrite: false, status: 'DELIVERED', message: null, file_id: '40', backup_file_id: null, requested_by: 2,
+  requested_at: '2026-10-05T05:00:00Z', delivered_at: '2026-10-05T05:00:15Z', finished_at: null,
+  requested_by_name: 'Priya', file_size: 24, file_sha256: 'a'.repeat(64), file_stored_name: '20261005-103000_NEW_O1234.nc',
+  backup_stored_name: null, ...o
+});
+const one = row => ({ rows: [row], rowCount: 1 });
+
+test('no token: 401 with a code the device can act on', async () => {
+  const res = await request(app).get('/api/device/v1/ping');
+  expect(res.status).toBe(401);
+  expect(res.body.code).toBe('TOKEN_MISSING');
+});
+
+test('ping names the machine and the poll interval', async () => {
+  authRow();
+  const res = await request(app).get('/api/device/v1/ping').set(AUTH);
+  expect(res.status).toBe(200);
+  expect(res.body).toMatchObject({ device_id: 3, machine: { serial: 'VMC-1', ip_address: '192.168.200.3' }, poll_seconds: 15 });
+});
+
+describe('GET /jobs/next', () => {
+  test('nothing waiting: 204, no body', async () => {
+    authRow();
+    const res = await request(app).get('/api/device/v1/jobs/next').set(AUTH);
+    expect(res.status).toBe(204);
+    const take = mockDb.calls()[1];
+    expect(take.text).toMatch(/FOR UPDATE SKIP LOCKED/);
+    expect(take.params).toEqual([7, 3, 5]);            // its own machine, company and device only
+  });
+
+  test('a SEND job comes with where to download it and its checksum', async () => {
+    authRow();
+    mockDb.queueResponse(one({ id: '11' }), one(jobRow()));
+    const res = await request(app).get('/api/device/v1/jobs/next').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.job).toEqual({
+      id: 11, action: 'SEND', program_name: 'O1234.nc', overwrite: false,
+      requested_at: '2026-10-05T05:00:00Z', requested_by: 'Priya',
+      file: { size: 24, sha256: 'a'.repeat(64), url: '/api/device/v1/jobs/11/file' }
+    });
+  });
+});
+
+describe('GET /jobs/:id/file', () => {
+  test('streams the program with its name and SHA-256', async () => {
+    const body = Buffer.from('%\nO1234\nG0 X0\nM30\n%\n');
+    const saved = await storage.save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: body });
+    authRow();
+    mockDb.queueResponse(one(jobRow()), one({ folder: saved.folder, stored_name: saved.storedName, size_bytes: saved.size, sha256: saved.sha256 }));
+    const res = await request(app).get('/api/device/v1/jobs/11/file').set(AUTH).buffer(true)
+      .parse((r, cb) => { const c = []; r.on('data', d => c.push(d)); r.on('end', () => cb(null, Buffer.concat(c))); });
+    expect(res.status).toBe(200);
+    expect(res.headers['x-sha256']).toBe(saved.sha256);
+    expect(res.headers['x-program-name']).toBe('O1234.nc');
+    expect(res.body.equals(body)).toBe(true);
+  });
+
+  test("another machine's job: 404", async () => {
+    authRow();
+    mockDb.queueResponse(one(jobRow({ machine_id: 8 })));
+    const res = await request(app).get('/api/device/v1/jobs/11/file').set(AUTH);
+    expect([res.status, res.body.code]).toEqual([404, 'JOB_NOT_FOUND']);
+  });
+
+  test('a job not taken yet, or a FETCH job, has no file to give', async () => {
+    authRow();
+    mockDb.queueResponse(one(jobRow({ status: 'QUEUED' })));
+    let res = await request(app).get('/api/device/v1/jobs/11/file').set(AUTH);
+    expect([res.status, res.body.code]).toEqual([409, 'JOB_NOT_OPEN']);
+    authRow();
+    mockDb.queueResponse(one(jobRow({ action: 'FETCH' })));
+    res = await request(app).get('/api/device/v1/jobs/11/file').set(AUTH);
+    expect([res.status, res.body.code]).toEqual([409, 'WRONG_ACTION']);
+  });
+});
+
+describe('POST /files — one upload, tagged', () => {
+  const program = Buffer.from('%\nO1234\nG1 X10 F200\nM30\n%\n');
+
+  test('BACKUP before an overwrite: kept in the machine folder and linked to the SEND job', async () => {
+    authRow();
+    mockDb.queueResponse(one(jobRow()), one({
+      id: '41', folder: 'company-5/192.168.200.3', stored_name: 'x', program_name: 'O1234.nc', kind: 'BACKUP',
+      size_bytes: program.length, sha256: storage.sha256(program), created_at: 'now'
+    }));
+    const res = await request(app).post('/api/device/v1/files').set(AUTH)
+      .field('type', 'BACKUP').field('job_id', '11').field('sha256', storage.sha256(program))
+      .attach('file', program, 'O1234.nc');
+    expect(res.status).toBe(201);
+    expect(res.body.file).toMatchObject({ id: 41, kind: 'BACKUP' });
+    const ins = mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text));
+    expect(ins.params.slice(0, 6)).toEqual([5, 7, 'company-5/192.168.200.3', expect.stringMatching(/_BACKUP_O1234\.nc$/), 'O1234.nc', 'BACKUP']);
+    expect(fs.existsSync(path.join(storage.ROOT, ins.params[2], ins.params[3]))).toBe(true);
+    expect(mockDb.calls().find(c => /SET backup_file_id/.test(c.text)).params).toEqual(['11', '41']);
+  });
+
+  test('BACKUP on the device\'s own schedule needs no job', async () => {
+    authRow();
+    mockDb.queueResponse(one({ id: '42', folder: 'f', stored_name: 's', program_name: 'O5.nc', kind: 'BACKUP', size_bytes: 3, sha256: 'x', created_at: 'now' }));
+    const res = await request(app).post('/api/device/v1/files').set(AUTH).field('type', 'BACKUP').attach('file', Buffer.from('M30'), 'O5.nc');
+    expect(res.status).toBe(201);
+  });
+
+  test('FETCHED answers a FETCH job and completes it', async () => {
+    authRow();
+    mockDb.queueResponse(
+      one(jobRow({ action: 'FETCH', file_id: null })),
+      one({ id: '43', folder: 'f', stored_name: 's', program_name: 'O1234.nc', kind: 'FETCHED', size_bytes: 3, sha256: 'x', created_at: 'now' }),
+      { rows: [], rowCount: 1 },                              // job.file_id
+      { rows: [], rowCount: 1 },                              // finish
+      one(jobRow({ action: 'FETCH', status: 'DONE', file_id: '43' }))
+    );
+    const res = await request(app).post('/api/device/v1/files').set(AUTH)
+      .field('type', 'FETCHED').field('job_id', '11').attach('file', program, 'whatever.nc');
+    expect(res.status).toBe(201);
+    const ins = mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text));
+    expect(ins.params[4]).toBe('O1234.nc');                   // named as asked for, not as uploaded
+    expect(mockDb.calls().find(c => /UPDATE program_jobs SET status = \$2/.test(c.text)).params.slice(0, 2)).toEqual(['11', 'DONE']);
+  });
+
+  test.each([
+    ['no type', { }, 'BAD_TYPE', 400],
+    ['FETCHED without a job', { type: 'FETCHED' }, 'BAD_JOB', 400],
+    ['an unknown tag', { type: 'NEW' }, 'BAD_TYPE', 400]
+  ])('%s is refused', async (_l, fields, code, status) => {
+    authRow();
+    let r = request(app).post('/api/device/v1/files').set(AUTH);
+    for (const [k, v] of Object.entries(fields)) r = r.field(k, v);
+    const res = await r.attach('file', program, 'O1.nc');
+    expect([res.status, res.body.code]).toEqual([status, code]);
+  });
+
+  test('a file that arrived changed is refused before it is kept', async () => {
+    authRow();
+    const res = await request(app).post('/api/device/v1/files').set(AUTH)
+      .field('type', 'BACKUP').field('sha256', 'b'.repeat(64)).attach('file', program, 'O1.nc');
+    expect([res.status, res.body.code]).toEqual([422, 'CHECKSUM_MISMATCH']);
+    expect(mockDb.calls().some(c => /INSERT INTO program_files/.test(c.text))).toBe(false);
+  });
+
+  test('over the size limit: 413 TOO_LARGE; a binary: NOT_TEXT', async () => {
+    authRow();
+    let res = await request(app).post('/api/device/v1/files').set(AUTH)
+      .field('type', 'BACKUP').attach('file', Buffer.alloc(1024 * 1024 + 10, 0x41), 'O1.nc');
+    expect([res.status, res.body.code]).toEqual([413, 'TOO_LARGE']);
+    authRow();
+    res = await request(app).post('/api/device/v1/files').set(AUTH)
+      .field('type', 'BACKUP').attach('file', Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00]), 'O1.nc');
+    expect([res.status, res.body.code]).toEqual([400, 'NOT_TEXT']);
+  });
+});
+
+describe('POST /jobs/:id/result', () => {
+  test('FAILED has to say why', async () => {
+    authRow();
+    const res = await request(app).post('/api/device/v1/jobs/11/result').set(AUTH).send({ status: 'FAILED' });
+    expect([res.status, res.body.code]).toEqual([400, 'NO_MESSAGE']);
+  });
+
+  test('DONE finishes the job and tells the person who asked', async () => {
+    authRow();
+    mockDb.queueResponse(one(jobRow()), { rows: [], rowCount: 1 }, one(jobRow({ status: 'DONE' })));
+    const res = await request(app).post('/api/device/v1/jobs/11/result').set(AUTH).send({ status: 'DONE' });
+    expect(res.status).toBe(200);
+    expect(res.body.job).toEqual({ id: 11, status: 'DONE' });
+    expect(mockDb.calls().some(c => /INSERT INTO notifications/.test(c.text))).toBe(true);
+  });
+
+  test('the same report again (a retry) is fine; a different one is not', async () => {
+    authRow();
+    mockDb.queueResponse(one(jobRow({ status: 'DONE' })));
+    let res = await request(app).post('/api/device/v1/jobs/11/result').set(AUTH).send({ status: 'DONE' });
+    expect(res.status).toBe(200);
+    authRow();
+    mockDb.queueResponse(one(jobRow({ status: 'DONE' })));
+    res = await request(app).post('/api/device/v1/jobs/11/result').set(AUTH).send({ status: 'FAILED', message: 'x' });
+    expect([res.status, res.body.code]).toEqual([409, 'JOB_NOT_OPEN']);
+  });
+
+  test('a FETCH job is not DONE until its file is uploaded', async () => {
+    authRow();
+    mockDb.queueResponse(one(jobRow({ action: 'FETCH', file_id: null })));
+    const res = await request(app).post('/api/device/v1/jobs/11/result').set(AUTH).send({ status: 'DONE' });
+    expect([res.status, res.body.code]).toEqual([409, 'NO_FILE']);
+  });
+});
+
+describe('PUT /controller-files', () => {
+  test('stores a cleaned list for this machine only', async () => {
+    authRow();
+    const res = await request(app).put('/api/device/v1/controller-files').set(AUTH).send({ files: [
+      { name: 'O1234', size: 2048, modified: '2026-10-05T04:00:00Z', comment: 'FLANGE' },
+      { name: 'O2001', size: 'x', modified: 'yesterday' }
+    ] });
+    expect(res.body).toEqual({ count: 2 });
+    const up = mockDb.calls().find(c => /program_controller_files/.test(c.text));
+    expect(up.params.slice(0, 2)).toEqual([7, 5]);
+    expect(JSON.parse(up.params[2])).toEqual([
+      { name: 'O1234', size: 2048, modified: '2026-10-05T04:00:00.000Z', comment: 'FLANGE' },
+      { name: 'O2001', size: null, modified: null, comment: null }
+    ]);
+  });
+
+  test('not a list, or a nameless entry: 400', async () => {
+    authRow();
+    let res = await request(app).put('/api/device/v1/controller-files').set(AUTH).send({ files: 'O1' });
+    expect(res.status).toBe(400);
+    authRow();
+    res = await request(app).put('/api/device/v1/controller-files').set(AUTH).send({ files: [{ size: 1 }] });
+    expect(res.status).toBe(400);
+  });
+});

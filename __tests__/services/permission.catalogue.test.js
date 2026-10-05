@@ -16,7 +16,8 @@
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
-jest.mock('../../src/redis', () => ({ get: jest.fn(), set: jest.fn(), del: jest.fn(), on: jest.fn() }));
+// call(): the device API's router builds its rate limiters, which load their Redis scripts at once
+jest.mock('../../src/redis', () => ({ get: jest.fn(), set: jest.fn(), del: jest.fn(), on: jest.fn(), call: jest.fn(async () => 'sha') }));
 
 const fs   = require('fs');
 const path = require('path');

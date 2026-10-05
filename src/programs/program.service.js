@@ -1,807 +1,407 @@
-const pool = require('../db');
-/*
- * Transfers go through whichever protocol the machine speaks — FOCAS for
- * Fanuc, FTP for the rest — resolved per machine rather than imported
- * directly, so everything below this line is protocol-agnostic.
+/**
+ * Program Transfer, the people's side (/api/programs).
+ *
+ * The server no longer reaches into the factory. A person uploads a program
+ * into the machine's folder and asks for it to be sent, or asks for a
+ * program on the controller; each becomes a job, and the machine's device
+ * collects it the next time it asks for work (device.service). The device
+ * writes the program to the controller — saving what it replaces as a
+ * BACKUP first — or uploads what was asked for, and reports back.
  */
-const { transportFor, protocolFor } = require('./transports');
-const { emitToUser } = require('../lib/realtime');
-const { assertAuthorized } = require('./authorization.service');
+const pool = require('../db');
+const storage = require('./storage');
+const jobs = require('./jobs');
+const deviceToken = require('./device-token');
+const audit = require('../audit/audit.service');
 
-/* ─────────────────────────────────────────────────────────────
-   Helpers
-   ───────────────────────────────────────────────────────────── */
+const MAX_JOBS_PER_REQUEST = 50;
 
-/** Load a machine the caller is allowed to touch, or throw. */
+const fail = (message, code, status = 400, extra = {}) => Object.assign(new Error(message), { code, status, ...extra });
+
+const allowed = (req, key) => !!req.user?.is_snt_super || (req.user?.permissions || []).includes(key);
+
+function pageOf(query, defLimit = 20) {
+  const limit = Math.min(200, Math.max(1, parseInt(query.limit, 10) || defLimit));
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  return { limit, page, offset: (page - 1) * limit };
+}
+
+/** A machine of the caller's company that is switched on, or a 404. */
 async function getMachine(machineId, companyId) {
-  // `controller` is what routes a machine to FOCAS or FTP, so it has to
-  // travel with the row rather than being looked up again later.
-  const { rows, rowCount } = await pool.query(
-    `SELECT id, machine_serial_no, ip_address, ftp_port, ftp_user, ftp_pass, ftp_dir,
-            controller
-     FROM machines
-     WHERE id = $1 AND company_id = $2 AND is_active = true`,
-    [machineId, companyId]
+  const id = Number(machineId);
+  if (!Number.isInteger(id) || id <= 0) throw fail('Choose a machine.', 'NO_MACHINE');
+  const { rows } = await pool.query(
+    `SELECT id, company_id, machine_serial_no, ip_address
+       FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true`,
+    [id, companyId]
   );
-  if (rowCount === 0) throw new Error('Machine not found or access denied');
+  if (!rows.length) throw fail('Machine not found.', 'MACHINE_NOT_FOUND', 404);
   return rows[0];
 }
 
-/** Raise a 409 the frontend can turn into an overwrite prompt. */
-function fileExistsError(fileName) {
-  const e = new Error(`"${fileName}" already exists on the controller.`);
-  e.status = 409;
-  e.code = 'FILE_EXISTS';
-  return e;
-}
-
-/* ─────────────────────────────────────────────────────────────
-   One transfer at a time, per machine
-
-   A CNC's embedded FTP server is not a general-purpose one: most
-   accept a single control session, and a second connection either is
-   refused or — worse on some Mitsubishi models — interleaves with the
-   first and leaves a truncated file on the controller. Two operators
-   sending to the same machine at the same moment is not a rare case;
-   it is a Monday morning.
-
-   The lock is a Postgres advisory lock rather than an in-process mutex
-   because pm2 runs the API as multiple instances, and a JavaScript Map
-   in one worker cannot see a transfer running in another. It is taken
-   on its own pooled connection and released in a finally; if the
-   process dies mid-transfer the session ends and Postgres drops the
-   lock on its own, so a crash cannot wedge a machine permanently.
-   ───────────────────────────────────────────────────────────── */
-
-const TRANSFER_LOCK_NAMESPACE = 0x5052;   // 'PR' — program transfer
-
-function machineBusyError(machine) {
-  const e = new Error(
-    `Another transfer to ${machine.machine_serial_no} is already running. ` +
-    `Wait for it to finish and try again.`
+async function getFile(fileId, companyId) {
+  const id = Number(fileId);
+  if (!Number.isInteger(id) || id <= 0) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
+  const { rows } = await pool.query(
+    `SELECT id, company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256
+       FROM program_files WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
+    [id, companyId]
   );
-  e.status = 409;
-  e.code = 'MACHINE_BUSY';
-  return e;
+  if (!rows.length) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
+  return rows[0];
 }
 
-async function withMachineLock(machine, fn) {
-  const client = await pool.connect();
-  try {
-    const { rows: [{ locked }] } = await client.query(
-      'SELECT pg_try_advisory_lock($1, $2) AS locked',
-      [TRANSFER_LOCK_NAMESPACE, machine.id]
-    );
-    if (!locked) throw machineBusyError(machine);
+/* "O1234.nc" and "O1234" are the same program to a Fanuc: compare without case or extension */
+const sameProgram = (a, b) => {
+  const k = s => String(s || '').toLowerCase().replace(/\.[^.]+$/, '');
+  return k(a) === k(b);
+};
 
-    try {
-      return await fn();
-    } finally {
-      await client.query(
-        'SELECT pg_advisory_unlock($1, $2)',
-        [TRANSFER_LOCK_NAMESPACE, machine.id]
-      );
+/**
+ * Before a SEND is queued: refuse a second job for the same program while
+ * one is still open, and — unless the person confirmed an overwrite — refuse
+ * a program the device last reported as already on the controller. The
+ * device checks again when it writes (the list may be minutes old).
+ */
+async function checkSend(machine, programName, overwrite) {
+  const open = await pool.query(
+    `SELECT program_name FROM program_jobs
+      WHERE machine_id = $1 AND action = 'SEND' AND status = ANY($2)`,
+    [machine.id, jobs.OPEN]
+  );
+  if (open.rows.some(r => sameProgram(r.program_name, programName))) {
+    return { duplicate: true };
+  }
+  if (overwrite) return {};
+  const listed = await pool.query(`SELECT files FROM program_controller_files WHERE machine_id = $1`, [machine.id]);
+  const onController = (listed.rows[0]?.files || []).some(f => sameProgram(f.name, programName));
+  return onController ? { exists: true } : {};
+}
+
+async function insertJob({ companyId, machine, action, programName, fileId = null, overwrite = false, userId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO program_jobs (company_id, machine_id, machine_serial, action, program_name, file_id, overwrite, requested_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [companyId, machine.id, machine.machine_serial_no, action, programName, fileId, !!overwrite, userId]
+  );
+  const job = await jobs.getJob(rows[0].id);
+  await jobs.announce(job);
+  return jobs.view(job);
+}
+
+async function insertFile({ machine, saved, userId, note }) {
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO program_files (company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, uploaded_by, note)
+       VALUES ($1, $2, $3, $4, $5, 'NEW', $6, $7, $8, $9)
+       RETURNING id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, note, created_at`,
+      [machine.company_id, machine.id, saved.folder, saved.storedName, saved.programName,
+       saved.size, saved.sha256, userId, note ? String(note).slice(0, 255) : null]
+    );
+    return rows[0];
+  } catch (err) {
+    await storage.remove(saved.folder, saved.storedName).catch(() => {});   // no file without its row
+    throw err;
+  }
+}
+
+/* ─────────────── machines and their devices ─────────────── */
+
+exports.listMachines = async (req) => {
+  const { rows } = await pool.query(
+    `SELECT m.id, m.company_id, m.machine_serial_no, m.ip_address,
+            d.id AS device_id, d.token_prefix, d.label AS device_label, d.created_at AS device_created_at,
+            d.last_seen_at, d.last_seen_ip, d.agent_version,
+            COALESCE(d.last_seen_at > NOW() - make_interval(secs => $2), false) AS online,
+            (SELECT COUNT(*)::int FROM program_jobs j
+              WHERE j.machine_id = m.id AND j.status IN ('QUEUED', 'DELIVERED')) AS open_jobs,
+            c.reported_at AS controller_reported_at
+       FROM machines m
+       LEFT JOIN program_devices d ON d.machine_id = m.id AND d.revoked_at IS NULL
+       LEFT JOIN program_controller_files c ON c.machine_id = m.id
+      WHERE m.company_id = $1 AND m.is_active = true
+      ORDER BY m.machine_serial_no`,
+    [req.user.company_id, jobs.ONLINE_WINDOW_SEC]
+  );
+  return rows.map(({ company_id, ...m }) => ({ ...m, folder: storage.machineFolder({ ...m, company_id }) }));
+};
+
+exports.controllerFiles = async (req) => {
+  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const { rows } = await pool.query(
+    `SELECT files, reported_at FROM program_controller_files WHERE machine_id = $1`, [machine.id]
+  );
+  return { files: rows[0]?.files || [], reported_at: rows[0]?.reported_at || null };
+};
+
+/* ─────────────── files in the ProgramTransfer folder ─────────────── */
+
+exports.listFiles = async (req) => {
+  const { machine_id, kind, search } = req.query;
+  const { limit, page, offset } = pageOf(req.query, 50);
+  const values = [req.user.company_id];
+  let where = `f.company_id = $1 AND f.deleted_at IS NULL`;
+  if (machine_id) { values.push(Number(machine_id)); where += ` AND f.machine_id = $${values.length}`; }
+  if (kind) { values.push(String(kind).toUpperCase()); where += ` AND f.kind = $${values.length}`; }
+  if (search) {
+    values.push(`%${String(search).replace(/[%_\\]/g, '\\$&')}%`);
+    where += ` AND (f.program_name ILIKE $${values.length} OR f.stored_name ILIKE $${values.length})`;
+  }
+  const [data, count] = await Promise.all([
+    pool.query(
+      `SELECT f.id, f.machine_id, m.machine_serial_no, f.folder, f.stored_name, f.program_name, f.kind,
+              f.size_bytes, f.sha256, f.note, f.job_id, f.created_at, u.username AS uploaded_by_name
+         FROM program_files f
+         LEFT JOIN machines m ON m.id = f.machine_id
+         LEFT JOIN users u    ON u.id = f.uploaded_by
+        WHERE ${where}
+        ORDER BY f.created_at DESC, f.id DESC
+        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, limit, offset]
+    ),
+    pool.query(`SELECT COUNT(*)::int AS total FROM program_files f WHERE ${where}`, values)
+  ]);
+  return { data: data.rows, total: count.rows[0].total, page, limit };
+};
+
+/**
+ * A new program into the machine's folder — and, with send, straight into a
+ * job for its device. The checks run before anything is written, so a
+ * refused send ("already on the machine — overwrite?") leaves no file behind
+ * to be saved a second time when the person confirms.
+ */
+exports.uploadFile = async (req) => {
+  if (!req.file) throw fail('Choose a program file.', 'NO_FILE');
+  const body = req.body || {};
+  const send = String(body.send) === 'true';
+  const overwrite = String(body.overwrite) === 'true';
+  if (send && !allowed(req, 'page:programs:transfer')) {
+    throw fail('Sending a program to a machine is not part of your role.', 'FORBIDDEN', 403);
+  }
+
+  const machine = await getMachine(body.machine_id, req.user.company_id);
+  const programName = storage.safeProgramName(body.program_name || req.file.originalname);
+  storage.checkContent(req.file.buffer);
+
+  if (send) {
+    const check = await checkSend(machine, programName, overwrite);
+    if (check.duplicate) throw fail(`${programName} is already waiting to go to ${machine.machine_serial_no}.`, 'DUPLICATE_JOB', 409);
+    if (check.exists) {
+      throw fail(`${programName} is already on ${machine.machine_serial_no}.`, 'FILE_EXISTS', 409, { names: [programName] });
     }
+  }
+
+  const saved = await storage.save({ machine, kind: 'NEW', programName, buffer: req.file.buffer });
+  const file = await insertFile({ machine, saved, userId: req.user.id, note: body.note });
+  const job = send
+    ? await insertJob({ companyId: machine.company_id, machine, action: 'SEND', programName: file.program_name,
+                        fileId: file.id, overwrite, userId: req.user.id })
+    : null;
+
+  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'PROGRAM_UPLOAD', resource: 'program_file',
+              resource_id: file.id, new_value: { machine: machine.machine_serial_no, file: `${file.folder}/${file.stored_name}`, send },
+              ip_address: req.ip, user_agent: req.headers['user-agent'] });
+  return { file, job };
+};
+
+exports.getFileForDownload = async (req) => getFile(req.params.id, req.user.company_id);
+
+/** Delete a file from the folder. Its row stays (deleted_at), so the history still names it. */
+exports.deleteFile = async (req) => {
+  const file = await getFile(req.params.id, req.user.company_id);
+  const open = await pool.query(
+    `SELECT id FROM program_jobs WHERE file_id = $1 AND status = ANY($2) LIMIT 1`, [file.id, jobs.OPEN]
+  );
+  if (open.rowCount) throw fail('This program is waiting to be sent. Cancel that first.', 'IN_USE', 409);
+
+  await storage.remove(file.folder, file.stored_name);
+  await pool.query(`UPDATE program_files SET deleted_at = NOW(), deleted_by = $2 WHERE id = $1`, [file.id, req.user.id]);
+  audit.log({ user_id: req.user.id, company_id: file.company_id, action: 'PROGRAM_DELETE', resource: 'program_file',
+              resource_id: file.id, old_value: { file: `${file.folder}/${file.stored_name}` },
+              ip_address: req.ip, user_agent: req.headers['user-agent'] });
+};
+
+/* ─────────────── jobs ─────────────── */
+
+/**
+ * SEND: files × machines. A file sent to a machine other than its own is
+ * copied into that machine's folder first, so each folder holds every
+ * program that went to that machine.
+ * FETCH: program names to read off one machine's controller.
+ * Every pair is checked before any job is created: one refusal queues none.
+ */
+exports.createJobs = async (req) => {
+  const body = req.body || {};
+  const action = String(body.action || '').toUpperCase();
+  const companyId = req.user.company_id;
+
+  if (action === 'FETCH') {
+    if (!allowed(req, 'page:programs:fetch')) throw fail('Fetching from a machine is not part of your role.', 'FORBIDDEN', 403);
+    const machine = await getMachine(body.machine_id, companyId);
+    const names = [...new Set((body.program_names || []).map(n => storage.safeProgramName(n)))];
+    if (!names.length) throw fail('Choose a program on the machine.', 'NO_PROGRAM');
+    if (names.length > MAX_JOBS_PER_REQUEST) throw fail(`At most ${MAX_JOBS_PER_REQUEST} programs at a time.`, 'TOO_MANY');
+    const open = await pool.query(
+      `SELECT program_name FROM program_jobs WHERE machine_id = $1 AND action = 'FETCH' AND status = ANY($2)`,
+      [machine.id, jobs.OPEN]
+    );
+    const waiting = names.filter(n => open.rows.some(r => sameProgram(r.program_name, n)));
+    if (waiting.length) throw fail(`Already asked for: ${waiting.join(', ')}.`, 'DUPLICATE_JOB', 409, { names: waiting });
+    const created = [];
+    for (const name of names) {
+      created.push(await insertJob({ companyId, machine, action: 'FETCH', programName: name, userId: req.user.id }));
+    }
+    return { jobs: created };
+  }
+
+  if (action !== 'SEND') throw fail('action must be SEND or FETCH.', 'BAD_ACTION');
+  if (!allowed(req, 'page:programs:transfer')) throw fail('Sending a program to a machine is not part of your role.', 'FORBIDDEN', 403);
+
+  const fileIds = [...new Set((body.file_ids || []).map(Number))];
+  const machineIds = [...new Set((body.machine_ids || []).map(Number))];
+  if (!fileIds.length) throw fail('Choose a program to send.', 'NO_PROGRAM');
+  if (!machineIds.length) throw fail('Choose a machine.', 'NO_MACHINE');
+  if (fileIds.length * machineIds.length > MAX_JOBS_PER_REQUEST) {
+    throw fail(`At most ${MAX_JOBS_PER_REQUEST} transfers at a time.`, 'TOO_MANY');
+  }
+  const overwrite = body.overwrite === true || String(body.overwrite) === 'true';
+
+  const files = [];
+  for (const id of fileIds) files.push(await getFile(id, companyId));
+  const machines = [];
+  for (const id of machineIds) machines.push(await getMachine(id, companyId));
+
+  const exists = [];
+  const duplicates = [];
+  for (const machine of machines) {
+    for (const file of files) {
+      const check = await checkSend(machine, file.program_name, overwrite);
+      if (check.duplicate) duplicates.push(`${file.program_name} → ${machine.machine_serial_no}`);
+      if (check.exists) exists.push(`${file.program_name} on ${machine.machine_serial_no}`);
+    }
+  }
+  if (duplicates.length) {
+    throw fail(`Already waiting to be sent: ${duplicates.join(', ')}.`, 'DUPLICATE_JOB', 409, { names: duplicates });
+  }
+  if (exists.length) throw fail(`Already on the machine: ${exists.join(', ')}.`, 'FILE_EXISTS', 409, { names: exists });
+
+  const created = [];
+  for (const machine of machines) {
+    for (const file of files) {
+      let fileId = file.id;
+      if (file.machine_id !== machine.id) {
+        const saved = await storage.save({
+          machine, kind: 'NEW', programName: file.program_name,
+          buffer: await storage.read(file.folder, file.stored_name)
+        });
+        fileId = (await insertFile({ machine, saved, userId: req.user.id, note: `Copied from ${file.folder}/${file.stored_name}` })).id;
+      }
+      created.push(await insertJob({ companyId, machine, action: 'SEND', programName: file.program_name,
+                                     fileId, overwrite, userId: req.user.id }));
+    }
+  }
+  audit.log({ user_id: req.user.id, company_id: companyId, action: 'PROGRAM_SEND', resource: 'program_job',
+              new_value: { jobs: created.map(j => j.id), overwrite }, ip_address: req.ip, user_agent: req.headers['user-agent'] });
+  return { jobs: created };
+};
+
+exports.listJobs = async (req) => {
+  const { machine_id, status, action } = req.query;
+  const { limit, page, offset } = pageOf(req.query, 20);
+  const values = [req.user.company_id];
+  let where = `j.company_id = $1`;
+  if (machine_id) { values.push(Number(machine_id)); where += ` AND j.machine_id = $${values.length}`; }
+  if (action) { values.push(String(action).toUpperCase()); where += ` AND j.action = $${values.length}`; }
+  if (status === 'open') { values.push(jobs.OPEN); where += ` AND j.status = ANY($${values.length})`; }
+  else if (status) { values.push(String(status).toUpperCase()); where += ` AND j.status = $${values.length}`; }
+
+  const [data, count] = await Promise.all([
+    pool.query(
+      `SELECT ${jobs.JOB_COLUMNS} FROM program_jobs j ${jobs.JOB_JOINS}
+        WHERE ${where}
+        ORDER BY j.requested_at DESC, j.id DESC
+        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, limit, offset]
+    ),
+    pool.query(`SELECT COUNT(*)::int AS total FROM program_jobs j WHERE ${where}`, values)
+  ]);
+  return { data: data.rows.map(jobs.view), total: count.rows[0].total, page, limit };
+};
+
+/** Withdraw a job the device has not taken yet. */
+exports.cancelJob = async (req) => {
+  const job = await jobs.getJob(Number(req.params.id) || 0);
+  if (!job || job.company_id !== req.user.company_id) throw fail('Job not found.', 'JOB_NOT_FOUND', 404);
+  const need = job.action === 'SEND' ? 'page:programs:transfer' : 'page:programs:fetch';
+  if (!allowed(req, need)) throw fail('Cancelling this job is not part of your role.', 'FORBIDDEN', 403);
+  if (job.status !== 'QUEUED') {
+    throw fail(job.status === 'DELIVERED'
+      ? 'The machine\'s device has already taken this job; it can no longer be cancelled.'
+      : `This job is already ${job.status.toLowerCase()}.`, 'JOB_NOT_OPEN', 409);
+  }
+  const { rowCount } = await pool.query(
+    `UPDATE program_jobs SET status = 'CANCELLED', finished_at = NOW(), message = $2
+      WHERE id = $1 AND status = 'QUEUED'`,
+    [job.id, `Cancelled by ${req.user.username || 'a user'}.`]
+  );
+  if (!rowCount) throw fail('The machine\'s device took this job a moment ago; it can no longer be cancelled.', 'JOB_NOT_OPEN', 409);
+  const done = await jobs.getJob(job.id);
+  await jobs.announce(done);
+  return jobs.view(done);
+};
+
+/* ─────────────── device tokens ─────────────── */
+
+/**
+ * A new token for the machine's device. Any token it had stops working now:
+ * one machine, one live token. The token is in this answer only — it is not
+ * stored, and cannot be shown again.
+ */
+exports.createDeviceToken = async (req) => {
+  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const label = req.body?.label ? String(req.body.label).trim().slice(0, 100) : null;
+  const { token, hash, prefix } = deviceToken.generate();
+
+  const client = await pool.connect();
+  let device;
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE program_devices SET revoked_at = NOW(), revoked_by = $2 WHERE machine_id = $1 AND revoked_at IS NULL`,
+      [machine.id, req.user.id]
+    );
+    ({ rows: [device] } = await client.query(
+      `INSERT INTO program_devices (company_id, machine_id, label, token_prefix, token_hash, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, machine_id, label, token_prefix, created_at`,
+      [machine.company_id, machine.id, label, prefix, hash, req.user.id]
+    ));
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
   } finally {
     client.release();
   }
-}
 
-/* ─────────────────────────────────────────────────────────────
-   Where the connection test may point
-
-   testConnection accepts an address in the request body so the machine
-   form can be tried before it is saved. That makes it, unguarded, a
-   port scanner any logged-in user can drive: the server connects
-   wherever it is told and reports back whether the port answered.
-   On EC2 that includes 169.254.169.254, the instance metadata service.
-
-   CNC controllers live on private shop-floor networks, so restricting
-   the probe to RFC 1918 space costs nothing real and closes the hole.
-   Only body-supplied addresses are checked — an address already stored
-   on a machine row was set by an admin and is left alone.
-   ───────────────────────────────────────────────────────────── */
-
-function assertPrivateAddress(ip) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip).trim());
-  const octets = m && m.slice(1).map(Number);
-
-  if (!octets || octets.some(n => n > 255)) {
-    const e = new Error(`"${ip}" is not a valid IPv4 address.`);
-    e.status = 400;
-    e.code = 'BAD_ADDRESS';
-    return Promise.reject(e);
-  }
-
-  const [a, b] = octets;
-  const isPrivate = a === 10
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168);
-
-  if (!isPrivate) {
-    const e = new Error(
-      `${ip} is not on a private network. CNC controllers must be reachable ` +
-      `at a 10.x, 172.16–31.x or 192.168.x address.`
-    );
-    e.status = 400;
-    e.code = 'ADDRESS_NOT_PRIVATE';
-    return Promise.reject(e);
-  }
-  return Promise.resolve();
-}
-
-/**
- * Supervisor authorisation travels in the body alongside `overwrite`,
- * so the overwrite retry — which re-sends the whole batch — carries the
- * same code and never re-prompts the supervisor.
- */
-function authFromRequest(req) {
-  return {
-    authorization_id: req.body?.authorization_id,
-    code: req.body?.authorization_code
-  };
-}
-
-/**
- * Error codes that deserve their own per-row status in a batch result
- * rather than being flattened into FAILED. Each one has a distinct fix:
- * overwrite it, enter a code, or ask an admin to assign a supervisor.
- */
-const BATCH_ROW_STATUS = {
-  FILE_EXISTS:            'EXISTS',
-  EXISTENCE_UNKNOWN:      'EXISTS',        // same fix: confirm the overwrite
-  MACHINE_BUSY:           'BUSY',
-  NOT_CONFIGURED:         'NOT_CONFIGURED',
-  BAD_DIRECTORY:          'NOT_CONFIGURED',
-  EMPTY_PROGRAM:          'FAILED',
-  BACKUP_FAILED:          'BACKUP_FAILED',   // nothing was sent; the old program is intact
-  APPROVAL_REQUIRED:      'APPROVAL_REQUIRED',
-  NO_SUPERVISOR_ASSIGNED: 'NO_SUPERVISOR',
-  INVALID_CODE:           'APPROVAL_REQUIRED',
-  CODE_EXPIRED:           'APPROVAL_REQUIRED',
-  CODE_LOCKED:            'APPROVAL_REQUIRED',
-  CODE_EXHAUSTED:         'APPROVAL_REQUIRED',
-  WRONG_MACHINE:          'APPROVAL_REQUIRED'
+  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'DEVICE_TOKEN_CREATE', resource: 'program_device',
+              resource_id: device.id, new_value: { machine: machine.machine_serial_no, token_prefix: prefix },
+              ip_address: req.ip, user_agent: req.headers['user-agent'] });
+  return { token, device: { ...device, machine_serial_no: machine.machine_serial_no, folder: storage.machineFolder(machine) } };
 };
 
-/**
- * Notify the user who ran the transfer. Best-effort: a failure to write
- * the notification must never mask the transfer result itself.
- */
-async function notifyTransfer({ companyId, userId, ok, direction, programName, machineSerial, reason, backupName }) {
-  const verb = direction === 'DOWNLOAD' ? 'received from' : 'sent to';
-  const title = ok
-    ? `Program ${verb} ${machineSerial}`
-    : `Program transfer failed — ${machineSerial}`;
-  const message = ok
-    ? `"${programName}" was ${verb} ${machineSerial}.` +
-      (backupName ? ` The program it replaced was saved as "${backupName}".` : '')
-    : `"${programName}" could not be ${direction === 'DOWNLOAD' ? 'received from' : 'sent to'} ${machineSerial}. ${reason || ''}`.trim();
-
-  try {
-    // unless the person switched Program transfer off in Settings
-    await pool.query(
-      `INSERT INTO notifications (company_id, user_id, type, title, message, link)
-       SELECT $1, $2, $3, $4, $5, $6
-        WHERE NOT EXISTS (SELECT 1 FROM notification_preferences
-                           WHERE user_id = $2 AND notify_program_transfer = false)`,
-      [companyId, userId, ok ? 'INFO' : 'WARNING', title, message, '/programs']
-    );
-  } catch (err) {
-    console.error('Transfer notification failed:', err.message);
-  }
-}
-
-/** Stream byte-level progress to the initiating user's open tabs. */
-function progressEmitter(userId, transferId, fileName, direction) {
-  return ({ bytes, total }) => {
-    emitToUser(userId, 'programTransferProgress', {
-      transfer_id: transferId,
-      file_name:   fileName,
-      direction,
-      bytes,
-      total,
-      percent: total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : null
-    });
-  };
-}
-
-/* ─────────────────────────────────────────────────────────────
-   Programs stored on the server
-   ───────────────────────────────────────────────────────────── */
-
-/* UPLOAD PROGRAM (G-code / NC file) */
-exports.createProgram = async (req) => {
-  if (!req.file) {
-    throw new Error('No program file uploaded');
-  }
-
-  const { name, description } = req.body;
-  const file = req.file;
-
-  const result = await pool.query(
-    `INSERT INTO programs (company_id, name, file_name, content, file_size, description, uploaded_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, name, file_name, file_size, description, created_at`,
-    [
-      req.user.company_id,
-      name || file.originalname,
-      file.originalname,
-      file.buffer,
-      file.size,
-      description || null,
-      req.user.id
-    ]
-  );
-
-  return result.rows[0];
-};
-
-/* LIST PROGRAMS */
-exports.getPrograms = async (req) => {
-  const { search = '', page = 1, limit = 10 } = req.query;
-  const offset = (page - 1) * limit;
-  const values = [req.user.company_id];
-
-  // Backups are excluded: this list is what an operator picks from to send,
-  // and one row per overwrite would bury the programs they actually curate.
-  // They are listed by getBackups instead, per machine, where they mean
-  // something.
-  let whereSQL = `WHERE p.company_id = $1 AND p.is_active = true AND p.is_backup = false`;
-  if (search) {
-    values.push(`%${search}%`);
-    whereSQL += ` AND (p.name ILIKE $${values.length} OR p.file_name ILIKE $${values.length})`;
-  }
-
-  const dataQuery = `
-    SELECT p.id, p.name, p.file_name, p.file_size, p.description, p.created_at,
-           u.username AS uploaded_by_name
-    FROM programs p
-    LEFT JOIN users u ON u.id = p.uploaded_by
-    ${whereSQL}
-    ORDER BY p.created_at DESC
-    LIMIT $${values.length + 1} OFFSET $${values.length + 2}
-  `;
-
-  const countQuery = `SELECT COUNT(*)::int AS total FROM programs p ${whereSQL}`;
-
-  const [dataRes, countRes] = await Promise.all([
-    pool.query(dataQuery, [...values, limit, offset]),
-    pool.query(countQuery, values)
-  ]);
-
-  return { data: dataRes.rows, total: countRes.rows[0].total };
-};
-
-/* DOWNLOAD PROGRAM FILE */
-exports.getProgramFile = async (req) => {
-  const result = await pool.query(
-    `SELECT file_name, content FROM programs
-     WHERE id = $1 AND company_id = $2 AND is_active = true`,
-    [req.params.id, req.user.company_id]
-  );
-  if (result.rowCount === 0) {
-    throw new Error('Program not found or access denied');
-  }
-  return result.rows[0];
-};
-
-/* DELETE PROGRAM (soft delete — transfer history keeps its name) */
-exports.deleteProgram = async (req) => {
-  const result = await pool.query(
-    `UPDATE programs SET is_active = false
-     WHERE id = $1 AND company_id = $2
-     RETURNING id`,
-    [req.params.id, req.user.company_id]
-  );
-  if (result.rowCount === 0) {
-    throw new Error('Program not found or access denied');
-  }
-};
-
-/* ─────────────────────────────────────────────────────────────
-   Programs living on the controller
-   ───────────────────────────────────────────────────────────── */
-
-/* BROWSE FILES ON THE CNC */
-exports.listMachinePrograms = async (req) => {
+/** Stop the machine's device at once (a lost or replaced device). */
+exports.revokeDeviceToken = async (req) => {
   const machine = await getMachine(req.params.machineId, req.user.company_id);
-  const files = await transportFor(machine).listMachineFiles(machine);
-
-  const { search = '' } = req.query;
-  const term = String(search).trim().toLowerCase();
-  return term
-    ? files.filter(f => f.name.toLowerCase().includes(term))
-    : files;
-};
-
-/* CONNECTION STATUS — one machine, for the live indicator */
-exports.getMachineStatus = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id);
-  // Report the protocol alongside the status: "offline" means something
-  // different for FOCAS (port 8193, licensed option) than for FTP, and
-  // whoever is diagnosing it needs to know which one was tried.
-  const protocol = protocolFor(machine);
-  try {
-    await transportFor(machine).testMachineConnection(machine);
-    return { machine_id: machine.id, online: true, protocol };
-  } catch (err) {
-    return { machine_id: machine.id, online: false, protocol, reason: err.message };
-  }
-};
-
-/* ─────────────────────────────────────────────────────────────
-   Transfers
-   ───────────────────────────────────────────────────────────── */
-
-/**
- * Send one stored program to one machine.
- * Shared by the single and batch endpoints so both log and notify
- * identically.
- */
-async function uploadOne({ program, machine, user, overwrite, auth, verified }) {
-  // Supervisor sign-off comes first — before the machine lock and the FTP
-  // probe, so an unauthorised caller never opens a session against the
-  // controller and never blocks a legitimate transfer by holding the lock.
-  // The guard lives here rather than in route middleware because both
-  // the single and batch endpoints funnel through this function, so
-  // there is no path to a machine that can skip it.
-  //
-  // `verified` is only ever supplied by transferBatch, which checks the
-  // code once per machine. Without it every program in a batch would be a
-  // separate verification, so one mistyped digit across five selected
-  // programs would burn five of the five attempts and lock the code
-  // outright. Absent it, this verifies for itself.
-  const authorization = verified || await assertAuthorized(machine, user, auth);
-
-  return withMachineLock(machine, () =>
-    uploadOneLocked({ program, machine, user, overwrite, authorization })
+  const { rows } = await pool.query(
+    `UPDATE program_devices SET revoked_at = NOW(), revoked_by = $2
+      WHERE machine_id = $1 AND revoked_at IS NULL RETURNING id, token_prefix`,
+    [machine.id, req.user.id]
   );
-}
-
-/* ─────────────────────────────────────────────────────────────
-   Back up what is on the machine before replacing it
-
-   A program sitting on a controller is not necessarily a copy of anything
-   in the library. Operators edit at the panel — feeds, speeds, offsets
-   tuned against the actual part — and those edits usually exist nowhere
-   else. Overwriting on a confirmation dialog alone means the only copy of
-   that work is gone the moment someone clicks through.
-
-   So the old program is read off the machine and stored first. It is
-   stored as an ordinary program row, flagged is_backup, which means it can
-   be sent straight back if the new one turns out to be wrong. That is the
-   whole reason to keep it, and a shape that could not be sent back would
-   be a museum piece.
-   ───────────────────────────────────────────────────────────── */
-
-function backupFailedError(fileName, reason) {
-  const e = new Error(
-    `Could not back up "${fileName}" from the machine, so nothing was sent. ${reason}`
-  );
-  e.status = 502;
-  e.code = 'BACKUP_FAILED';
-  return e;
-}
-
-/**
- * Read the program currently on the machine and store it as a backup.
- * Runs inside the machine lock, between the existence check and the send.
- *
- * @returns {Promise<{id: number, name: string, file_size: number}>}
- */
-async function backupBeforeOverwrite({ machine, program, user, transport }) {
-  let content;
-  try {
-    content = await transport.fetchProgramFromMachine(machine, program.file_name);
-  } catch (err) {
-    // Refusing to continue is the point. Sending anyway would destroy the
-    // very thing the backup exists to protect, and the operator would have
-    // no way of knowing until they went looking for it.
-    throw backupFailedError(program.file_name, err.message);
-  }
-
-  if (!content || content.length === 0) {
-    throw backupFailedError(program.file_name, 'The machine returned an empty program.');
-  }
-
-  const takenAt = new Date();
-  const label = takenAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
-
-  const { rows: [row] } = await pool.query(
-    `INSERT INTO programs
-       (company_id, name, file_name, content, file_size, description, uploaded_by,
-        source, is_backup, backup_of_machine_id, backup_of_program_id, backup_taken_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'CNC',TRUE,$8,$9,$10)
-     RETURNING id, name, file_size`,
-    [
-      user.company_id,
-      `${program.file_name} — ${machine.machine_serial_no} backup ${label}`,
-      program.file_name,
-      content,
-      content.length,
-      `Read from ${machine.machine_serial_no} before "${program.name}" replaced it.`,
-      user.id,
-      machine.id,
-      program.id,
-      takenAt
-    ]
-  );
-
-  return row;
-}
-
-/** The transfer itself. Only ever called holding the machine's lock. */
-async function uploadOneLocked({ program, machine, user, overwrite, authorization }) {
-  const companyId = user.company_id;
-  const transport = transportFor(machine);
-
-  const exists = await transport.machineFileExists(machine, program.file_name);
-  if (exists && !overwrite) {
-    throw fileExistsError(program.file_name);
-  }
-
-  // Read the old program off the machine before replacing it. Still inside
-  // the machine lock, so nothing can write between the backup and the send.
-  const backup = exists
-    ? await backupBeforeOverwrite({ machine, program, user, transport })
-    : null;
-
-  // log first so an interrupted transfer still leaves a trace
-  const { rows: [{ id: transferId }] } = await pool.query(
-    `INSERT INTO program_transfers
-       (company_id, program_id, machine_id, program_name, file_name, machine_serial,
-        direction, file_size, status, transferred_by,
-        authorized_by, authorization_id, authorized_at, backup_program_id)
-     VALUES ($1,$2,$3,$4,$5,$6,'UPLOAD',$7,'PENDING',$8,$9,$10,NOW(),$11)
-     RETURNING id`,
-    [companyId, program.id, machine.id, program.name, program.file_name,
-     machine.machine_serial_no, program.content?.length || null, user.id,
-     authorization.supervisor_id, authorization.id, backup?.id ?? null]
-  );
-
-  try {
-    await transport.sendProgramToMachine(
-      machine, program.content, program.file_name,
-      progressEmitter(user.id, transferId, program.file_name, 'UPLOAD')
-    );
-
-    await pool.query(
-      `UPDATE program_transfers SET status = 'SUCCESS', finished_at = NOW() WHERE id = $1`,
-      [transferId]
-    );
-    await notifyTransfer({
-      companyId, userId: user.id, ok: true, direction: 'UPLOAD',
-      programName: program.name, machineSerial: machine.machine_serial_no,
-      backupName: backup?.name
-    });
-
-    return {
-      transfer_id: transferId,
-      status: 'SUCCESS',
-      // The UI says so explicitly — an operator who knows the old program
-      // was kept will overwrite when they should, and go looking for it
-      // when they need to.
-      backup: backup ? { id: backup.id, name: backup.name, file_size: backup.file_size } : null
-    };
-  } catch (err) {
-    await pool.query(
-      `UPDATE program_transfers SET status = 'FAILED', error_message = $2, finished_at = NOW() WHERE id = $1`,
-      [transferId, err.message]
-    );
-    await notifyTransfer({
-      companyId, userId: user.id, ok: false, direction: 'UPLOAD',
-      programName: program.name, machineSerial: machine.machine_serial_no, reason: err.message
-    });
-
-    // Keep the original code so a batch row can say "fix the config" or
-    // "confirm the overwrite" rather than a flat FAILED.
-    const e = new Error(`Transfer failed: ${err.message}`);
-    e.status = err.status || 502;
-    e.code = err.code;
-    throw e;
-  }
-}
-
-/** Load a stored program with its bytes, or throw. */
-async function getProgram(programId, companyId) {
-  const { rows, rowCount } = await pool.query(
-    `SELECT id, name, file_name, content FROM programs
-     WHERE id = $1 AND company_id = $2 AND is_active = true`,
-    [programId, companyId]
-  );
-  if (rowCount === 0) throw new Error('Program not found or access denied');
-  return rows[0];
-}
-
-/* TRANSFER PROGRAM TO MACHINE via FTP */
-exports.transferProgram = async (req) => {
-  const { id: programId, machineId } = req.params;
-  const overwrite = req.body?.overwrite === true || req.query?.overwrite === 'true';
-  const auth = authFromRequest(req);
-
-  const [program, machine] = await Promise.all([
-    getProgram(programId, req.user.company_id),
-    getMachine(machineId, req.user.company_id)
-  ]);
-
-  return uploadOne({ program, machine, user: req.user, overwrite, auth });
+  if (!rows.length) throw fail('This machine has no device token.', 'NO_DEVICE', 404);
+  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'DEVICE_TOKEN_REVOKE', resource: 'program_device',
+              resource_id: rows[0].id, old_value: { machine: machine.machine_serial_no, token_prefix: rows[0].token_prefix },
+              ip_address: req.ip, user_agent: req.headers['user-agent'] });
 };
 
-/**
- * BATCH TRANSFER — any number of programs to any number of machines.
- * One machine failing must not abort the rest, so every combination is
- * attempted and reported individually.
- */
-exports.transferBatch = async (req) => {
-  const { program_ids = [], machine_ids = [], overwrite = false } = req.body || {};
-  const auth = authFromRequest(req);
-
-  if (!Array.isArray(program_ids) || program_ids.length === 0) {
-    throw new Error('Select at least one program to transfer');
-  }
-  if (!Array.isArray(machine_ids) || machine_ids.length === 0) {
-    throw new Error('Select at least one machine to transfer to');
-  }
-
-  const companyId = req.user.company_id;
-  const [programs, machines] = await Promise.all([
-    Promise.all(program_ids.map(id => getProgram(id, companyId))),
-    Promise.all(machine_ids.map(id => getMachine(id, companyId)))
-  ]);
-
-  const results = [];
-  for (const machine of machines) {
-    // Authorise once per machine, not once per program. Each machine still
-    // needs its own supervisor's code, so a batch spanning two machines
-    // fails cleanly on the one it has no authorisation for.
-    let verified;
-    try {
-      verified = await assertAuthorized(machine, req.user, auth);
-    } catch (err) {
-      for (const program of programs) {
-        results.push({
-          program_id: program.id, program_name: program.name,
-          machine_id: machine.id, machine_serial: machine.machine_serial_no,
-          status: BATCH_ROW_STATUS[err.code] || 'FAILED',
-          code: err.code, message: err.message
-        });
-      }
-      continue;
-    }
-
-    for (const program of programs) {
-      try {
-        const r = await uploadOne({ program, machine, user: req.user, overwrite, verified });
-        results.push({
-          program_id: program.id, program_name: program.name,
-          machine_id: machine.id, machine_serial: machine.machine_serial_no,
-          status: 'SUCCESS', transfer_id: r.transfer_id,
-          // so the UI can tell the operator their old program was kept
-          backup: r.backup
-        });
-      } catch (err) {
-        // A batch can span machines with different supervisors, so an
-        // authorisation failure has to be reported per combination —
-        // collapsing it into FAILED would show "3 of 4 transfers failed"
-        // with no hint that the fix is a code, not a retry.
-        results.push({
-          program_id: program.id, program_name: program.name,
-          machine_id: machine.id, machine_serial: machine.machine_serial_no,
-          status: BATCH_ROW_STATUS[err.code] || 'FAILED',
-          code: err.code, message: err.message
-        });
-      }
-    }
-  }
-
-  const succeeded = results.filter(r => r.status === 'SUCCESS').length;
-  return { total: results.length, succeeded, failed: results.length - succeeded, results };
-};
-
-/**
- * PULL A PROGRAM OFF THE CONTROLLER into the server library.
- * Requirement: "download programs from the CNC Controller to the Local PC".
- */
-exports.fetchFromMachine = async (req) => {
-  const { machineId } = req.params;
-  const { file_name } = req.body || {};
-  if (!file_name) throw new Error('file_name is required');
-
-  const companyId = req.user.company_id;
-  const machine = await getMachine(machineId, companyId);
-
-  // Same single-session constraint as an upload — a fetch running while
-  // a send is in flight would be a second control connection.
-  return withMachineLock(machine, () => fetchLocked(machine, file_name, req.user));
-};
-
-async function fetchLocked(machine, file_name, user) {
-  const companyId = user.company_id;
-
-  const { rows: [{ id: transferId }] } = await pool.query(
-    `INSERT INTO program_transfers
-       (company_id, machine_id, program_name, file_name, machine_serial,
-        direction, status, transferred_by)
-     VALUES ($1,$2,$3,$4,$5,'DOWNLOAD','PENDING',$6)
-     RETURNING id`,
-    [companyId, machine.id, file_name, file_name, machine.machine_serial_no, user.id]
-  );
-
-  try {
-    const content = await transportFor(machine).fetchProgramFromMachine(
-      machine, file_name,
-      progressEmitter(user.id, transferId, file_name, 'DOWNLOAD')
-    );
-
-    const { rows: [program] } = await pool.query(
-      `INSERT INTO programs
-         (company_id, name, file_name, content, file_size, description, uploaded_by, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'CNC')
-       RETURNING id, name, file_name, file_size, created_at`,
-      [companyId, file_name, file_name, content, content.length,
-       `Retrieved from ${machine.machine_serial_no}`, user.id]
-    );
-
-    await pool.query(
-      `UPDATE program_transfers
-       SET status='SUCCESS', finished_at=NOW(), program_id=$2, file_size=$3
-       WHERE id=$1`,
-      [transferId, program.id, content.length]
-    );
-    await notifyTransfer({
-      companyId, userId: user.id, ok: true, direction: 'DOWNLOAD',
-      programName: file_name, machineSerial: machine.machine_serial_no
-    });
-
-    return { transfer_id: transferId, status: 'SUCCESS', program };
-  } catch (err) {
-    await pool.query(
-      `UPDATE program_transfers SET status = 'FAILED', error_message = $2, finished_at = NOW() WHERE id = $1`,
-      [transferId, err.message]
-    );
-    await notifyTransfer({
-      companyId, userId: user.id, ok: false, direction: 'DOWNLOAD',
-      programName: file_name, machineSerial: machine.machine_serial_no, reason: err.message
-    });
-
-    // Preserve the original code (BAD_DIRECTORY, NOT_CONFIGURED, …) so the
-    // UI can tell a misconfiguration from an unreachable machine.
-    const e = new Error(`Download failed: ${err.message}`);
-    e.status = err.status || 502;
-    e.code = err.code;
-    throw e;
-  }
-}
-
-/* BACKUPS TAKEN OFF A MACHINE
-   The answer to "what was on this machine before we changed it?" — which is
-   asked when a new program is behaving wrong and someone needs the previous
-   one back on the controller now, not after a search through the library. */
-exports.getBackups = async (req) => {
-  const { machine_id, page = 1, limit = 20 } = req.query;
-  const offset = (page - 1) * limit;
-  const values = [req.user.company_id];
-
-  let whereSQL = `WHERE p.company_id = $1 AND p.is_active = true AND p.is_backup = true`;
-  if (machine_id) {
-    values.push(machine_id);
-    whereSQL += ` AND p.backup_of_machine_id = $${values.length}`;
-  }
-
-  const dataQuery = `
-    SELECT p.id, p.name, p.file_name, p.file_size, p.backup_taken_at,
-           p.backup_of_machine_id, m.machine_serial_no,
-           u.username AS taken_by_name,
-           r.name AS replaced_by_program_name
-    FROM programs p
-    LEFT JOIN machines m ON m.id = p.backup_of_machine_id
-    LEFT JOIN users    u ON u.id = p.uploaded_by
-    LEFT JOIN programs r ON r.id = p.backup_of_program_id
-    ${whereSQL}
-    ORDER BY p.backup_taken_at DESC, p.id DESC
-    LIMIT $${values.length + 1} OFFSET $${values.length + 2}
-  `;
-
-  const countQuery = `SELECT COUNT(*)::int AS total FROM programs p ${whereSQL}`;
-
-  const [dataRes, countRes] = await Promise.all([
-    pool.query(dataQuery, [...values, limit, offset]),
-    pool.query(countQuery, values)
-  ]);
-
-  return { data: dataRes.rows, total: countRes.rows[0].total };
-};
-
-/* TRANSFER HISTORY */
-exports.getTransfers = async (req) => {
-  const { page = 1, limit = 20, machine_id, direction } = req.query;
-  const offset = (page - 1) * limit;
-  const values = [req.user.company_id];
-
-  let whereSQL = `WHERE t.company_id = $1`;
-  if (machine_id) {
-    values.push(machine_id);
-    whereSQL += ` AND t.machine_id = $${values.length}`;
-  }
-  if (direction) {
-    values.push(String(direction).toUpperCase());
-    whereSQL += ` AND t.direction = $${values.length}`;
-  }
-
-  const dataQuery = `
-    SELECT t.id, t.program_name, t.file_name, t.machine_serial, t.status,
-           t.direction, t.file_size, t.error_message, t.started_at, t.finished_at,
-           t.authorized_at, t.backup_program_id,
-           u.username AS transferred_by_name,
-           s.username AS authorized_by_name,
-           b.name     AS backup_program_name
-    FROM program_transfers t
-    LEFT JOIN users u ON u.id = t.transferred_by
-    LEFT JOIN users s ON s.id = t.authorized_by
-    LEFT JOIN programs b ON b.id = t.backup_program_id
-    ${whereSQL}
-    ORDER BY t.started_at DESC
-    LIMIT $${values.length + 1} OFFSET $${values.length + 2}
-  `;
-
-  const countQuery = `SELECT COUNT(*)::int AS total FROM program_transfers t ${whereSQL}`;
-
-  const [dataRes, countRes] = await Promise.all([
-    pool.query(dataQuery, [...values, limit, offset]),
-    pool.query(countQuery, values)
-  ]);
-
-  return { data: dataRes.rows, total: countRes.rows[0].total };
-};
-
-/* TEST FTP CONNECTION
-   Accepts FTP details in the body so the machine form can test unsaved
-   values. When machine_id is given and a field is blank, falls back to
-   the stored value — the password is never sent to the frontend (it is
-   write-only), so a blank password means "use the saved one". */
-exports.testConnection = async (req) => {
-  const { machine_id, ip_address, ftp_port, ftp_user, ftp_pass } = req.body || {};
-
-  // Only an address typed into this request is checked; a stored one was
-  // set by an admin through the machine form and is trusted as-is.
-  if (ip_address) await assertPrivateAddress(ip_address);
-
-  let config = { ip_address, ftp_port, ftp_user, ftp_pass };
-
-  if (machine_id) {
-    const result = await pool.query(
-      `SELECT ip_address, ftp_port, ftp_user, ftp_pass
-       FROM machines
-       WHERE id = $1 AND company_id = $2`,
-      [machine_id, req.user.company_id]
-    );
-    if (result.rowCount === 0) throw new Error('Machine not found or access denied');
-    const stored = result.rows[0];
-    config = {
-      ip_address: ip_address || stored.ip_address,
-      ftp_port:   ftp_port   || stored.ftp_port,
-      ftp_user:   ftp_user   || stored.ftp_user,
-      ftp_pass:   ftp_pass   || stored.ftp_pass
-    };
-  }
-
-  await transportFor(config).testMachineConnection(config);
-};
-
-/* MARK STUCK 'PENDING' TRANSFERS AS FAILED
-   FTP transfers time out after 30s; anything PENDING for over 5 minutes
-   means the server restarted or the connection hung mid-transfer.
-   Called by the cron scheduler every 10 minutes. */
-exports.cleanupStuckTransfers = async () => {
-  const result = await pool.query(
-    `UPDATE program_transfers
-     SET status = 'FAILED',
-         error_message = 'Transfer interrupted — server restarted or connection hung',
-         finished_at = NOW()
-     WHERE status = 'PENDING'
-       AND started_at < NOW() - INTERVAL '5 minutes'
-     RETURNING id`
-  );
-  return result.rowCount;
-};
+exports._internal = { sameProgram, checkSend };

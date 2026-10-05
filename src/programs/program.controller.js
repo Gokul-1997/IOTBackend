@@ -1,122 +1,87 @@
+const multer = require('multer');
 const service = require('./program.service');
+const storage = require('./storage');
 
-exports.createProgram = async (req, res) => {
+/* One error shape for the screen: a code it can act on (FILE_EXISTS asks
+   "overwrite?"), the names involved, and a sentence to show. */
+const handle = fn => async (req, res) => {
   try {
-    const data = await service.createProgram(req);
-    res.json({ status: 'success', data });
+    await fn(req, res);
   } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
-  }
-};
-
-exports.getPrograms = async (req, res) => {
-  try {
-    const result = await service.getPrograms(req);
-    res.json({ status: 'success', data: result.data, total: result.total });
-  } catch (e) {
-    res.status(500).json({ status: 'error', message: e.message });
-  }
-};
-
-exports.downloadProgram = async (req, res) => {
-  try {
-    const file = await service.getProgramFile(req);
-    res.setHeader('Content-Disposition', `attachment; filename="${file.file_name}"`);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.send(file.content);
-  } catch (e) {
-    res.status(404).json({ status: 'error', message: e.message });
-  }
-};
-
-exports.deleteProgram = async (req, res) => {
-  try {
-    await service.deleteProgram(req);
-    res.json({ status: 'success', message: 'Program deleted successfully' });
-  } catch (e) {
-    res.status(e.status || 400).json({ status: 'error', code: e.code, message: e.message });
-  }
-};
-
-exports.transferProgram = async (req, res) => {
-  try {
-    const data = await service.transferProgram(req);
-    res.json({ status: 'success', data, message: 'Program transferred to machine' });
-  } catch (e) {
-    // 409 carries a code so the UI can offer "overwrite?" instead of a plain error
-    res.status(e.status || 400).json({ status: 'error', code: e.code, message: e.message });
-  }
-};
-
-exports.transferBatch = async (req, res) => {
-  try {
-    const data = await service.transferBatch(req);
-    res.json({
-      status: 'success',
-      data,
-      message: `${data.succeeded} of ${data.total} transfers completed`
+    if (res.headersSent) { console.error('[programs]', e); return res.destroy(); }
+    if (e instanceof multer.MulterError) {
+      const tooBig = e.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooBig ? 413 : 400).json({
+        status: 'error', code: tooBig ? 'TOO_LARGE' : 'BAD_UPLOAD',
+        message: tooBig ? `The file is larger than ${Math.round(storage.MAX_BYTES / 1048576)} MB.` : e.message
+      });
+    }
+    const status = e.status || 500;
+    if (status >= 500) console.error('[programs]', req.method, req.originalUrl, e);
+    res.status(status).json({
+      status: 'error', code: e.code, names: e.names,
+      message: status >= 500 ? 'Something went wrong on the server. Try again.' : e.message
     });
-  } catch (e) {
-    res.status(e.status || 400).json({ status: 'error', code: e.code, message: e.message });
   }
 };
 
-exports.listMachinePrograms = async (req, res) => {
-  try {
-    const data = await service.listMachinePrograms(req);
-    res.json({ status: 'success', data, total: data.length });
-  } catch (e) {
-    res.status(e.status || 502).json({ status: 'error', message: e.message });
-  }
-};
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: storage.MAX_BYTES, files: 1, fields: 10 } });
+const parseUpload = (req, res) => new Promise((resolve, reject) =>
+  upload.single('file')(req, res, err => (err ? reject(err) : resolve())));
 
-exports.fetchFromMachine = async (req, res) => {
-  try {
-    const data = await service.fetchFromMachine(req);
-    res.json({ status: 'success', data, message: 'Program retrieved from machine' });
-  } catch (e) {
-    res.status(e.status || 400).json({ status: 'error', code: e.code, message: e.message });
-  }
-};
+exports.listMachines = handle(async (req, res) => res.json({ status: 'success', data: await service.listMachines(req) }));
 
-exports.getMachineStatus = async (req, res) => {
-  try {
-    // Reachability is a result, not an error — an offline machine still 200s
-    // so the indicator can render "offline" rather than failing the request.
-    const data = await service.getMachineStatus(req);
-    res.json({ status: 'success', data });
-  } catch (e) {
-    res.status(e.status || 400).json({ status: 'error', message: e.message });
-  }
-};
+exports.controllerFiles = handle(async (req, res) => res.json({ status: 'success', data: await service.controllerFiles(req) }));
 
-exports.getTransfers = async (req, res) => {
-  try {
-    const result = await service.getTransfers(req);
-    res.json({ status: 'success', data: result.data, total: result.total });
-  } catch (e) {
-    res.status(500).json({ status: 'error', message: e.message });
-  }
-};
+exports.listFiles = handle(async (req, res) => {
+  const r = await service.listFiles(req);
+  res.json({ status: 'success', data: r.data, total: r.total, page: r.page, limit: r.limit });
+});
 
-/* Programs read off a machine before an overwrite replaced them. */
-exports.getBackups = async (req, res) => {
-  try {
-    const result = await service.getBackups(req);
-    res.json({ status: 'success', data: result.data, total: result.total });
-  } catch (e) {
-    res.status(e.status || 500).json({ status: 'error', message: e.message, code: e.code });
-  }
-};
+exports.uploadFile = handle(async (req, res) => {
+  await parseUpload(req, res);
+  const data = await service.uploadFile(req);
+  res.status(201).json({ status: 'success', data, message: data.job ? 'Uploaded and queued for the machine' : 'Uploaded' });
+});
 
-exports.testConnection = async (req, res) => {
-  try {
-    await service.testConnection(req);
-    // Not "FTP connection successful" any more — a Fanuc machine is reached
-    // over FOCAS, and reporting the wrong protocol sends whoever is
-    // diagnosing a failure to the wrong place.
-    res.json({ status: 'success', message: 'Connection to the machine succeeded' });
-  } catch (e) {
-    res.status(e.status || 502).json({ status: 'error', message: e.message, code: e.code });
-  }
-};
+exports.downloadFile = handle(async (req, res) => {
+  const file = await service.getFileForDownload(req);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', String(file.size_bytes));
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.stored_name)}"`);
+  await new Promise((resolve, reject) => {
+    const stream = storage.open(file.folder, file.stored_name);
+    stream.on('error', err => reject(Object.assign(err, err.code === 'ENOENT'
+      ? { status: 404, code: 'FILE_GONE', message: 'The file is no longer in the ProgramTransfer folder.' } : {})));
+    stream.on('end', resolve);
+    stream.pipe(res);
+  });
+});
+
+exports.deleteFile = handle(async (req, res) => {
+  await service.deleteFile(req);
+  res.json({ status: 'success', message: 'Program deleted' });
+});
+
+exports.createJobs = handle(async (req, res) => {
+  const data = await service.createJobs(req);
+  res.status(201).json({ status: 'success', data, message: `${data.jobs.length} job${data.jobs.length === 1 ? '' : 's'} queued` });
+});
+
+exports.listJobs = handle(async (req, res) => {
+  const r = await service.listJobs(req);
+  res.json({ status: 'success', data: r.data, total: r.total, page: r.page, limit: r.limit });
+});
+
+exports.cancelJob = handle(async (req, res) => res.json({ status: 'success', data: await service.cancelJob(req), message: 'Job cancelled' }));
+
+exports.createDeviceToken = handle(async (req, res) => {
+  const data = await service.createDeviceToken(req);
+  res.setHeader('Cache-Control', 'no-store');      // the token must not sit in a cache
+  res.status(201).json({ status: 'success', data });
+});
+
+exports.revokeDeviceToken = handle(async (req, res) => {
+  await service.revokeDeviceToken(req);
+  res.json({ status: 'success', message: 'Device token revoked' });
+});
