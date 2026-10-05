@@ -5,6 +5,7 @@
  */
 const pool = require('../db');
 const { emitToUser } = require('../lib/realtime');
+const { targetFile } = require('./program-path');
 
 /** A device that called within this window counts as online (it calls every ~15 s). */
 const ONLINE_WINDOW_SEC = 60;
@@ -16,7 +17,7 @@ const QUEUED_TIMEOUT_HOURS = 24;
 const OPEN = ['QUEUED', 'DELIVERED'];
 
 const JOB_COLUMNS = `
-  j.id, j.machine_id, j.machine_serial, j.action, j.program_name, j.overwrite, j.status, j.message,
+  j.id, j.machine_id, j.machine_serial, j.action, j.program_name, j.program_path, j.overwrite, j.status, j.message,
   j.file_id, j.backup_file_id, j.requested_by, j.requested_at, j.delivered_at, j.finished_at,
   u.username AS requested_by_name,
   f.size_bytes AS file_size, f.sha256 AS file_sha256, f.stored_name AS file_stored_name,
@@ -36,7 +37,8 @@ async function getJob(jobId, db = pool) {
 function view(job) {
   if (!job) return null;
   const { company_id, file_stored_name, backup_stored_name, ...rest } = job;
-  return { ...rest, file_name: file_stored_name || null, backup_name: backup_stored_name || null };
+  return { ...rest, target_file: targetFile(job.program_path, job.program_name),
+           file_name: file_stored_name || null, backup_name: backup_stored_name || null };
 }
 
 /**

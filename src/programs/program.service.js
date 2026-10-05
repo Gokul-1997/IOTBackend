@@ -31,7 +31,7 @@ async function getMachine(machineId, companyId) {
   const id = Number(machineId);
   if (!Number.isInteger(id) || id <= 0) throw fail('Choose a machine.', 'NO_MACHINE');
   const { rows } = await pool.query(
-    `SELECT id, company_id, machine_serial_no, ip_address
+    `SELECT id, company_id, machine_serial_no, ip_address, program_path
        FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true`,
     [id, companyId]
   );
@@ -39,12 +39,25 @@ async function getMachine(machineId, companyId) {
   return rows[0];
 }
 
+/**
+ * Every machine must say where its programs go before anything is sent to it,
+ * read from it, or a device is linked to it: the device saves and reads there.
+ */
+function requirePath(machine) {
+  if (!machine.program_path) {
+    throw fail(`Set the program path for ${machine.machine_serial_no} first — the folder on the machine where its device saves programs.`,
+      'NO_PROGRAM_PATH', 409, { machine_id: machine.id });
+  }
+}
+
 async function getFile(fileId, companyId) {
   const id = Number(fileId);
   if (!Number.isInteger(id) || id <= 0) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
   const { rows } = await pool.query(
-    `SELECT id, company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256
-       FROM program_files WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
+    `SELECT f.id, f.company_id, f.machine_id, f.folder, f.stored_name, f.program_name, f.kind, f.size_bytes, f.sha256,
+            m.machine_serial_no
+       FROM program_files f LEFT JOIN machines m ON m.id = f.machine_id
+      WHERE f.id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL`,
     [id, companyId]
   );
   if (!rows.length) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
@@ -80,9 +93,9 @@ async function checkSend(machine, programName, overwrite) {
 
 async function insertJob({ companyId, machine, action, programName, fileId = null, overwrite = false, userId }) {
   const { rows } = await pool.query(
-    `INSERT INTO program_jobs (company_id, machine_id, machine_serial, action, program_name, file_id, overwrite, requested_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-    [companyId, machine.id, machine.machine_serial_no, action, programName, fileId, !!overwrite, userId]
+    `INSERT INTO program_jobs (company_id, machine_id, machine_serial, action, program_name, file_id, overwrite, requested_by, program_path)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [companyId, machine.id, machine.machine_serial_no, action, programName, fileId, !!overwrite, userId, machine.program_path]
   );
   const job = await jobs.getJob(rows[0].id);
   await jobs.announce(job);
@@ -109,7 +122,7 @@ async function insertFile({ machine, saved, userId, note }) {
 
 exports.listMachines = async (req) => {
   const { rows } = await pool.query(
-    `SELECT m.id, m.company_id, m.machine_serial_no, m.ip_address,
+    `SELECT m.id, m.company_id, m.machine_serial_no, m.ip_address, m.program_path,
             d.id AS device_id, d.token_prefix, d.label AS device_label, d.created_at AS device_created_at,
             d.last_seen_at, d.last_seen_ip, d.agent_version,
             COALESCE(d.last_seen_at > NOW() - make_interval(secs => $2), false) AS online,
@@ -184,6 +197,7 @@ exports.uploadFile = async (req) => {
   storage.checkContent(req.file.buffer);
 
   if (send) {
+    requirePath(machine);
     const check = await checkSend(machine, programName, overwrite);
     if (check.duplicate) throw fail(`${programName} is already waiting to go to ${machine.machine_serial_no}.`, 'DUPLICATE_JOB', 409);
     if (check.exists) {
@@ -238,6 +252,7 @@ exports.createJobs = async (req) => {
   if (action === 'FETCH') {
     if (!allowed(req, 'page:programs:fetch')) throw fail('Fetching from a machine is not part of your role.', 'FORBIDDEN', 403);
     const machine = await getMachine(body.machine_id, companyId);
+    requirePath(machine);
     const names = [...new Set((body.program_names || []).map(n => storage.safeProgramName(n)))];
     if (!names.length) throw fail('Choose a program on the machine.', 'NO_PROGRAM');
     if (names.length > MAX_JOBS_PER_REQUEST) throw fail(`At most ${MAX_JOBS_PER_REQUEST} programs at a time.`, 'TOO_MANY');
@@ -270,6 +285,7 @@ exports.createJobs = async (req) => {
   for (const id of fileIds) files.push(await getFile(id, companyId));
   const machines = [];
   for (const id of machineIds) machines.push(await getMachine(id, companyId));
+  machines.forEach(requirePath);
 
   const exists = [];
   const duplicates = [];
@@ -294,7 +310,8 @@ exports.createJobs = async (req) => {
           machine, kind: 'NEW', programName: file.program_name,
           buffer: await storage.read(file.folder, file.stored_name)
         });
-        fileId = (await insertFile({ machine, saved, userId: req.user.id, note: `Copied from ${file.folder}/${file.stored_name}` })).id;
+        fileId = (await insertFile({ machine, saved, userId: req.user.id,
+                                     note: `Copied from ${file.machine_serial_no || 'another machine'}` })).id;
       }
       created.push(await insertJob({ companyId, machine, action: 'SEND', programName: file.program_name,
                                      fileId, overwrite, userId: req.user.id }));
@@ -359,6 +376,7 @@ exports.cancelJob = async (req) => {
  */
 exports.createDeviceToken = async (req) => {
   const machine = await getMachine(req.params.machineId, req.user.company_id);
+  requirePath(machine);
   const label = req.body?.label ? String(req.body.label).trim().slice(0, 100) : null;
   const { token, hash, prefix } = deviceToken.generate();
 
@@ -387,7 +405,8 @@ exports.createDeviceToken = async (req) => {
   audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'DEVICE_TOKEN_CREATE', resource: 'program_device',
               resource_id: device.id, new_value: { machine: machine.machine_serial_no, token_prefix: prefix },
               ip_address: req.ip, user_agent: req.headers['user-agent'] });
-  return { token, device: { ...device, machine_serial_no: machine.machine_serial_no, folder: storage.machineFolder(machine) } };
+  return { token, device: { ...device, machine_serial_no: machine.machine_serial_no, program_path: machine.program_path,
+                            folder: storage.machineFolder(machine) } };
 };
 
 /** Stop the machine's device at once (a lost or replaced device). */
@@ -404,4 +423,4 @@ exports.revokeDeviceToken = async (req) => {
               ip_address: req.ip, user_agent: req.headers['user-agent'] });
 };
 
-exports._internal = { sameProgram, checkSend };
+exports._internal = { sameProgram, checkSend, requirePath };

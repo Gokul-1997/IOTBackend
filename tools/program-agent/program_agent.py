@@ -13,11 +13,16 @@ by --config (default /etc/mexa/program-agent.env, readable by root only):
     MEXA_URL            https://stmapi.stmcnc.com      (on-premise: the customer's server)
     MEXA_DEVICE_TOKEN   mxd_...                        (from Program Transfer > Device)
     MEXA_CA_FILE        optional CA bundle for an on-premise server with its own certificate
-    CNC_DIR             only for FolderController, the stand-in CNC used for testing
+    CNC_DIR             only for testing: a folder that stands in for the CNC
+
+Where the programs are on the machine is not configured here: the platform
+says it (the machine's "program path", e.g. //CNC_MEM/USER/PATH1/) on /ping
+and in every job, and this agent saves, reads and lists there.
 
 Talking to the real controller is the one part to write for your device:
-replace FolderController with a class that has the same four methods and
-uses FOCAS (Fanuc) or the controller's FTP on the machine LAN.
+replace FolderController with a class that has the same three methods -
+list_programs(path), read(path, name), write(path, name, data) - and uses
+FOCAS (Fanuc) or the controller's FTP on the machine LAN.
 
     python3 program_agent.py                 run forever
     python3 program_agent.py --once          one poll, then exit (for testing)
@@ -41,40 +46,47 @@ STATE_FILE = os.environ.get("MEXA_STATE_FILE", "/var/lib/mexa/program-agent.stat
 # ---------------------------------------------------------------- the CNC
 
 class FolderController:
-    """A folder standing in for the CNC's program memory - for testing only."""
+    """Stand-in CNC for testing: the program path is a folder on this computer,
+    or, with CNC_DIR set, CNC_DIR stands in for whatever path the platform gives."""
 
-    def __init__(self, folder):
-        self.folder = folder
+    def __init__(self, stand_in=None):
+        self.stand_in = stand_in
+
+    def _dir(self, path):
+        folder = self.stand_in or path
         os.makedirs(folder, exist_ok=True)
+        return folder
 
-    def _path(self, name):
+    def _file(self, path, name):
         if os.path.basename(name) != name or name in ("", ".", ".."):
             raise ValueError("bad program name: %r" % name)
-        return os.path.join(self.folder, name)
+        return os.path.join(self._dir(path), name)
 
-    def list_programs(self):
-        out = []
-        for name in sorted(os.listdir(self.folder)):
-            p = os.path.join(self.folder, name)
-            if os.path.isfile(p):
+    def list_programs(self, path):
+        """[{name, size, modified}] for every program in the machine's program path."""
+        folder, out = self._dir(path), []
+        for name in sorted(os.listdir(folder)):
+            p = os.path.join(folder, name)
+            if os.path.isfile(p) and not name.endswith(".part"):
                 st = os.stat(p)
                 out.append({"name": name, "size": st.st_size,
                             "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))})
         return out
 
-    def read(self, name):
-        """The program's bytes, or None when the controller does not have it."""
+    def read(self, path, name):
+        """The program's bytes, or None when the machine does not have it."""
         try:
-            with open(self._path(name), "rb") as f:
+            with open(self._file(path, name), "rb") as f:
                 return f.read()
         except FileNotFoundError:
             return None
 
-    def write(self, name, data):
-        tmp = self._path(name) + ".part"
-        with open(tmp, "wb") as f:
+    def write(self, path, name, data):
+        """Save the program in the machine's program path, replacing one of the same name."""
+        target = self._file(path, name)
+        with open(target + ".part", "wb") as f:
             f.write(data)
-        os.replace(tmp, self._path(name))
+        os.replace(target + ".part", target)
 
 
 # ---------------------------------------------------------------- the server
@@ -171,26 +183,26 @@ def unfinished():
 
 
 def do_send(api, cnc, job):
-    name = job["program_name"]
+    name, path = job["program_name"], job["program_path"]      # save it here on the machine
     sha, data = api.job_file(job["id"])
     if hashlib.sha256(data).hexdigest() != (sha or job["file"]["sha256"]) or len(data) != job["file"]["size"]:
         return "FAILED", "The program arrived damaged (size or SHA-256 differ). Send it again."
 
-    current = cnc.read(name)
+    current = cnc.read(path, name)
     if current is not None:
         if not job["overwrite"]:
             return "FAILED", "%s is already on the controller. Send again and confirm the overwrite." % name
         # nothing is overwritten that has not been kept: the backup must be on the server first
         api.upload(current, "BACKUP", name, job_id=job["id"], note="Before overwrite by job %d" % job["id"])
 
-    cnc.write(name, data)
-    if cnc.read(name) != data:
+    cnc.write(path, name, data)
+    if cnc.read(path, name) != data:
         return "FAILED", "The controller did not keep %s as sent (read-back differs)." % name
     return "DONE", None
 
 
 def do_fetch(api, cnc, job):
-    data = cnc.read(job["program_name"])
+    data = cnc.read(job["program_path"], job["program_name"])
     if data is None:
         return "FAILED", "%s is not on the controller." % job["program_name"]
     api.upload(data, "FETCHED", job["program_name"], job_id=job["id"])   # completes the job on the server
@@ -265,7 +277,12 @@ def run(api, cnc, once=False):
         try:
             settle_unfinished(api)
             if time.time() - last_report > 300:          # the "On the machine" list, every 5 minutes
-                api.report_controller(cnc.list_programs())
+                path = api.ping()["machine"]["program_path"]  # asked again: an admin may have changed it
+                if path:
+                    api.report_controller(cnc.list_programs(path))
+                else:
+                    print("the platform has no program path for this machine yet - set it in Program Transfer",
+                          file=sys.stderr)
                 last_report = time.time()
             job = api.next_job()
             while job:                                   # drain the queue, then wait
@@ -309,11 +326,14 @@ def main():
     if not url or not token:
         sys.exit("Set MEXA_URL and MEXA_DEVICE_TOKEN.")
     api = Api(url, token, os.environ.get("MEXA_CA_FILE"))
-    cnc = FolderController(os.environ.get("CNC_DIR", "./cnc"))
+    cnc = FolderController(os.environ.get("CNC_DIR"))
 
     if a.backup_all:
-        for prog in cnc.list_programs():
-            api.upload(cnc.read(prog["name"]), "BACKUP", prog["name"], note="Scheduled backup")
+        path = api.ping()["machine"]["program_path"]
+        if not path:
+            sys.exit("The platform has no program path for this machine yet - set it in Program Transfer.")
+        for prog in cnc.list_programs(path):
+            api.upload(cnc.read(path, prog["name"]), "BACKUP", prog["name"], note="Scheduled backup")
             print("backed up", prog["name"])
         return 0
     return run(api, cnc, once=a.once)

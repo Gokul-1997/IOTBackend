@@ -32,12 +32,12 @@ const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: 
 
 const authRow = () => mockDb.queueResponse({ rows: [{
   id: 3, company_id: 5, machine_id: 7, last_seen_at: new Date().toISOString(), last_seen_ip: '::ffff:127.0.0.1',
-  agent_version: null, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', machine_active: true,
+  agent_version: null, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/', machine_active: true,
   machine_company_id: 5, company_active: true
 }], rowCount: 1 });
 
 const jobRow = (o = {}) => ({
-  id: '11', company_id: 5, machine_id: 7, machine_serial: 'VMC-1', action: 'SEND', program_name: 'O1234.nc',
+  id: '11', company_id: 5, machine_id: 7, machine_serial: 'VMC-1', action: 'SEND', program_name: 'O1234.nc', program_path: '//CNC_MEM/USER/PATH1/',
   overwrite: false, status: 'DELIVERED', message: null, file_id: '40', backup_file_id: null, requested_by: 2,
   requested_at: '2026-10-05T05:00:00Z', delivered_at: '2026-10-05T05:00:15Z', finished_at: null,
   requested_by_name: 'Priya', file_size: 24, file_sha256: 'a'.repeat(64), file_stored_name: '20261005-103000_NEW_O1234.nc',
@@ -55,7 +55,8 @@ test('ping names the machine and the poll interval', async () => {
   authRow();
   const res = await request(app).get('/api/device/v1/ping').set(AUTH);
   expect(res.status).toBe(200);
-  expect(res.body).toMatchObject({ device_id: 3, machine: { serial: 'VMC-1', ip_address: '192.168.200.3' }, poll_seconds: 15 });
+  expect(res.body).toMatchObject({ device_id: 3, poll_seconds: 15,
+    machine: { serial: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/' } });
 });
 
 describe('GET /jobs/next', () => {
@@ -75,6 +76,7 @@ describe('GET /jobs/next', () => {
     expect(res.status).toBe(200);
     expect(res.body.job).toEqual({
       id: 11, action: 'SEND', program_name: 'O1234.nc', overwrite: false,
+      program_path: '//CNC_MEM/USER/PATH1/', target_file: '//CNC_MEM/USER/PATH1/O1234.nc',
       requested_at: '2026-10-05T05:00:00Z', requested_by: 'Priya',
       file: { size: 24, sha256: 'a'.repeat(64), url: '/api/device/v1/jobs/11/file' }
     });

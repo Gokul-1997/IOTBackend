@@ -21,8 +21,8 @@ beforeEach(() => resetDb());
 
 const one = row => ({ rows: [row], rowCount: 1 });
 const none = { rows: [], rowCount: 0 };
-const machine7 = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3' };
-const machine8 = { id: 8, company_id: 5, machine_serial_no: 'VMC-2', ip_address: '192.168.200.4' };
+const machine7 = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/' };
+const machine8 = { id: 8, company_id: 5, machine_serial_no: 'VMC-2', ip_address: '192.168.200.4', program_path: 'M01:\\PRG\\USER\\' };
 const program = Buffer.from('%\nO1234\nG0 X0\nM30\n%\n');
 
 const user = (perms = ['page:programs:view', 'page:programs:upload', 'page:programs:transfer', 'page:programs:fetch', 'page:programs:delete']) =>
@@ -71,7 +71,32 @@ describe('uploading a program', () => {
     expect(r.job).toMatchObject({ id: '11', action: 'SEND', status: 'QUEUED' });
     expect(folderFiles(machine7)).toEqual([expect.stringMatching(/^\d{8}-\d{6}_NEW_O1234\.nc$/)]);
     const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
-    expect(job.params).toEqual([5, 7, 'VMC-1', 'SEND', 'O1234.nc', '40', false, 2]);
+    expect(job.params).toEqual([5, 7, 'VMC-1', 'SEND', 'O1234.nc', '40', false, 2, '//CNC_MEM/USER/PATH1/']);
+  });
+});
+
+describe('every machine must have its program path', () => {
+  const noPath = { ...machine7, program_path: null };
+
+  test('nothing is sent to a machine without one, and nothing is written', async () => {
+    mockDb.queueResponse(one(noPath));
+    await expect(svc.uploadFile(req({ body: { machine_id: '7', send: 'true' }, file: { originalname: 'O1.nc', buffer: program } })))
+      .rejects.toMatchObject({ status: 409, code: 'NO_PROGRAM_PATH', message: /Set the program path for VMC-1/ });
+    expect(folderFiles(noPath).filter(f => /_O1\.nc$/.test(f))).toEqual([]);
+  });
+
+  test('nothing is fetched from it, and no device is linked to it', async () => {
+    mockDb.queueResponse(one(noPath));
+    await expect(svc.createJobs(req({ body: { action: 'FETCH', machine_id: 7, program_names: ['O1'] } })))
+      .rejects.toMatchObject({ code: 'NO_PROGRAM_PATH' });
+    mockDb.queueResponse(one(noPath));
+    await expect(svc.createDeviceToken(req({ params: { machineId: '7' } }))).rejects.toMatchObject({ code: 'NO_PROGRAM_PATH' });
+  });
+
+  test('a plain upload into the server folder does not need it', async () => {
+    mockDb.queueResponse(one(noPath), one({ id: '60', machine_id: 7, folder: 'f', stored_name: 's', program_name: 'O5.nc', kind: 'NEW' }));
+    const r = await svc.uploadFile(req({ body: { machine_id: '7' }, file: { originalname: 'O5.nc', buffer: program } }));
+    expect(r.job).toBeNull();
   });
 });
 
@@ -84,7 +109,7 @@ describe('jobs', () => {
   test('a program sent to another machine is copied into that machine\'s folder first', async () => {
     const saved = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O2001.nc', buffer: program });
     mockDb.queueResponse(
-      one({ id: '50', company_id: 5, machine_id: 7, folder: saved.folder, stored_name: saved.storedName, program_name: 'O2001.nc', kind: 'NEW' }),
+      one({ id: '50', company_id: 5, machine_id: 7, folder: saved.folder, stored_name: saved.storedName, program_name: 'O2001.nc', kind: 'NEW', machine_serial_no: 'VMC-1' }),
       one(machine8), none, none,
       one({ id: '51', machine_id: 8, folder: 'company-5/192.168.200.4', stored_name: 'y', program_name: 'O2001.nc', kind: 'NEW' }),
       one({ id: '12' }), one(jobRow({ id: '12', machine_id: 8, program_name: 'O2001.nc' }))
@@ -94,6 +119,9 @@ describe('jobs', () => {
     expect(folderFiles(machine8)).toEqual([expect.stringMatching(/_NEW_O2001\.nc$/)]);
     const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
     expect(job.params.slice(1, 6)).toEqual([8, 'VMC-2', 'SEND', 'O2001.nc', '51']);
+    expect(job.params[8]).toBe('M01:\\PRG\\USER\\');                  // the path the job was made with
+    const copy = mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text));
+    expect(copy.params[8]).toBe('Copied from VMC-1');                    // the machine, not a server folder
   });
 
   test('one refusal queues nothing', async () => {

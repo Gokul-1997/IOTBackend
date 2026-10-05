@@ -7,6 +7,7 @@
 const pool = require('../db');
 const storage = require('./storage');
 const jobs = require('./jobs');
+const { targetFile } = require('./program-path');
 
 /** How often a device should ask for work, said back on /ping so it can be tuned centrally. */
 const POLL_SECONDS = Number(process.env.DEVICE_POLL_SECONDS) || 15;
@@ -28,12 +29,19 @@ async function ownJob(device, jobId, { action, status = ['DELIVERED'] } = {}) {
   return job;
 }
 
-/** What a device sees about a job. */
-function forDevice(job) {
+/**
+ * What a device sees about a job. program_path is where on the machine the
+ * program goes (SEND) or is read from (FETCH) — the machine's path when the
+ * job was made — and target_file the program's full name there.
+ */
+function forDevice(job, device) {
+  const path = job.program_path || device.machine.program_path || null;
   return {
     id: Number(job.id),
     action: job.action,
     program_name: job.program_name,
+    program_path: path,
+    target_file: targetFile(path, job.program_name),
     overwrite: job.overwrite,
     requested_at: job.requested_at,
     requested_by: job.requested_by_name || null,
@@ -45,7 +53,9 @@ function forDevice(job) {
 
 exports.ping = async (device) => ({
   device_id: device.id,
-  machine: { serial: device.machine.machine_serial_no, ip_address: device.machine.ip_address },
+  machine: { serial: device.machine.machine_serial_no, ip_address: device.machine.ip_address,
+             // where this machine's programs live: list it, back it up, save new programs there
+             program_path: device.machine.program_path || null },
   server_time: new Date().toISOString(),
   poll_seconds: POLL_SECONDS
 });
@@ -70,7 +80,7 @@ exports.nextJob = async (device) => {
   if (!rows.length) return null;
   const job = await jobs.getJob(rows[0].id);
   await jobs.announce(job);
-  return forDevice(job);
+  return forDevice(job, device);
 };
 
 /** The file of a SEND job the device has taken. */

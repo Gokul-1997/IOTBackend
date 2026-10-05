@@ -1,5 +1,6 @@
 const pool = require('../db');
 const crypto = require('crypto');
+const { cleanProgramPath } = require('../programs/program-path');
 
 /* CREATE MACHINE (ADMIN) */
 exports.createMachine = async (req) => {
@@ -19,7 +20,8 @@ exports.createMachine = async (req) => {
     controller,
     spindle_rpm,
     image_url,
-    ip_address
+    ip_address,
+    program_path
   } = req.body;
 
   if (!machine_serial_no) {
@@ -77,10 +79,11 @@ exports.createMachine = async (req) => {
       spindle_rpm,
       image_url,
       ip_address,
+      program_path,
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
     )
     RETURNING id, machine_serial_no, api_key
     `,
@@ -103,6 +106,7 @@ exports.createMachine = async (req) => {
       spindle_rpm,
       image_url,
       ip_address ? String(ip_address).trim() : null,
+      cleanProgramPath(program_path),
       apiKey
     ]
   );
@@ -190,6 +194,7 @@ exports.getMachines = async (req) => {
       m.controller,
       m.spindle_rpm,
       m.ip_address,
+      m.program_path,
       m.api_key,
       m.is_active,
       m.created_at
@@ -285,7 +290,8 @@ exports.updateMachine = async (req) => {
     'controller',
     'spindle_rpm',
     'image_url',
-    'ip_address'
+    'ip_address',
+    'program_path'
   ];
 
   const fields = [];
@@ -295,7 +301,8 @@ exports.updateMachine = async (req) => {
   for (const key of allowedFields) {
     if (req.body[key] !== undefined) {
       fields.push(`${key} = $${index}`);
-      values.push(req.body[key]);
+      // where the machine's device saves programs: checked, empty = not set
+      values.push(key === 'program_path' ? cleanProgramPath(req.body[key]) : req.body[key]);
       index++;
     }
   }
