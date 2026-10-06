@@ -330,3 +330,39 @@ describe('export', () => {
     expect(rows[0]['Band']).toBe('UNKNOWN');
   });
 });
+
+/*
+ * Idle time in rupees (6 Oct 2026): each machine's idle time at its own hour
+ * rate (machines.hour_rate, migration 034).
+ */
+describe('idle time in rupees', () => {
+  test('a machine with a rate prices its idle time; one without has no figure, not ₹0', () => {
+    const priced = svc.deriveOee(row({ idle_seconds: '5400', hour_rate: '380.00' }), T);
+    expect(priced.hour_rate).toBe(380);
+    expect(priced.idle_cost).toBe(570);
+    const unpriced = svc.deriveOee(row({ idle_seconds: '5400', hour_rate: null }), T);
+    expect(unpriced.idle_cost).toBeNull();
+  });
+
+  test('the fleet figure adds up the priced machines and says how many there are', () => {
+    const f = svc.fleetOee([
+      svc.deriveOee(row({ machine_id: 1, idle_seconds: '3600', hour_rate: '500' }), T),
+      svc.deriveOee(row({ machine_id: 2, idle_seconds: '7200', hour_rate: '2800' }), T),
+      svc.deriveOee(row({ machine_id: 3, idle_seconds: '3600', hour_rate: null }), T)
+    ], T);
+    expect(f.idle_cost).toBe(500 + 5600);
+    expect(f.machines_priced).toBe(2);
+    expect(f.machines_total).toBe(3);
+  });
+
+  test('no machine priced: no fleet figure', () => {
+    const f = svc.fleetOee([svc.deriveOee(row({ hour_rate: null }), T)], T);
+    expect(f.idle_cost).toBeNull();
+    expect(f.machines_priced).toBe(0);
+  });
+
+  test('the totals query reads each machine\'s rate', async () => {
+    await svc.machineTotals({ companyId: 4, start: '2026-10-01', end: '2026-10-06' });
+    expect(mockDb.calls()[0].text).toMatch(/m\.hour_rate/);
+  });
+});

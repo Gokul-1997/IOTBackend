@@ -21,10 +21,10 @@ const company_id = 4;
 
 /* getDowntime fires: measured, alarm, declared, byReason, byCategory,
    byShift, hourly, list(page + count) — nine queries. */
-function queueAll({ measured = {}, declared = {}, reasons = [] } = {}) {
+function queueAll({ measured = {}, alarm = {}, declared = {}, reasons = [] } = {}) {
   mockDb.queueResponse(
     { rows: [{ run_seconds: '0', idle_seconds: '0', manual_seconds: '0', ...measured }] },
-    { rows: [{ alarm_seconds: '0' }] },
+    { rows: [{ alarm_seconds: '0', ...alarm }] },
     { rows: [{ events: 0, downtime_seconds: '0', open_events: 0, ...declared }] },
     { rows: reasons },
     { rows: [] },
@@ -282,5 +282,40 @@ describe('export', () => {
     expect(rows[0]['End']).toBe('');
     expect(rows[0]['Status']).toBe('Open');
     expect(rows[0]['Operator']).toBe('Unassigned');
+  });
+});
+
+/*
+ * Lost time in rupees (6 Oct 2026): idle and alarm time priced at each
+ * machine's hour rate (machines.hour_rate, migration 034).
+ */
+describe('lost time in rupees', () => {
+  test('idle and alarm time are priced, and the screen is told how many machines that covers', async () => {
+    queueAll({
+      measured: { idle_seconds: '7200', idle_cost: 1760.4, machines: 3, priced_machines: 2 },
+      alarm:    { alarm_seconds: '3600', alarm_cost: 950.6 }
+    });
+    const res = await svc.getDowntime({ company_id });
+    expect(res.kpis.idle_cost).toBe(1760);
+    expect(res.kpis.alarm_cost).toBe(951);
+    expect(res.kpis.cost_machines).toEqual({ priced: 2, of: 3 });
+
+    const [measured, alarm] = mockDb.calls();
+    // each hour priced at its own machine's rate, not an average one
+    expect(measured.text).toMatch(/SUM\(ph\.idle_seconds \* m\.hour_rate \/ 3600\.0\)/);
+    expect(measured.text).toMatch(/LEFT JOIN machines m ON m\.id = ph\.machine_id/);
+    expect(alarm.text).toMatch(/s\.seconds \* m\.hour_rate \/ 3600\.0/);
+  });
+
+  test('no machine with a rate: no rupee figure at all, not ₹0', async () => {
+    queueAll({
+      measured: { idle_seconds: '7200', idle_cost: null, machines: 3, priced_machines: 0 },
+      alarm:    { alarm_seconds: '3600', alarm_cost: null }
+    });
+    const res = await svc.getDowntime({ company_id });
+    expect(res.kpis.idle_cost).toBeNull();
+    expect(res.kpis.alarm_cost).toBeNull();
+    expect(res.kpis.cost_machines).toEqual({ priced: 0, of: 3 });
+    expect(res.kpis.idle_seconds).toBe(7200);
   });
 });

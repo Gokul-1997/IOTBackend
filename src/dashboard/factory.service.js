@@ -38,10 +38,19 @@ exports.getFactoryDashboard = async (req) => {
     shiftRes, downtimeRes, alarmRes, energyRes, targetRes, yesterdayRes
   ] = await Promise.all([
 
-    /* company tariff — cost is unavailable rather than zero when unset */
+    /* company tariff — cost is unavailable rather than zero when unset.
+       The rate is the one set on Master → Energy Tariff (energy_settings,
+       the company default), as the Energy screen uses; company_settings'
+       older rate only when none is set there. Before, this read only
+       company_settings, which the Tariff page never writes, so a tariff
+       entered there priced the Energy screen but never this one. */
     db.query(
-      `SELECT energy_rate_per_kwh, currency, oee_target_percent
-       FROM company_settings WHERE company_id = $1`, [companyId]
+      `SELECT COALESCE(es.cost_per_kwh, NULLIF(cs.energy_rate_per_kwh, 0)) AS energy_rate_per_kwh,
+              COALESCE(es.currency, cs.currency)                           AS currency,
+              cs.oee_target_percent
+         FROM (SELECT $1::int AS company_id) c
+         LEFT JOIN company_settings cs ON cs.company_id = c.company_id
+         LEFT JOIN energy_settings  es ON es.company_id = c.company_id AND es.machine_id IS NULL`, [companyId]
     ),
 
     /* live machine states: running / idle / breakdown / offline

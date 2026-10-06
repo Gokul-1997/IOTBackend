@@ -1,6 +1,7 @@
 const pool = require('../db');
 const crypto = require('crypto');
 const { cleanProgramPath } = require('../programs/program-path');
+const { cleanHourRate } = require('./hour-rate');
 
 /* CREATE MACHINE (ADMIN) */
 exports.createMachine = async (req) => {
@@ -21,7 +22,8 @@ exports.createMachine = async (req) => {
     spindle_rpm,
     image_url,
     ip_address,
-    program_path
+    program_path,
+    hour_rate
   } = req.body;
 
   if (!machine_serial_no) {
@@ -80,10 +82,11 @@ exports.createMachine = async (req) => {
       image_url,
       ip_address,
       program_path,
+      hour_rate,
       api_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
     )
     RETURNING id, machine_serial_no, api_key
     `,
@@ -107,6 +110,7 @@ exports.createMachine = async (req) => {
       image_url,
       ip_address ? String(ip_address).trim() : null,
       cleanProgramPath(program_path),
+      cleanHourRate(hour_rate),
       apiKey
     ]
   );
@@ -195,6 +199,7 @@ exports.getMachines = async (req) => {
       m.spindle_rpm,
       m.ip_address,
       m.program_path,
+      m.hour_rate,
       m.api_key,
       m.is_active,
       m.created_at
@@ -291,7 +296,8 @@ exports.updateMachine = async (req) => {
     'spindle_rpm',
     'image_url',
     'ip_address',
-    'program_path'
+    'program_path',
+    'hour_rate'
   ];
 
   const fields = [];
@@ -301,8 +307,10 @@ exports.updateMachine = async (req) => {
   for (const key of allowedFields) {
     if (req.body[key] !== undefined) {
       fields.push(`${key} = $${index}`);
-      // where the machine's device saves programs: checked, empty = not set
-      values.push(key === 'program_path' ? cleanProgramPath(req.body[key]) : req.body[key]);
+      // checked, and empty = not set: where the device saves programs; what an hour costs
+      values.push(key === 'program_path' ? cleanProgramPath(req.body[key])
+                : key === 'hour_rate'    ? cleanHourRate(req.body[key])
+                : req.body[key]);
       index++;
     }
   }

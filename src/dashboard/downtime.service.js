@@ -61,16 +61,23 @@ function resolveRange({ from, to }) {
    ───────────────────────────────────────────────────────────── */
 
 async function measuredTime({ companyId, machineId, shiftId, start, end }) {
+  /* Idle time is priced machine by machine at its own hour rate; a machine
+     with no rate adds nothing to the ₹ figure, and the counts below say how
+     many of the machines that reported it covers. */
   const { rows: [r] } = await pool.query(
-    `SELECT COALESCE(SUM(run_seconds), 0)::bigint    AS run_seconds,
-            COALESCE(SUM(idle_seconds), 0)::bigint   AS idle_seconds,
-            COALESCE(SUM(manual_seconds), 0)::bigint AS manual_seconds
-       FROM production_hourly
-      WHERE company_id = $1
-        AND hour_start >= $2::timestamptz
-        AND hour_start <= $3::timestamptz
-        AND ($4::int IS NULL OR machine_id = $4)
-        AND ($5::int IS NULL OR shift_id  = $5)`,
+    `SELECT COALESCE(SUM(ph.run_seconds), 0)::bigint    AS run_seconds,
+            COALESCE(SUM(ph.idle_seconds), 0)::bigint   AS idle_seconds,
+            COALESCE(SUM(ph.manual_seconds), 0)::bigint AS manual_seconds,
+            SUM(ph.idle_seconds * m.hour_rate / 3600.0)::float AS idle_cost,
+            COUNT(DISTINCT ph.machine_id)::int                                         AS machines,
+            COUNT(DISTINCT ph.machine_id) FILTER (WHERE m.hour_rate IS NOT NULL)::int  AS priced_machines
+       FROM production_hourly ph
+       LEFT JOIN machines m ON m.id = ph.machine_id
+      WHERE ph.company_id = $1
+        AND ph.hour_start >= $2::timestamptz
+        AND ph.hour_start <= $3::timestamptz
+        AND ($4::int IS NULL OR ph.machine_id = $4)
+        AND ($5::int IS NULL OR ph.shift_id  = $5)`,
     [companyId, start, end, machineId, shiftId]
   );
 
@@ -82,6 +89,9 @@ async function measuredTime({ companyId, machineId, shiftId, start, end }) {
     run_seconds: run,
     idle_seconds: idle,
     manual_seconds: Number(r.manual_seconds),
+    idle_cost: r.idle_cost == null ? null : Math.round(Number(r.idle_cost)),
+    machines: Number(r.machines) || 0,
+    priced_machines: Number(r.priced_machines) || 0,
     // null rather than 0 when nothing was recorded — "0% available" for a
     // machine that reported no telemetry is a different claim from a
     // machine that ran badly, and the screen must not conflate them
@@ -89,23 +99,32 @@ async function measuredTime({ companyId, machineId, shiftId, start, end }) {
   };
 }
 
-/** How long machines spent in an alarm state, from the alarm records. */
+/** How long machines spent in an alarm state, from the alarm records, and
+ *  what that time cost at each machine's hour rate (null when none is set). */
 async function alarmTime({ companyId, machineId, start, end }) {
   const { rows: [r] } = await pool.query(
-    `SELECT COALESCE(SUM(
+    `WITH spans AS (
+       SELECT a.machine_id,
               EXTRACT(EPOCH FROM (LEAST(COALESCE(a.ended_at, NOW()), $3::timestamptz)
-                                - GREATEST(a.started_at, $2::timestamptz)))
-            ), 0)::bigint AS alarm_seconds
-       FROM machine_alarms a
-      WHERE a.company_id = $1
-        AND a.started_at <= $3::timestamptz
-        AND COALESCE(a.ended_at, NOW()) >= $2::timestamptz
-        AND ($4::int IS NULL OR a.machine_id = $4)`,
+                                - GREATEST(a.started_at, $2::timestamptz))) AS seconds
+         FROM machine_alarms a
+        WHERE a.company_id = $1
+          AND a.started_at <= $3::timestamptz
+          AND COALESCE(a.ended_at, NOW()) >= $2::timestamptz
+          AND ($4::int IS NULL OR a.machine_id = $4)
+     )
+     SELECT COALESCE(SUM(s.seconds), 0)::bigint          AS alarm_seconds,
+            SUM(s.seconds * m.hour_rate / 3600.0)::float AS alarm_cost
+       FROM spans s
+       LEFT JOIN machines m ON m.id = s.machine_id`,
     [companyId, start, end, machineId]
   );
   // clamped to the window at both ends, so an alarm spanning the boundary
   // contributes only the part inside it
-  return Number(r.alarm_seconds);
+  return {
+    seconds: Number(r.alarm_seconds),
+    cost: r.alarm_cost == null ? null : Math.round(Number(r.alarm_cost))
+  };
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -327,7 +346,7 @@ exports.getDowntime = async (q = {}) => {
     category: q.category, search: (q.search || '').trim(), start, end
   });
 
-  const [measured, alarmSeconds, declared, reasons, categories, shifts, hourly, rows] =
+  const [measured, alarms, declared, reasons, categories, shifts, hourly, rows] =
     await Promise.all([
       measuredTime({ companyId, machineId, shiftId, start, end }),
       alarmTime({ companyId, machineId, start, end }),
@@ -360,7 +379,13 @@ exports.getDowntime = async (q = {}) => {
       open_events:            declared.open_events,
       run_seconds:            measured.run_seconds,
       idle_seconds:           measured.idle_seconds,
-      alarm_seconds:          alarmSeconds,
+      alarm_seconds:          alarms.seconds,
+      /* Lost time in rupees, at each machine's hour rate. Alarm time is
+         mostly part of idle time (a machine in alarm is not running), so
+         the two are shown side by side, never added. */
+      idle_cost:              measured.idle_cost,
+      alarm_cost:             alarms.cost,
+      cost_machines:          { priced: measured.priced_machines, of: measured.machines },
       availability_pct:       measured.availability_pct,
       unaccounted_seconds:    unaccounted,
       // how much of the idle time actually has a reason against it

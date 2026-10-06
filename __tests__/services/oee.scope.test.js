@@ -77,6 +77,15 @@ describe('scopeViaMachine', () => {
 describe('Factory dashboard', () => {
   const totalsQuery = () => mockDb.calls().find(c => /machine_current_job/.test(c.text) && /FROM production_hourly/.test(c.text));
 
+  test('prices energy at the tariff set on Master → Energy Tariff, as the Energy screen does', async () => {
+    // it read only company_settings, which that page never writes
+    await runCapturingSql(factorySvc.getFactoryDashboard, req());
+    const q = mockDb.calls().find(c => /energy_rate_per_kwh/.test(c.text));
+    expect(q.text).toMatch(/LEFT JOIN energy_settings\s+es ON es\.company_id = c\.company_id AND es\.machine_id IS NULL/);
+    expect(q.text).toMatch(/COALESCE\(es\.cost_per_kwh, NULLIF\(cs\.energy_rate_per_kwh, 0\)\)/);
+    expect(q.params).toEqual([4]);
+  });
+
   test('does not average oee_hourly', async () => {
     await runCapturingSql(factorySvc.getFactoryDashboard, req());
     expect(oeeQuery()).toBeUndefined();

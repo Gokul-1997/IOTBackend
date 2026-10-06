@@ -32,6 +32,7 @@
  */
 
 const pool = require('../db');
+const { costOf } = require('../machines/hour-rate');
 
 /* Classification bands, world-class OEE being 85%. Overridable per request
    so a plant can set its own bar without a schema change. */
@@ -157,7 +158,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
           AND t.received_at > NOW() - INTERVAL '1 hour'
         ORDER BY t.machine_id, t.received_at DESC
      )
-     SELECT m.id AS machine_id, m.machine_serial_no, m.model,
+     SELECT m.id AS machine_id, m.machine_serial_no, m.model, m.hour_rate,
             COALESCE(p.run_seconds, 0)::bigint  AS run_seconds,
             COALESCE(p.idle_seconds, 0)::bigint AS idle_seconds,
             COALESCE(p.produced, 0)::bigint     AS produced,
@@ -246,7 +247,10 @@ function deriveOee(row, thresholds) {
     quality_pct:       round(quality),
     oee_pct:           round(oee),
     rejection_rate_pct: produced > 0 ? Number(((rejected / produced) * 100).toFixed(1)) : null,
-    band: classify(oee, thresholds)
+    band: classify(oee, thresholds),
+    /* what the idle time cost at the machine's hour rate; null without one */
+    hour_rate:         row.hour_rate != null ? Number(row.hour_rate) : null,
+    idle_cost:         costOf(idle, row.hour_rate)
   };
 }
 
@@ -306,7 +310,11 @@ function fleetOee(machines, thresholds) {
     downtime_seconds: sum(r => r.downtime_seconds),
     alarm_count: sum(r => r.alarm_count),
     machines_measurable: measurable.length,
-    machines_total: machines.length
+    machines_total: machines.length,
+    /* idle time in rupees over the machines that have an hour rate; null
+       when none has — "₹0" would claim the idle time cost nothing */
+    idle_cost: machines.some(r => r.idle_cost != null) ? sum(r => r.idle_cost) : null,
+    machines_priced: machines.filter(r => r.hour_rate != null).length
   };
 }
 
