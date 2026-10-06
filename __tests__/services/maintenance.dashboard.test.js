@@ -184,6 +184,37 @@ describe('maintenance dashboard — condition signals', () => {
     expect(unavailableSignals([{ servo_load_x: 0 }])).not.toContain('servo_load_per_axis');
   });
 
+  test('before migration 032 the battery flags read as NULL instead of failing the screen', async () => {
+    const missing = Object.assign(new Error('column t.apc_battery_status does not exist'), { code: '42703' });
+    mockDb.queueResponse({ rows: [{ total: 1, running: 1, idle: 0, breakdown: 0, offline: 0 }] });
+    mockDb.queueError(missing);
+    mockDb.queueResponse({ rows: [] }, { rows: [] }, { rows: [{ produced: 0, run_seconds: 0, idle_seconds: 0 }] },
+                         { rows: [{ machine_id: 1, machine_serial_no: 'VMC-1', apc_battery_status: null }] });
+
+    const res = await svc.getMaintenanceDashboard(req());
+
+    const latest = mockDb.calls().filter(c => /WITH latest AS[\s\S]*fan_status/.test(c.text));
+    expect(latest).toHaveLength(2);
+    expect(latest[0].text).toContain('t.apc_battery_status');
+    expect(latest[1].text).toContain('NULL::jsonb AS apc_battery_status');
+    expect(res.rows).toEqual([{ machine_id: 1, machine_serial_no: 'VMC-1', apc_battery_status: null }]);
+  });
+
+  test('any other database error still fails the screen', async () => {
+    mockDb.queueResponse({ rows: [{ total: 1, running: 1, idle: 0, breakdown: 0, offline: 0 }] });
+    mockDb.queueError(Object.assign(new Error('column t.fan_status does not exist'), { code: '42703' }));
+    await expect(svc.getMaintenanceDashboard(req())).rejects.toThrow('fan_status');
+  });
+
+  test('battery flags per axis, with no voltage, make the battery available', () => {
+    // 192.168.200.1 since Oct 2026: `battery: {X: false, ...}` and no volts
+    const rows = [{ cnc_battery_voltage: null, apc_battery_voltage: null,
+                    apc_battery_status: { X: false, Y: false, Z: false },
+                    fan_status: { CNC_FAN1: { on: true, fault: false, rpm: 10206 } } }];
+    expect(unavailableSignals(rows)).not.toContain('battery_status');
+    expect(unavailableSignals(rows)).not.toContain('fan_amplifier_status');
+  });
+
   test('no rows means every signal is unavailable, and bad input does not throw', () => {
     const all = Object.keys(SIGNAL_COLUMNS);
     expect(unavailableSignals([])).toEqual(all);

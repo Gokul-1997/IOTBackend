@@ -7,11 +7,13 @@
  * Condition signals come from the FOCAS collector (pms-backend, columns added
  * by migration 021): spindle speed/load/temperature, servo load and
  * temperature per axis, encoder temperature, insulation resistance, CNC/APC
- * battery voltage and fan status. Controllers differ in what they supply —
- * in September 2026 no machine sent insulation resistance, batteries or
- * fans — so every value is nullable and `unavailable` names the signals no
- * machine has reported. The screen draws a "not reported" state for those,
- * never an invented number.
+ * battery voltage, the battery alarm per axis (migration 032) and fan status.
+ * Controllers differ in what they supply — in September 2026 no machine sent
+ * insulation resistance, batteries or fans; from October some send fans as
+ * {on, fault, rpm} and the battery as a flag per axis, with no voltage — so
+ * every value is nullable and `unavailable` names the signals no machine has
+ * reported. The screen draws a "not reported" state for those, never an
+ * invented number.
  *
  * Everything below reads the same rollup tables as Screens 1 and the
  * machine dashboard (production_hourly, oee_hourly) so the three always
@@ -39,6 +41,21 @@ const TELEMETRY_LOOKBACK = `INTERVAL '1 hour'`;
    hour later. One machine over one day is bounded and indexed — ~0.1 s
    measured on production. */
 const FRESH_WINDOW       = `INTERVAL '60 seconds'`;
+
+/*
+ * The battery flag per axis is migration 032's column. Until that has run,
+ * the latest-reading query is tried again with the column read as NULL, so
+ * the screen keeps working and this build can go out before the migration —
+ * as energy-meter.service does for 029's table.
+ */
+async function withBatteryFlags(query) {
+  try {
+    return await query('t.apc_battery_status');
+  } catch (err) {
+    if (err?.code !== '42703' || !/apc_battery_status/.test(err.message || '')) throw err;
+    return query('NULL::jsonb AS apc_battery_status');
+  }
+}
 
 exports.getMaintenanceDashboard = async (req) => {
   const companyId = req.user.company_id;
@@ -97,7 +114,7 @@ exports.getMaintenanceDashboard = async (req) => {
        machine can carry several active operator assignments (machine 15 has
        three on this database), and joining them directly would emit that
        machine once per operator and inflate the list. */
-    db.query(`
+    withBatteryFlags(flags => db.query(`
       WITH latest AS (
         SELECT DISTINCT ON (t.machine_id)
                t.machine_id, t.machine_status, t.alarm, t.spindle_load,
@@ -109,7 +126,7 @@ exports.getMaintenanceDashboard = async (req) => {
                t.servo_insulation_res_x, t.servo_insulation_res_y, t.servo_insulation_res_z,
                t.servo_pulse_x, t.servo_pulse_y, t.servo_pulse_z,
                t.cnc_battery_voltage, t.apc_battery_voltage, t.sequence_number,
-               t.fan_status
+               t.fan_status, ${flags}
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
         WHERE m.company_id = $1 AND m.is_active
@@ -145,7 +162,7 @@ exports.getMaintenanceDashboard = async (req) => {
         l.servo_insulation_res_x, l.servo_insulation_res_y, l.servo_insulation_res_z,
         l.servo_pulse_x, l.servo_pulse_y, l.servo_pulse_z,
         l.cnc_battery_voltage, l.apc_battery_voltage, l.sequence_number,
-        l.fan_status,
+        l.fan_status, l.apc_battery_status,
         COALESCE(rt.run_seconds, 0)::int AS run_seconds
       FROM machines m
       LEFT JOIN latest  l  ON l.machine_id  = m.id
@@ -166,7 +183,7 @@ exports.getMaintenanceDashboard = async (req) => {
       machineId
         ? [companyId, win.from, win.to, machineId]
         : [companyId, win.from, win.to]
-    ),
+    )),
 
     /* alarm summary for the window, split the way the agreement asks */
     db.query(`
@@ -307,7 +324,7 @@ const SIGNAL_COLUMNS = {
   servo_temperature:     ['servo_temp_x', 'servo_temp_y', 'servo_temp_z'],
   spindle_temperature:   ['spindle_motor_temp'],
   encoder_temperature:   ['encoder_temp_x', 'encoder_temp_y', 'encoder_temp_z'],
-  battery_status:        ['cnc_battery_voltage', 'apc_battery_voltage'],
+  battery_status:        ['cnc_battery_voltage', 'apc_battery_voltage', 'apc_battery_status'],
   insulation_resistance: ['spindle_insulation_res', 'servo_insulation_res_x',
                           'servo_insulation_res_y', 'servo_insulation_res_z'],
   fan_amplifier_status:  ['fan_status']
