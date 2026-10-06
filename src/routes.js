@@ -1,7 +1,6 @@
 module.exports = app => {
   // ── Core Auth & Users ──────────────────────────────────────────
   app.use('/api/auth',         require('./auth/auth.routes'));
-  app.use('/api/auth/2fa',     require('./auth/twofa.routes'));
   app.use('/api/users',        require('./users/user.routes'));
   app.use('/api/roles',        require('./roles/role.routes'));
   app.use('/api/companies',    require('./companies/company.routes'));

@@ -29,7 +29,6 @@ const options = {
       { name: 'Downtime',     description: 'Downtime reason codes and events' },
       { name: 'Maintenance',  description: 'Maintenance scheduling and logs' },
       { name: 'Notifications',description: 'In-app notifications' },
-      { name: '2FA',          description: 'Two-factor authentication' },
       { name: 'Reports',      description: 'Export reports (PDF/Excel/CSV)' },
     ]
   },
