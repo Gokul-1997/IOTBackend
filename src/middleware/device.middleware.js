@@ -26,7 +26,7 @@ module.exports = async (req, res, next) => {
   try {
     const { rows } = await db.query(
       `SELECT d.id, d.company_id, d.machine_id, d.last_seen_at, d.last_seen_ip, d.agent_version,
-              m.machine_serial_no, m.ip_address, m.program_path, m.is_active AS machine_active, m.company_id AS machine_company_id,
+              m.machine_serial_no, m.ip_address, m.controller_ip, m.program_path, m.is_active AS machine_active, m.company_id AS machine_company_id,
               c.is_active AS company_active
          FROM program_devices d
          JOIN machines  m ON m.id = d.machine_id
@@ -58,7 +58,7 @@ module.exports = async (req, res, next) => {
       id: d.id,
       company_id: d.company_id,
       machine: { id: d.machine_id, company_id: d.company_id, machine_serial_no: d.machine_serial_no,
-                 ip_address: d.ip_address, program_path: d.program_path }
+                 ip_address: d.ip_address, controller_ip: d.controller_ip, program_path: d.program_path }
     };
     next();
   } catch (err) {

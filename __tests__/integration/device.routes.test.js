@@ -30,10 +30,10 @@ const { token } = deviceToken.generate();
 const AUTH = { Authorization: `Bearer ${token}` };
 const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3' };
 
-const authRow = () => mockDb.queueResponse({ rows: [{
+const authRow = (o = {}) => mockDb.queueResponse({ rows: [{
   id: 3, company_id: 5, machine_id: 7, last_seen_at: new Date().toISOString(), last_seen_ip: '::ffff:127.0.0.1',
   agent_version: null, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/', machine_active: true,
-  machine_company_id: 5, company_active: true
+  machine_company_id: 5, company_active: true, ...o
 }], rowCount: 1 });
 
 const jobRow = (o = {}) => ({
@@ -57,6 +57,12 @@ test('ping names the machine and the poll interval', async () => {
   expect(res.status).toBe(200);
   expect(res.body).toMatchObject({ device_id: 3, poll_seconds: 15,
     machine: { serial: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/' } });
+});
+
+test('ping: a machine with no IP set gives the IP its controller reports', async () => {
+  authRow({ ip_address: null, controller_ip: '192.168.200.1' });
+  const res = await request(app).get('/api/device/v1/ping').set(AUTH);
+  expect(res.body.machine.ip_address).toBe('192.168.200.1');
 });
 
 describe('GET /jobs/next', () => {

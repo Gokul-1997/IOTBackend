@@ -53,7 +53,7 @@ function forDevice(job, device) {
 
 exports.ping = async (device) => ({
   device_id: device.id,
-  machine: { serial: device.machine.machine_serial_no, ip_address: device.machine.ip_address,
+  machine: { serial: device.machine.machine_serial_no, ip_address: storage.machineIp(device.machine),
              // where this machine's programs live: list it, back it up, save new programs there
              program_path: device.machine.program_path || null },
   server_time: new Date().toISOString(),

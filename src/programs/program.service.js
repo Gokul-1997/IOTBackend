@@ -31,7 +31,7 @@ async function getMachine(machineId, companyId) {
   const id = Number(machineId);
   if (!Number.isInteger(id) || id <= 0) throw fail('Choose a machine.', 'NO_MACHINE');
   const { rows } = await pool.query(
-    `SELECT id, company_id, machine_serial_no, ip_address, program_path
+    `SELECT id, company_id, machine_serial_no, ip_address, controller_ip, program_path
        FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true`,
     [id, companyId]
   );
@@ -122,7 +122,7 @@ async function insertFile({ machine, saved, userId, note }) {
 
 exports.listMachines = async (req) => {
   const { rows } = await pool.query(
-    `SELECT m.id, m.company_id, m.machine_serial_no, m.ip_address, m.program_path,
+    `SELECT m.id, m.company_id, m.machine_serial_no, m.ip_address, m.controller_ip, m.program_path,
             d.id AS device_id, d.token_prefix, d.label AS device_label, d.created_at AS device_created_at,
             d.last_seen_at, d.last_seen_ip, d.agent_version,
             COALESCE(d.last_seen_at > NOW() - make_interval(secs => $2), false) AS online,
@@ -136,7 +136,11 @@ exports.listMachines = async (req) => {
       ORDER BY m.machine_serial_no`,
     [req.user.company_id, jobs.ONLINE_WINDOW_SEC]
   );
-  return rows.map(({ company_id, ...m }) => ({ ...m, folder: storage.machineFolder({ ...m, company_id }) }));
+  return rows.map(({ company_id, controller_ip, ...m }) => ({
+    ...m,
+    ip_address: storage.machineIp({ ...m, controller_ip }),
+    folder: storage.machineFolder({ ...m, controller_ip, company_id })
+  }));
 };
 
 exports.controllerFiles = async (req) => {

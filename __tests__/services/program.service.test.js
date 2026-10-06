@@ -181,6 +181,20 @@ describe('device tokens', () => {
   });
 });
 
+test('the machine list shows the IP the controller reports when none is set, and files go under it', async () => {
+  // production today: ip_address empty, controller_ip written by the collector
+  mockDb.queueResponse({ rows: [
+    { id: 19, company_id: 4, machine_serial_no: 'VMC - 2 - F', ip_address: null, controller_ip: '192.168.200.1', program_path: null, online: false },
+    { id: 20, company_id: 4, machine_serial_no: 'VMC - 3', ip_address: null, controller_ip: null, program_path: null, online: false }
+  ], rowCount: 2 });
+  const [m19, m20] = await svc.listMachines(req());
+  expect(m19).toMatchObject({ ip_address: '192.168.200.1', folder: 'company-4/192.168.200.1' });
+  expect(m20).toMatchObject({ ip_address: null, folder: 'company-4/machine-20' });
+  expect(m19).not.toHaveProperty('controller_ip');
+  expect(m19).not.toHaveProperty('company_id');
+  expect(mockDb.calls()[0].text).toMatch(/m\.controller_ip/);
+});
+
 test('"O1234.nc" and "o1234" are the same program to a controller', () => {
   expect(svc._internal.sameProgram('O1234.nc', 'o1234')).toBe(true);
   expect(svc._internal.sameProgram('O1234.nc', 'O12345')).toBe(false);

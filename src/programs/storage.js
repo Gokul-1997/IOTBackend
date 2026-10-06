@@ -68,10 +68,21 @@ function safeProgramName(name) {
   return base;
 }
 
-/** The machine's folder, relative to the root: company-<id>/<ip>. */
+/**
+ * The machine's IP: the one set on the machine, else the one its controller
+ * reports (the collector keeps machines.controller_ip up to date — on
+ * production no machine has ip_address set). Null when neither is an IP.
+ */
+function machineIp(machine) {
+  return [machine.ip_address, machine.controller_ip]
+    .map(v => String(v || '').trim())
+    .find(v => net.isIP(v)) || null;
+}
+
+/** The machine's folder, relative to the root: company-<id>/<ip>, or machine-<id> without one. */
 function machineFolder(machine) {
-  const ip = String(machine.ip_address || '').trim();
-  const leaf = net.isIP(ip) ? ip.replace(/:/g, '-') : `machine-${Number(machine.id)}`;   // ':' is not allowed in a Windows path
+  const ip = machineIp(machine);
+  const leaf = ip ? ip.replace(/:/g, '-') : `machine-${Number(machine.id)}`;   // ':' is not allowed in a Windows path
   return `company-${Number(machine.company_id)}/${leaf}`;
 }
 
@@ -155,6 +166,6 @@ async function remove(folder, storedName) {
 
 module.exports = {
   ROOT, MAX_BYTES, ALLOWED_EXTENSIONS,
-  safeProgramName, machineFolder, stamp, checkContent, sha256,
+  safeProgramName, machineIp, machineFolder, stamp, checkContent, sha256,
   save, open, read, remove, resolveInside
 };

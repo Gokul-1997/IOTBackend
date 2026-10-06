@@ -45,6 +45,17 @@ describe('the machine\'s folder', () => {
   test('an IPv6 address loses its colons (not allowed in a Windows path)', () => {
     expect(storage.machineFolder({ ...machine, ip_address: 'fe80::1' })).toBe('company-5/fe80--1');
   });
+  test('no IP set on the machine: the IP its controller reports names the folder', () => {
+    // production: ip_address is empty on every machine, controller_ip is filled by the collector
+    const prod = { id: 19, company_id: 4, ip_address: null, controller_ip: '192.168.200.1' };
+    expect(storage.machineFolder(prod)).toBe('company-4/192.168.200.1');
+    expect(storage.machineIp(prod)).toBe('192.168.200.1');
+  });
+  test('the IP set on the machine wins; one that is not an IP does not block the fallback', () => {
+    expect(storage.machineIp({ ip_address: '10.0.0.5', controller_ip: '192.168.200.1' })).toBe('10.0.0.5');
+    expect(storage.machineIp({ ip_address: 'VMC-2', controller_ip: ' 192.168.200.1 ' })).toBe('192.168.200.1');
+    expect(storage.machineIp({ ip_address: '', controller_ip: '../x' })).toBeNull();
+  });
 });
 
 test('file stamps are plant time (IST)', () => {
