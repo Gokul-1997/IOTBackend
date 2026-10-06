@@ -23,21 +23,21 @@ const { getCurrentShift } = require('../utils/shift.util');
 
 let running = false;
 
-module.exports = async () => {
-  if (running) {
-    console.warn('[hourlyOee] previous run still in progress — skipping this tick');
-    return;
-  }
-  running = true;
-  const now = new Date();
+/*
+ * The previous IST clock hour. production_hourly rows start on IST hours
+ * (10:00 IST = 04:30 UTC). This used UTC hours, so it read 04:00 UTC — a key
+ * only the old runtime flush wrote, with no parts in it — and every
+ * oee_hourly row had performance 0 and no quality or OEE.
+ */
+const IST_OFFSET_MS = 330 * 60 * 1000;
+function previousIstHour(now) {
+  const hourEnd = new Date(Math.floor((now.getTime() + IST_OFFSET_MS) / 3_600_000) * 3_600_000 - IST_OFFSET_MS);
+  return { hourStart: new Date(hourEnd.getTime() - 3_600_000), hourEnd };
+}
 
-  // Previous hour window — use UTC methods so the IST +5:30 offset
-  // doesn't cause a :30 misalignment against production_hourly timestamps.
-  const hourEnd   = new Date(now);
-  hourEnd.setUTCMinutes(0, 0, 0);
-
-  const hourStart = new Date(hourEnd);
-  hourStart.setUTCHours(hourEnd.getUTCHours() - 1);
+/* OEE for one IST hour, for every active company. The schedule passes the
+   hour just ended; a back-fill passes older ones. */
+async function runHourlyOee(hourStart) {
 
   try {
     // Iterate companies (shifts are company-scoped, not plant-scoped)
@@ -153,10 +153,21 @@ module.exports = async () => {
     console.log('Hourly OEE calculated:', hourStart.toISOString());
   } catch (err) {
     console.error('hourlyOee.job error:', err.message);
-  } finally {
-    running = false;
+    throw err;
   }
+}
+
+module.exports = async () => {
+  if (running) {
+    console.warn('[hourlyOee] previous run still in progress — skipping this tick');
+    return;
+  }
+  running = true;
+  try { await runHourlyOee(previousIstHour(new Date()).hourStart); }
+  catch { /* logged above */ }
+  finally { running = false; }
 };
+module.exports.runHourlyOee = runHourlyOee;
 
 // Helper: shift duration in minutes (handles overnight shifts)
 function getShiftDurationMinutes(shift) {
@@ -169,3 +180,4 @@ function getShiftDurationMinutes(shift) {
     : (1440 - startMin) + endMin;
   return Math.max(1, duration - Number(shift.break_minutes || 0));
 }
+module.exports.previousIstHour = previousIstHour;

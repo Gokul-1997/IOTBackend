@@ -2,12 +2,12 @@ require('dotenv').config({ quiet: true });
 
 const http = require('http');
 const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken');
 
 const app = require('./app');
 const db = require('./db');
 const redis = require('./redis'); // ioredis instance
 const realtime = require('./lib/realtime');
+const socketServer = require('./lib/socket-server');
 
 const PORT = process.env.PORT || 8000;
 
@@ -17,78 +17,16 @@ const httpServer = http.createServer(app);
 // Create Socket.IO server
 const io = new Server(httpServer, {
   cors: {
-    origin: (process.env.CORS_ORIGINS || '').split(','),
+    origin: (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
     credentials: true
   }
 });
 
 /* ===============================
-   🔐 WebSocket Authentication
-================================ */
-io.use(async (socket, next) => {
-  try {
-    let token = socket.handshake.auth?.token;
-
-    if (!token) {
-      console.log("❌ No token received");
-      return next(new Error('Unauthorized'));
-    }
-
-    /* ✅ REMOVE "Bearer " if exists */
-    if (token.startsWith('Bearer ')) {
-      token = token.slice(7);
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    /* A token stays valid for its full 15 minutes, so check the account too:
-       a disabled user, or anyone in a company S&T has disabled, gets no live
-       data. */
-    const { rows } = await db.query(
-      `SELECT u.is_active, COALESCE(c.is_active, true) AS company_active
-         FROM users u LEFT JOIN companies c ON c.id = u.company_id
-        WHERE u.id = $1`,
-      [decoded.user_id]
-    );
-    if (!rows[0]?.is_active || !rows[0].company_active) {
-      return next(new Error('Unauthorized'));
-    }
-
-    socket.user = decoded;
-
-    next();
-
-  } catch (err) {
-    console.log("❌ JWT VERIFY ERROR:", err.message);
-    // Send distinct error code so the frontend can refresh vs. reject
-    if (err.name === 'TokenExpiredError') {
-      return next(new Error('TOKEN_EXPIRED'));
-    }
-    next(new Error('Unauthorized'));
-  }
-});
-
-/* ===============================
-   🔄 Socket Connection
+   🔐 WebSocket authentication and rooms (lib/socket-server.js)
 ================================ */
 realtime.setIo(io);
-
-io.on('connection', (socket) => {
-  // intentionally silent — fires on every browser tab open; too noisy for production
-
-  // Private room per user so per-request progress (e.g. program transfer)
-  // reaches every tab that user has open, and nobody else's.
-  const userId = socket.user?.user_id;
-  if (userId) socket.join(`user:${userId}`);
-
-  socket.on('joinPlant', (plantId) => {
-    socket.join(`plant:${plantId}`);
-  });
-
-  socket.on('disconnect', () => {
-    // intentionally silent — fires on every browser tab close; too noisy for production
-  });
-});
+socketServer.attach(io, { db });
 
 /* ===============================
    📡 Redis Subscriber (ioredis)
@@ -114,20 +52,8 @@ subscriber.subscribe('machine_updates', (err) => {
 
 // Listen for messages
 subscriber.on('message', (channel, message) => {
-  if (channel === 'machine_updates') {
-    // NOTE: do NOT log message here — fires on every machine packet (hot path).
-    // With N machines × 1 msg/sec × PM2 cluster workers this fills disk rapidly.
-
-    let data;
-    try {
-      data = JSON.parse(message);
-    } catch (parseErr) {
-      console.error('❌ Invalid JSON from Redis:', parseErr.message);
-      return;
-    }
-
-    io.to(`plant:${data.plant_id}`).emit('machineUpdate', data);
-  }
+  // NOTE: do NOT log message here — fires on every machine packet (hot path).
+  if (channel === 'machine_updates') socketServer.relay(io, message);
 });
 /* ===============================
    🚀 Start Server
@@ -143,14 +69,16 @@ const shutdown = async (signal) => {
   console.log(`${signal} received: shutting down...`);
 
   try {
+    require('./cron').stop?.();
     await subscriber.unsubscribe('machine_updates');
     await subscriber.quit();
     await redis.quit();
 
     io.close();
 
-    httpServer.close(() => {
+    httpServer.close(async () => {
       console.log('HTTP server closed.');
+      await db.end().catch(() => {});
       process.exit(0);
     });
 
@@ -172,6 +100,10 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled Rejection:', err);
 });
 
+/* After an uncaught exception the process is in an unknown state (a half
+   written response, a leaked pool client): log it and exit so pm2 starts a
+   clean one, rather than carry on serving from a broken process. */
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
+  console.error('Uncaught Exception — exiting for a clean restart:', err);
+  setTimeout(() => process.exit(1), 500).unref();
 });

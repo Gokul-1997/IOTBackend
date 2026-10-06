@@ -9,7 +9,7 @@ const app = express();
 
 app.set('trust proxy', 1);
 
-const { standardLimiter, authLimiter } = require('./middleware/rateLimit.middleware');
+const { standardLimiter, authLimiter, loginAccountLimiter, passwordLimiter } = require('./middleware/rateLimit.middleware');
 
 app.disable('x-powered-by');
 
@@ -67,7 +67,26 @@ app.use(cors({
 
 app.use(standardLimiter);
 
+// liveness: the process answers
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+/* readiness: the process can do its job — the database and Redis answer.
+   For the load balancer and monitoring; 503 with what is down otherwise. */
+app.get('/health/ready', async (req, res) => {
+  const db = require('./db');
+  const redis = require('./redis');
+  const within = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+  const [dbOk, redisOk] = await Promise.all([
+    within(db.query('SELECT 1'), 2000).then(() => true, () => false),
+    within(redis.ping(), 2000).then(r => r === 'PONG', () => false)
+  ]);
+  const ok = dbOk && redisOk;
+  res.status(ok ? 200 : 503).json({
+    ok, db: dbOk, redis: redisOk,
+    db_pool: { total: db.totalCount, idle: db.idleCount, waiting: db.waitingCount },
+    uptime_sec: Math.floor(process.uptime())
+  });
+});
 
 // 🌱 Seed permissions and roles on startup
 const roleService = require('./roles/role.service');
@@ -75,7 +94,10 @@ roleService.seedPagePermissions()
   .then(result => console.log('✅ Permissions seeded:', result))
   .catch(err => console.error('⚠️ Permission seed warning:', err.message));
 
-app.use('/auth', authLimiter);
+/* Sign-in and password reset. Mounted on the real paths: this used to be
+   app.use('/auth', …) while the routes are under /api/auth, so it never ran. */
+app.use('/api/auth/login', authLimiter, loginAccountLimiter);
+app.use(['/api/auth/forgot-password', '/api/auth/reset-password'], passwordLimiter);
 
 require('./routes')(app);
 

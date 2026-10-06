@@ -30,7 +30,6 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.13",
-    "nodemon": "^3.1.11",
     "pdfkit": "^0.18.0",
     "pg": "^8.18.0",
     "rate-limit-redis": "^4.3.1",
@@ -41,6 +40,7 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
+    "socket.io-client": "^4.8.3",
     "supertest": "^7.2.2"
   },
   "jest": {

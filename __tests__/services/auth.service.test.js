@@ -1,8 +1,8 @@
 /*
  * Unit tests for auth.service.login covering:
  *  - missing credentials → 400
- *  - user not found     → 404
- *  - inactive account   → 403
+ *  - user not found     → 401, the same answer as a wrong password
+ *  - inactive account   → 403, but only once the password is right
  *  - locked account     → 403
  *  - bad password       → 401 (and increments failed_login_attempts)
  *  - good password      → returns access+refresh tokens, role list
@@ -39,19 +39,32 @@ describe('auth.service.login', () => {
       .rejects.toMatchObject({ status: 400 });
   });
 
-  test('404 when user not found', async () => {
+  test('an unknown email gets the wrong-password answer, after the same bcrypt work', async () => {
     mockDb.queueResponse({ rows: [], rowCount: 0 });
+    bcrypt.compare.mockResolvedValueOnce(false);
     await expect(auth.login({ email: 'x@y.com', password: 'p' }, fakeReq))
-      .rejects.toMatchObject({ status: 404 });
+      .rejects.toEqual({ status: 401, message: 'Invalid credentials' });
+    expect(bcrypt.compare).toHaveBeenCalledWith('p', expect.stringMatching(/^\$2[aby]\$10\$/));
   });
 
-  test('403 when account inactive', async () => {
+  test('403 when account inactive — once the password is right', async () => {
     mockDb.queueResponse({
       rows: [{ id: 1, password_hash: 'h', is_active: false }],
       rowCount: 1
     });
+    bcrypt.compare.mockResolvedValueOnce(true);
     await expect(auth.login({ email: 'x@y.com', password: 'p' }, fakeReq))
       .rejects.toMatchObject({ status: 403, message: /inactive/i });
+  });
+
+  test('an inactive account with a wrong password says only "Invalid credentials"', async () => {
+    mockDb.queueResponse({
+      rows: [{ id: 1, password_hash: 'h', is_active: false }],
+      rowCount: 1
+    });
+    bcrypt.compare.mockResolvedValueOnce(false);
+    await expect(auth.login({ email: 'x@y.com', password: 'p' }, fakeReq))
+      .rejects.toEqual({ status: 401, message: 'Invalid credentials' });
   });
 
   test('403 when account locked', async () => {

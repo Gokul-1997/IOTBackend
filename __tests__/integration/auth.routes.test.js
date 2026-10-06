@@ -9,7 +9,7 @@
  *    TC-AR-01  400 when email missing
  *    TC-AR-02  400 when password missing
  *    TC-AR-03  400 when email is invalid format
- *    TC-AR-04  404 when user not found
+ *    TC-AR-04  401 when user not found (the same answer as a wrong password)
  *    TC-AR-05  403 when account inactive
  *    TC-AR-06  403 when account locked
  *    TC-AR-07  401 on wrong password
@@ -150,20 +150,22 @@ describe('POST /api/auth/login', () => {
     expect(res.body.errors[0]).toMatch(/valid email/i);
   });
 
-  test('TC-AR-04 404 when user not found', async () => {
+  test('TC-AR-04 401 when user not found — the same answer as a wrong password', async () => {
     mockDb.queueResponse({ rows: [], rowCount: 0 });
 
     const res = await request(makeApp())
       .post('/api/auth/login')
       .send({ email: 'ghost@x.com', password: 'pw' });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid credentials');
   });
 
-  test('TC-AR-05 403 when account inactive', async () => {
+  test('TC-AR-05 403 when account inactive (once the password is right)', async () => {
     mockDb.queueResponse({
       rows: [{ ...ACTIVE_USER, is_active: false }],
       rowCount: 1
     });
+    bcrypt.compare.mockResolvedValueOnce(true);
 
     const res = await request(makeApp())
       .post('/api/auth/login')

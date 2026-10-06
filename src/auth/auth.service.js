@@ -8,6 +8,16 @@ const { generateResetPasswordTemplate } = require('../utils/nodemailer/emailTemp
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_TIME_MINUTES = 15;
 
+/* Signed-in devices per user. It was 2, so a third sign-in (the office PC,
+   the phone, the shop-floor screen) signed the oldest one out at its next
+   refresh. */
+const MAX_SESSIONS = Math.max(1, Number(process.env.MAX_SESSIONS_PER_USER) || 5);
+
+/* Compared against when the email is unknown, so "no such user" takes as
+   long as a wrong password and the two cannot be told apart by timing. */
+const DUMMY_HASH = '$2b$10$g7SbVd3IAdTf4QurRFh2M.TXMs6HPf9/WsdpcA4IdEfAZ9Gye44Yi';   // bcrypt, cost 10, of a random string
+const INVALID_LOGIN = { status: 401, message: 'Invalid credentials' };
+
 // Access token short; refresh token long
 const ACCESS_EXPIRES = '15m';
 const REFRESH_TTL_DAYS = 7;
@@ -49,11 +59,15 @@ exports.login = async ({ email, password }, req) => {
     [email]
   );
 
-  if (!userRes.rowCount) throw { status: 404, message: 'User not found' };
+  /* An unknown email gets the same answer, after the same bcrypt work, as a
+     wrong password: "User not found" (404) told anyone which addresses have
+     accounts. */
+  if (!userRes.rowCount) {
+    await bcrypt.compare(password, DUMMY_HASH);
+    throw INVALID_LOGIN;
+  }
 
   const user = userRes.rows[0];
-
-  if (!user.is_active) throw { status: 403, message: 'Account inactive' };
 
   if (user.lock_until && new Date(user.lock_until) > new Date()) {
     throw { status: 403, message: 'Account locked. Try again later.' };
@@ -63,22 +77,22 @@ exports.login = async ({ email, password }, req) => {
   const passwordValid = await bcrypt.compare(password, user.password_hash);
 
   if (!passwordValid) {
-    // Update failed attempts (non-critical, use fire-and-forget)
-    const failed = (user.failed_login_attempts || 0) + 1;
-    const lockUntil = failed >= MAX_FAILED_ATTEMPTS
-      ? new Date(Date.now() + LOCK_TIME_MINUTES * 60000)
-      : null;
-
+    /* Counted in the database, not read-then-written here: two wrong
+       passwords at the same moment used to both write "1". */
     db.query(
       `UPDATE users
-       SET failed_login_attempts = $1,
-           lock_until = $2
-       WHERE id = $3`,
-      [failed, lockUntil, user.id]
+          SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1,
+              lock_until = CASE WHEN COALESCE(failed_login_attempts, 0) + 1 >= $2
+                                THEN now() + make_interval(mins => $3) ELSE lock_until END
+        WHERE id = $1`,
+      [user.id, MAX_FAILED_ATTEMPTS, LOCK_TIME_MINUTES]
     ).catch(err => console.error('Failed to update login attempts:', err));
 
-    throw { status: 401, message: 'Invalid credentials' };
+    throw INVALID_LOGIN;
   }
+
+  // only after the password: otherwise "Account inactive" says the address has an account
+  if (!user.is_active) throw { status: 403, message: 'Account inactive' };
 
   // after the password, so only the account's owner learns the company is off
   if (user.company_active === false) throw COMPANY_DISABLED;
@@ -157,7 +171,7 @@ exports.login = async ({ email, password }, req) => {
       [user.id, hashedRefreshToken, expiresAt, req.ip, req.headers['user-agent'] || null]
     );
 
-    // Keep only last 2 valid sessions
+    // Keep only the newest MAX_SESSIONS sessions
     await client.query(
       `UPDATE user_sessions
        SET revoked = true
@@ -167,9 +181,9 @@ exports.login = async ({ email, password }, req) => {
            SELECT id FROM user_sessions
            WHERE user_id = $1 AND revoked = false
            ORDER BY created_at DESC
-           LIMIT 2
+           LIMIT $2
          )`,
-      [user.id]
+      [user.id, MAX_SESSIONS]
     );
 
     await client.query('COMMIT');

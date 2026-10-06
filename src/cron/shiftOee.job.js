@@ -15,12 +15,12 @@ let running = false;
 
 const BACKFILL_HOURS = 48;
 
-module.exports = async () => {
-  if (running) {
-    console.warn('[shiftOee] previous run still in progress — skipping this tick');
-    return;
-  }
-  running = true;
+/*
+ * Compute every completed shift instance whose end falls in [fromMs, toMs].
+ * The schedule passes the last 48 hours; a back-fill (scripts/
+ * fix-hourly-double-count.js) passes a longer range.
+ */
+async function runShiftOee({ fromMs, toMs }) {
 
   try {
     const { rows: companies } = await db.query(
@@ -35,8 +35,8 @@ module.exports = async () => {
       );
 
       // Build (shift, shiftDate) pairs for every completed shift instance
-      // that ended within the last BACKFILL_HOURS.
-      const shiftInstances = expandShiftInstances(shifts, BACKFILL_HOURS);
+      // that ended within the range.
+      const shiftInstances = expandShiftInstances(shifts, { fromMs, toMs });
 
       const { rows: machines } = await db.query(
         `SELECT id FROM machines WHERE company_id = $1 AND is_active = TRUE`,
@@ -141,23 +141,37 @@ module.exports = async () => {
   } catch (err) {
     console.error('shiftOee.job error:', err.message);
     console.error(err.stack);
-  } finally {
-    running = false;
+    throw err;
   }
+}
+
+module.exports = async () => {
+  if (running) {
+    console.warn('[shiftOee] previous run still in progress — skipping this tick');
+    return;
+  }
+  running = true;
+  try {
+    const now = Date.now();
+    await runShiftOee({ fromMs: now - BACKFILL_HOURS * 3600 * 1000, toMs: now });
+  } catch { /* logged above */ }
+  finally { running = false; }
 };
+module.exports.runShiftOee = runShiftOee;
 
 /*
  * For each shift, list every completed instance (shiftDate + window) whose end
  * time falls within the last `backfillHours`. Handles overnight shifts.
  * windowStart/windowEnd are JS Dates in UTC; shiftDate is 'YYYY-MM-DD' in IST.
  */
-function expandShiftInstances(shifts, backfillHours) {
+function expandShiftInstances(shifts, { fromMs, toMs }) {
   const out = [];
-  const nowMs = Date.now();
-  const cutoffMs = nowMs - backfillHours * 3600 * 1000;
+  const nowMs = Math.min(Date.now(), toMs);
+  const cutoffMs = fromMs;
+  const days = Math.ceil((Date.now() - fromMs) / 86_400_000);
 
   // Walk back day-by-day in IST
-  for (let i = 0; i <= Math.ceil(backfillHours / 24) + 1; i++) {
+  for (let i = 0; i <= days + 1; i++) {
     const dayIST = istDateOffset(-i); // 'YYYY-MM-DD'
 
     for (const shift of shifts) {

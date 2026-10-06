@@ -1,9 +1,37 @@
+const crypto = require('crypto');
+
+/*
+ * The last stop for every error.
+ *
+ * An error thrown on purpose carries a status (400, 403, 404 …) and a
+ * message meant for the person using the app; it is passed on as it is.
+ *
+ * Anything else is unexpected — a database error, a bug — and its message
+ * is for us, not for the caller: "column x does not exist", a constraint
+ * name or a file path is a map of the system. The caller gets a plain
+ * message and a reference; the details go to the log under the same
+ * reference, so a support call can find them.
+ */
 module.exports = (err, req, res, next) => {
-  console.error(err);
+  const status = Number(err.status || err.statusCode) || 500;
+  const expected = status < 500 && (err.status || err.statusCode);
+
+  if (!expected) {
+    const ref = crypto.randomBytes(4).toString('hex');
+    console.error(`[error ${ref}] ${req.method} ${req.originalUrl}`, err);
+    if (res.headersSent) return next(err);
+    return res.status(status >= 500 ? status : 500).json({
+      status: 'error',
+      message: status === 503 && err.message ? err.message : 'Something went wrong on the server. Please try again.',
+      ref
+    });
+  }
+
+  if (res.headersSent) return next(err);
 
   const body = {
     status: 'error',
-    message: err.message || 'Internal Server Error'
+    message: err.message || 'Request failed'
   };
 
   /* Application errors carry a code the client branches on — RANGE_TOO_LARGE
@@ -17,5 +45,5 @@ module.exports = (err, req, res, next) => {
   if (err.status && err.days != null)     body.days     = err.days;
   if (err.status && err.max_days != null) body.max_days = err.max_days;
 
-  res.status(err.status || 500).json(body);
+  res.status(status).json(body);
 };

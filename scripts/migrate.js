@@ -37,6 +37,23 @@ const BASELINE = args.includes('--baseline');
 
 const sha = text => crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
 
+/*
+ * A file whose first line is "-- migrate: statement-by-statement" is run one
+ * statement at a time, each in its own transaction, on one connection (so a
+ * SET at the top holds for the rest). Postgres refuses some statements inside
+ * a transaction block, and a multi-statement string is one — e.g. TimescaleDB's
+ * CREATE INDEX … WITH (timescaledb.transaction_per_chunk), which builds a
+ * hypertable's index chunk by chunk instead of blocking writes for the whole
+ * build. Such a file is split on semicolons that end a line, so it must not
+ * contain functions or DO blocks. Every other file runs as one string, as before.
+ */
+function statementsOf(sql) {
+  if (!sql.startsWith('-- migrate: statement-by-statement')) return [sql];
+  return sql.split(/;[ \t]*$/m)
+    .map(s => s.trim())
+    .filter(s => s.split('\n').some(line => line.trim() && !line.trim().startsWith('--')));
+}
+
 async function ensureTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -112,8 +129,9 @@ async function main() {
   for (const f of pending) {
     const sql = fs.readFileSync(path.join(DIR, f), 'utf8');
     const t0 = Date.now();
+    const client = await pool.connect();
     try {
-      await pool.query(sql);
+      for (const statement of statementsOf(sql)) await client.query(statement);
       const ms = Date.now() - t0;
       await pool.query(
         `INSERT INTO schema_migrations (filename, checksum, duration_ms) VALUES ($1,$2,$3)`,
@@ -126,6 +144,8 @@ async function main() {
       console.error(`  FAILED  ${f}\n    ${err.message}`);
       console.error('\nStopped. Later migrations were not attempted.');
       return 1;
+    } finally {
+      client.release();
     }
   }
   console.log(`\ndone — ${pending.length} applied`);
