@@ -39,6 +39,11 @@ Expect within a minute: `status: ok`, `writer.db_ok: true`, `journal.pending` ne
 `outcomes.accepted` rising. The collector refuses to start if 035 is missing — it
 logs the missing tables and exits; the broker keeps the messages meanwhile.
 
+A gateway more than 10 s behind is named once a minute in the log ("readings
+arriving late", with each machine's worst lag). The old build printed "high
+ingress latency" for every such reading — about three lines a second from the
+Fanuc gateway on 6–7 Oct.
+
 **Rollback:** `git checkout <previous commit>`; `pm2 reload`. Readings already in the
 journal are written by the new build only — let `journal.pending` reach 0 first.
 
@@ -103,6 +108,7 @@ recovery needs WAL archiving (pgBackRest or wal-g) — not configured today
 | Database writes | `pms_writer_db_ok` | 0 for 1 min |
 | Readings refused | `pms_journal_refused_total`, `pms_messages_journal_refused_total` | increases |
 | Late readings | `pms_messages_late_stale_total` | rises fast (a gateway publishing late) |
+| Gateway lag | `pms_ingress_lag_max_seconds` (per machine: `pms_ingress_lag_seconds`) | > 120 for 5 min. At 300 s readings are set aside as late and the machine drops out of live data and reports. The Fanuc gateway ran 11–15 s behind on 6–7 Oct; the Mitsubishi one runs at about 0 s |
 | API | `GET /health/ready` | not 200 for 2 min |
 | DB disk | host | > 80 % |
 | Backups | backup log | no "backup ok" in 26 h |
