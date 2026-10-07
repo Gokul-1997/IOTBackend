@@ -564,16 +564,24 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
 
       // shift_kwh = current_energy − first energy reading of this shift
       // More reliable than summing deltas (unaffected by missed MQTT messages)
+      /* energy > 0 and the company: that is the partial index
+         idx_telemetry_energy_readings (company_id, received_at) WHERE energy > 0,
+         which holds meter readings only. As "machine and energy IS NOT NULL"
+         the planner walked every machine's readings of the shift looking for
+         one, and found none for the many machines without a meter: 0.3–0.7 s
+         per machine page with 140 machines at 1 Hz, 0.1 ms now. A 0 is a
+         dropped read, not a meter value (the collector's energy-step). */
       const { rows: energyRows } = await db.query(`
         SELECT energy
         FROM telemetry_raw
-        WHERE machine_id  = $1
+        WHERE company_id  = $4
+          AND machine_id  = $1
           AND received_at >= $2
           AND received_at <  $3
-          AND energy IS NOT NULL
+          AND energy > 0
         ORDER BY received_at ASC
         LIMIT 1
-      `, [machineId, detailShiftStart, detailShiftEnd]);
+      `, [machineId, detailShiftStart, detailShiftEnd, companyId]);
 
       energyAtShiftStart = energyRows[0]?.energy ?? null;
     }

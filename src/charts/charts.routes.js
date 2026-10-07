@@ -2,6 +2,7 @@ const express    = require('express');
 const router     = express.Router();
 const auth = require('../middleware/auth.middleware');
 const svc        = require('./charts.service');
+const heavy      = require('../middleware/heavy.middleware');
 
 /* GET /api/charts/meta */
 router.get('/meta', auth, async (req, res, next) => {
@@ -34,7 +35,7 @@ router.get('/data', auth, async (req, res, next) => {
 });
 
 /* GET /api/charts/parts?machine_id=&shift_start_epoch= */
-router.get('/parts', auth, async (req, res, next) => {
+router.get('/parts', auth, heavy, async (req, res, next) => {
   try {
     const { machine_id, shift_start_epoch, shift_end_epoch, max_parts } = req.query;
     if (!machine_id) return res.status(400).json({ success: false, message: 'machine_id required' });

@@ -22,12 +22,17 @@ const HOST = arg('pghost', '127.0.0.1');
 if (!['127.0.0.1', 'localhost'].includes(HOST) || !DB.startsWith('iot_mt')) throw new Error('local iot_mt* databases only');
 const db = new Pool({ host: HOST, port: Number(arg('pgport', 55432)), user: 'postgres', database: DB, max: 2 });
 
-const COMPANIES = [
+const ALL = [
   { key: 'A', marker: 'ZZA', name: 'ZZA Alpha Forge',      machines: 20, plan: 'bronze', users: 9 },
   { key: 'B', marker: 'ZZB', name: 'ZZB Beta Castings',    machines: 50, plan: 'silver', users: 35 },
   { key: 'C', marker: 'ZZC', name: 'ZZC Gamma Precision',  machines: 70, plan: 'silver', users: 49 },
+  // only with --companies D: a fourth, larger company for the capacity run
+  { key: 'D', marker: 'ZZD', name: 'ZZD Delta Works',      machines: 160, plan: 'gold', users: 20 },
 ];
-const PASSWORD = `Mt!${Math.random().toString(36).slice(2, 10)}A9`;   // test accounts only
+// --companies A,B,C (default) or e.g. D, added to an existing --out file
+const COMPANIES = ALL.filter(c => (arg('companies', 'A,B,C')).split(',').includes(c.key));
+const PASSWORD = (fs.existsSync(OUT) && arg('companies', 'A,B,C') !== 'A,B,C' && JSON.parse(fs.readFileSync(OUT, 'utf8')).password)
+  || `Mt!${Math.random().toString(36).slice(2, 10)}A9`;   // test accounts only
 
 async function api(token, method, path, body) {
   const res = await fetch(BASE + path, {
@@ -51,7 +56,9 @@ await setPassword(snt.id);
 const sntToken = await login(snt.email, PASSWORD);
 const plans = Object.fromEntries((await db.query('SELECT id, plan_code FROM plans')).rows.map(r => [r.plan_code, r.id]));
 
-const out = { base: BASE, db: DB, password: PASSWORD, snt: { id: snt.id, email: snt.email }, companies: {} };
+const out = fs.existsSync(OUT) && arg('companies', 'A,B,C') !== 'A,B,C'
+  ? JSON.parse(fs.readFileSync(OUT, 'utf8'))
+  : { base: BASE, db: DB, password: PASSWORD, snt: { id: snt.id, email: snt.email }, companies: {} };
 for (const c of COMPANIES) {
   const t0 = Date.now();
   const lower = c.marker.toLowerCase();
