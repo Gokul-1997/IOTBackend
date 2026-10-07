@@ -1,14 +1,26 @@
 const db = require('../db');
 const { ownedOrThrow } = require('../lib/tenant');
 
+// One row per code per owner. The built-in codes (no company) are in the
+// table twice — migration 007 ran twice, and its unique index treats every
+// NULL company as different — so the oldest copy of each is the one shown.
 exports.getReasons = async (company_id) => {
   const res = await db.query(
-    `SELECT * FROM downtime_reasons
-     WHERE (company_id = $1 OR company_id IS NULL) AND is_active = true
+    `SELECT * FROM (
+       SELECT DISTINCT ON (company_id, code) * FROM downtime_reasons
+        WHERE (company_id = $1 OR company_id IS NULL) AND is_active = true
+        ORDER BY company_id, code, id
+     ) r
      ORDER BY category, name`,
     [company_id]
   );
   return res.rows;
+};
+
+/** A code the company already has: say so, instead of a server error. */
+const takenCode = (e, code) => {
+  if (e.code === '23505') return { status: 409, message: `Reason code ${String(code).toUpperCase()} already exists` };
+  return e;
 };
 
 exports.createReason = async ({ company_id, code, name, category }) => {
@@ -17,7 +29,7 @@ exports.createReason = async ({ company_id, code, name, category }) => {
     `INSERT INTO downtime_reasons (company_id, code, name, category)
      VALUES ($1, $2, $3, $4) RETURNING *`,
     [company_id, code.toUpperCase(), name, category || 'UNPLANNED']
-  );
+  ).catch(e => { throw takenCode(e, code); });
   return res.rows[0];
 };
 
@@ -26,7 +38,7 @@ exports.updateReason = async (id, company_id, { code, name, category, is_active 
     `UPDATE downtime_reasons SET code=$1, name=$2, category=$3, is_active=$4
      WHERE id=$5 AND company_id=$6 RETURNING *`,
     [code?.toUpperCase(), name, category, is_active ?? true, id, company_id]
-  );
+  ).catch(e => { throw takenCode(e, code); });
   if (!res.rowCount) throw { status: 404, message: 'Reason not found' };
   return res.rows[0];
 };
@@ -53,8 +65,8 @@ exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 
   if (to_date)    { conditions.push(`e.started_at <= $${i++}`); params.push(to_date); }
 
   const where = `WHERE ${conditions.join(' AND ')}`;
-  const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, parseInt(limit) || 20);
+  const pageNum = Math.max(1, parseInt(page) || 1);
+  const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 20));
   const offset = (pageNum - 1) * limitNum;
 
   const [countRes, dataRes] = await Promise.all([
@@ -79,7 +91,13 @@ exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 
   };
 };
 
+// The last 7 days unless the caller names dates. The defaults are SQL, not
+// bind values: "NOW() - INTERVAL '7 days'" sent as a value is not a time, and
+// every summary without dates (the Downtime page's Summary tab) was a 500.
 exports.getDowntimeSummary = async ({ company_id, from_date, to_date }) => {
+  for (const [label, v] of [['from_date', from_date], ['to_date', to_date]]) {
+    if (v && Number.isNaN(Date.parse(v))) throw { status: 400, message: `${label} is not a date` };
+  }
   const res = await db.query(
     `SELECT dr.category, dr.name as reason_name, dr.code,
             COUNT(*) as event_count,
@@ -87,11 +105,12 @@ exports.getDowntimeSummary = async ({ company_id, from_date, to_date }) => {
      FROM downtime_events e
      LEFT JOIN downtime_reasons dr ON dr.id = e.downtime_reason_id
      WHERE e.company_id = $1
-       AND e.started_at >= $2 AND e.started_at <= $3
+       AND e.started_at >= COALESCE($2::timestamptz, NOW() - INTERVAL '7 days')
+       AND e.started_at <= COALESCE($3::timestamptz, NOW())
        AND e.ended_at IS NOT NULL
      GROUP BY dr.category, dr.name, dr.code
      ORDER BY total_seconds DESC`,
-    [company_id, from_date || 'NOW() - INTERVAL \'7 days\'', to_date || 'NOW()']
+    [company_id, from_date || null, to_date || null]
   );
   return res.rows;
 };
