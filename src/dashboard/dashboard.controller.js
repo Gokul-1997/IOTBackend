@@ -1,4 +1,5 @@
 const svc = require('./dashboard.service');
+const { parseFleetPage } = require('./fleet-page');
 const timelineSvc = require('./timeline.service');
 const spindleSvc = require('./spindle.service');
 const factorySvc = require('./factory.service');
@@ -24,7 +25,7 @@ const { toCsv, tablePdf } = require('../utils/export.util');
 exports.dashboard = async (req, res) => {
   try {
 
-    const data = await svc.dashboard(req.user.plant_id, req.user.company_id);
+    const data = await svc.dashboard(req.user.plant_id, req.user.company_id, parseFleetPage(req.query));
 
     return res.json({
       status: "success",
@@ -32,6 +33,7 @@ exports.dashboard = async (req, res) => {
     });
 
   } catch (err) {
+    if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
     console.error("Dashboard Error:", err);
     return res.status(500).json({
       status: "error",

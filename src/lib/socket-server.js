@@ -49,6 +49,41 @@ function attach(io, { db }) {
     const companyId = socket.user?.company_id;
     if (companyId) socket.join(`company:${companyId}`);
 
+    // New clients opt in to bounded machine subscriptions; old clients keep
+    // their company feed. Room names and ownership always come from the server.
+    let machineRooms = [];
+    let scopeVersion = 0;
+    let scopeWindow = Date.now();
+    let scopeRequests = 0;
+    socket.on('subscribeMachines', async (ids, acknowledge) => {
+      const reply = typeof acknowledge === 'function' ? acknowledge : () => {};
+      if (Date.now() - scopeWindow >= 1000) { scopeWindow = Date.now(); scopeRequests = 0; }
+      if (++scopeRequests > 10) return reply({ ok: false, code: 'RATE_LIMITED' });
+      if (!companyId || !Array.isArray(ids) || ids.length > 100 ||
+          ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+        return reply({ ok: false, code: 'INVALID_SUBSCRIPTION' });
+      }
+      const version = ++scopeVersion;
+      const uniqueIds = [...new Set(ids)];
+      try {
+        const { rows } = uniqueIds.length ? await db.query(
+          'SELECT id FROM machines WHERE company_id = $1 AND id = ANY($2::int[]) AND is_active = true',
+          [companyId, uniqueIds]
+        ) : { rows: [] };
+        if (version !== scopeVersion || !socket.connected) return reply({ ok: false, code: 'SUPERSEDED' });
+        if (rows.length !== uniqueIds.length) return reply({ ok: false, code: 'FORBIDDEN' });
+        // With the current in-process adapter these room operations are synchronous.
+        // A distributed adapter rollout must preserve the ordering of scope changes.
+        socket.leave(`company:${companyId}`);
+        for (const room of machineRooms) socket.leave(room);
+        machineRooms = rows.map(row => `company:${companyId}:machine:${row.id}`);
+        if (machineRooms.length) socket.join(machineRooms);
+        reply({ ok: true });
+      } catch {
+        reply({ ok: false, code: 'SUBSCRIPTION_UNAVAILABLE' });
+      }
+    });
+
     socket.on('joinPlant', () => { /* superseded by the company room */ });
   });
 }
@@ -59,7 +94,10 @@ function relay(io, message) {
   try { data = JSON.parse(message); }
   catch (err) { console.error('❌ Invalid JSON from Redis:', err.message); return; }
   // a machine with no company reaches nobody
-  if (data && data.company_id) io.to(`company:${data.company_id}`).emit('machineUpdate', data);
+  if (data && data.company_id) io.to([
+    `company:${data.company_id}`,
+    `company:${data.company_id}:machine:${data.machine_id}`
+  ]).emit('machineUpdate', data);
 }
 
 module.exports = { attach, relay };

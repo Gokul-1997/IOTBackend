@@ -1,4 +1,5 @@
 const db = require('../db');
+const { fleetPage } = require('./fleet-page');
 
 /** Return a Date whose .getFullYear/.getHours/… reflect IST, regardless of server TZ */
 function nowIST() {
@@ -29,7 +30,7 @@ function formatDuration(totalSeconds) {
   return `${h}:${m}:${s}`;
 }
 
-exports.dashboard = async (plant_id, company_id) => {
+exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
 
   const realNow     = new Date();                      // real epoch for comparisons
   const now         = nowIST();                        // IST-local for date/time strings
@@ -62,6 +63,7 @@ exports.dashboard = async (plant_id, company_id) => {
     return {
       shift: null,
       summary: { total: 0, running: 0, idle: 0 },
+      ...(pageOptions ? { pagination: { page: pageOptions.page, per_page: pageOptions.perPage, total: 0, total_pages: 1 } } : {}),
       machines: []
     };
   }
@@ -101,7 +103,8 @@ exports.dashboard = async (plant_id, company_id) => {
 
   /* ================= MACHINES ================= */
 
-  const { rows: machines } = await db.query(`
+  const pageResult = pageOptions ? await fleetPage(company_id, pageOptions) : null;
+  const { rows: machines } = pageResult ? { rows: pageResult.machines } : await db.query(`
     SELECT id,machine_serial_no,image_url
     FROM machines
     WHERE company_id=$1
@@ -118,7 +121,8 @@ exports.dashboard = async (plant_id, company_id) => {
         shiftElapsedMinutes,
         plannedMinutes
       },
-      summary: { total: 0, running: 0, idle: 0 },
+      summary: pageResult?.summary || { total: 0, running: 0, idle: 0 },
+      ...(pageResult ? { pagination: pageResult.pagination } : {}),
       machines: []
     };
   }
@@ -244,7 +248,9 @@ exports.dashboard = async (plant_id, company_id) => {
    * and the status is already OFFLINE — which is exactly what it would have
    * been with the full history. Do not remove it.
    */
-  const { rows: liveRows } = await db.query(`
+  const { rows: liveRows } = pageResult
+    ? { rows: machines.map(m => ({ ...m, machine_id: m.id })) }
+    : await db.query(`
     SELECT DISTINCT ON (machine_id)
       machine_id, machine_status, alarm, received_at
     FROM telemetry_raw
@@ -388,6 +394,7 @@ exports.dashboard = async (plant_id, company_id) => {
 
       status,
       alarm,
+      received_at: receivedAtSec || null,
 
       run_minutes:  runMinutes,
       idle_minutes: idleMinutes,
@@ -411,7 +418,8 @@ exports.dashboard = async (plant_id, company_id) => {
       shiftElapsedMinutes,
       plannedMinutes
     },
-    summary: { total, running, idle },
+    summary: pageResult?.summary || { total, running, idle },
+    ...(pageResult ? { pagination: pageResult.pagination } : {}),
     machines: machinesList
   };
 };
@@ -851,4 +859,3 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     throw err;
   }
 };
- 

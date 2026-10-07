@@ -22,7 +22,9 @@ const USERS = {
   3: { is_active: false, company_id: 4, company_active: true },
   4: { is_active: true, company_id: 6, company_active: false }
 };
-const db = { query: async (_sql, [id]) => ({ rows: USERS[id] ? [USERS[id]] : [] }) };
+const db = { query: async (sql, [id, ids]) => ({ rows: sql.includes('FROM machines')
+  ? (ids || []).filter(machineId => ({ 101: 4, 102: 4, 201: 5 })[machineId] === id).map(id => ({ id }))
+  : USERS[id] ? [USERS[id]] : [] }) };
 
 let httpServer, io, url;
 const clients = [];
@@ -45,6 +47,39 @@ function client(userId, claims = {}) {
 const connected = c => new Promise((resolve, reject) => { c.on('connect', resolve); c.on('connect_error', reject); });
 const updatesOf = c => { const got = []; c.on('machineUpdate', d => got.push(d.machine_id)); return got; };
 const settle = () => new Promise(r => setTimeout(r, 150));
+const subscribe = (c, ids) => new Promise((resolve, reject) => c.timeout(1000).emit('subscribeMachines', ids, (err, reply) => err ? reject(err) : resolve(reply)));
+
+test('bounded subscriptions receive only selected machines, can change and unsubscribe', async () => {
+  const c = client(1); await connected(c);
+  const got = updatesOf(c);
+  expect(await subscribe(c, [101])).toEqual({ ok: true });
+  socketServer.relay(io, JSON.stringify({ machine_id: 101, company_id: 4 }));
+  socketServer.relay(io, JSON.stringify({ machine_id: 102, company_id: 4 }));
+  await settle();
+  expect(got).toEqual([101]);
+  expect(await subscribe(c, [102])).toEqual({ ok: true });
+  socketServer.relay(io, JSON.stringify({ machine_id: 101, company_id: 4 }));
+  socketServer.relay(io, JSON.stringify({ machine_id: 102, company_id: 4 }));
+  await settle();
+  expect(got).toEqual([101, 102]);
+  expect(await subscribe(c, [])).toEqual({ ok: true });
+  socketServer.relay(io, JSON.stringify({ machine_id: 102, company_id: 4 }));
+  await settle();
+  expect(got).toEqual([101, 102]);
+  c.close();
+});
+
+test('foreign IDs and oversized subscriptions are rejected without leaking data', async () => {
+  const c = client(1); await connected(c);
+  const got = updatesOf(c);
+  await subscribe(c, []);
+  expect(await subscribe(c, [201])).toEqual({ ok: false, code: 'FORBIDDEN' });
+  expect(await subscribe(c, Array(101).fill(101))).toEqual({ ok: false, code: 'INVALID_SUBSCRIPTION' });
+  socketServer.relay(io, JSON.stringify({ machine_id: 201, company_id: 5 }));
+  await settle();
+  expect(got).toEqual([]);
+  c.close();
+});
 
 test('each company receives its own machines and nothing else, whatever the client asks for', async () => {
   const a = client(1);
