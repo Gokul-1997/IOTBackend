@@ -9,6 +9,8 @@ tables, recent telemetry, the collector's database role and its grants).
 | pms-backend | Journal + exactly-once writer; runtime-flush removed (run/idle double count); shifts in memory; late / out-of-order readings kept; graceful stop; `/metrics` per outcome |
 | Backend | Live data per company (Socket.IO); rate limits per user and on the real login path; no SQL text in 500s; login enumeration closed; crons single-runner + `CRON_ENABLED`; hourly OEE on IST hours; pool 20; `/health/ready`; migrations 035–038; correction script; backup scripts |
 | FrontendIOT | Live updates reconnect indefinitely; Angular 21.2.25 (security fixes) |
+| Backend (multi-company) | Every id a request names checked against the caller's company (3 read and 9 write leaks closed); exports and reports limited per company; debug route removed — see `docs/MULTI_COMPANY_RESULTS_2026-10-07.md` |
+| FrontendIOT (multi-company) | Signing out closes the live-data socket; another tab switching user resets this one |
 
 ## 0. Before you start
 
