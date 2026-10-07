@@ -41,10 +41,12 @@ Expect within a minute: `status: ok`, `writer.db_ok: true`, `journal.pending` ne
 `outcomes.accepted` rising. The collector refuses to start if 035 is missing — it
 logs the missing tables and exits; the broker keeps the messages meanwhile.
 
-A gateway more than 10 s behind is named once a minute in the log ("readings
-arriving late", with each machine's worst lag). The old build printed "high
-ingress latency" for every such reading — about three lines a second from the
-Fanuc gateway on 6–7 Oct.
+A gateway more than 10 s behind is named in the log ("readings arriving
+late", with each machine's worst lag) when it starts, when another machine
+falls behind, when it passes 60 / 120 / 240 s (an error from 120 s), and as a
+reminder every 15 minutes while it lasts; "readings on time again" when it
+ends. The old build printed "high ingress latency" for every such reading —
+about three lines a second from the Fanuc gateway on 6–7 Oct.
 
 **Rollback:** `git checkout <previous commit>`; `pm2 reload`. Readings already in the
 journal are written by the new build only — let `journal.pending` reach 0 first.

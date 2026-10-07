@@ -45,6 +45,7 @@ async function runShiftOee({ fromMs, toMs }) {
       const machineIds = machines.map(m => m.id);
       if (machineIds.length === 0) continue;
 
+      const done = [];
       for (const inst of shiftInstances) {
         const { shift, shiftDate, windowStart, windowEnd } = inst;
         const shiftDurationMinutes = getShiftDurationMinutes(shift);
@@ -134,8 +135,17 @@ async function runShiftOee({ fromMs, toMs }) {
                oee          = EXCLUDED.oee`,
             upsertParams
           );
-          console.log(`[shiftOee] upserted ${upsertValues.length} rows: company=${company.id} shift=${shift.shift_code} date=${shiftDate}`);
+          done.push(`${shift.shift_code} started ${shiftDate} (${upsertValues.length} machines)`);
         }
+      }
+      /* One line per company per run. The same completed shifts come round
+         every 10 minutes for 48 hours on purpose — readings that arrive late
+         and corrections reach the shift figures — and the date is the day a
+         shift STARTED, so a night shift from the 5th to the 6th reads "5th".
+         A line per shift per run made that look like a fault. */
+      if (done.length) {
+        const hours = Math.round((toMs - fromMs) / 3_600_000);
+        console.log(`[shiftOee] company ${company.id}: recomputed ${done.length} completed shift(s) that ended in the last ${hours} h — ${done.join('; ')}`);
       }
     }
   } catch (err) {
