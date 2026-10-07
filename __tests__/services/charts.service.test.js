@@ -69,7 +69,7 @@ describe('charts.service.getPartTiming', () => {
     });
 
     const out = await svc.getPartTiming({
-      machineId: 1, shiftStartEpoch: 1700000000, shiftEndEpoch: 1700001000
+      companyId: 4, machineId: 1, shiftStartEpoch: 1700000000, shiftEndEpoch: 1700001000
     });
     expect(out.parts).toHaveLength(4);
     expect(out.parts[0].run_min).toBe(1);
@@ -87,7 +87,7 @@ describe('charts.service.getPartTiming', () => {
     });
 
     const out = await svc.getPartTiming({
-      machineId: 1, shiftStartEpoch: 1, shiftEndEpoch: 2, maxParts: 10
+      companyId: 4, machineId: 1, shiftStartEpoch: 1, shiftEndEpoch: 2, maxParts: 10
     });
     expect(out.parts).toHaveLength(10);
   });

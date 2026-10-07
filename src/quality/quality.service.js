@@ -1,4 +1,5 @@
 const db = require("../db");
+const { ownedOrThrow } = require("../lib/tenant");
 
 // ─────────────────────────────────────────────────────────────
 // Helper: shift planned seconds (duration minus break)
@@ -46,7 +47,9 @@ function calcOee({ runSeconds, plannedSeconds, producedQty, cycleTimeSec, accept
 // ─────────────────────────────────────────────────────────────
 // GET QUALITY DASHBOARD
 // ─────────────────────────────────────────────────────────────
-exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
+exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, date }) => {
+  // machine and shift come from the query string; nothing below is scoped by company
+  await ownedOrThrow(company_id, { machine_id, shift_id });
 
   // 1. Machine info + target
   const { rows: machineRows } = await db.query(
@@ -240,6 +243,7 @@ exports.getQualityDashboardService = async ({ machine_id, shift_id, date }) => {
 // UPSERT reject / rework for a machine + shift + date
 // ─────────────────────────────────────────────────────────────
 exports.upsertQualityEntryService = async ({
+  company_id,
   machine_id,
   shift_id,
   date,
@@ -247,6 +251,8 @@ exports.upsertQualityEntryService = async ({
   rework_qty,
   user_id
 }) => {
+  // rejects entered against another company's machine changed that company's OEE
+  await ownedOrThrow(company_id, { machine_id, shift_id });
   // Validate reject+rework does not exceed produced_qty for this shift+date
   const { rows: prodRows } = await db.query(
     `SELECT COALESCE(SUM(produced_qty), 0) AS produced

@@ -1,8 +1,11 @@
 const db = require('../db');
+const { ownedOrThrow } = require('../lib/tenant');
 const { validateCreate } = require('../helpers/validators/operator.validator');
 
 exports.create = async (data, plant_id, company_id) => {
   validateCreate(data);
+  // the shift and machines come from the request: they must be this company's
+  await ownedOrThrow(company_id, { shift_id: data.shift_id, machine_ids: data.machine_ids });
 
   const client = await db.connect();
 
@@ -57,7 +60,13 @@ exports.list = async (plant_id, query, company_id) => {
   const limit = parseInt(query.limit) || 10;
   const offset = (page - 1) * limit;
   const search = query.search || '';
-  const sortBy = query.sortBy || 'o.created_at';
+  /* Named columns only: this goes into the SQL text, and was taken from the
+     query string as it came. */
+  const SORTABLE = {
+    created_at: 'o.created_at', operator_code: 'o.operator_code', operator_name: 'o.operator_name',
+    skill_level: 'o.skill_level', is_active: 'o.is_active', shift_name: 's.shift_name', machine_count: 'machine_count'
+  };
+  const sortBy = SORTABLE[String(query.sortBy || '').replace(/^o\./, '')] || 'o.created_at';
   const order = query.order === 'asc' ? 'ASC' : 'DESC';
 
   const values = [company_id];
@@ -130,6 +139,11 @@ exports.list = async (plant_id, query, company_id) => {
 // operator.service.js
 
 exports.update = async (id, data, plant_id, company_id) => {
+  /* The field update below is scoped to the company, but the assignment
+     changes after it were keyed on the operator id alone: another company's
+     operator could be moved to other machines and shifts. */
+  await ownedOrThrow(company_id, { operator_id: id, shift_id: data.shift_id, machine_ids: data.machine_ids });
+
   const client = await db.connect();
 
   try {

@@ -68,7 +68,7 @@ function queueDashboard({
   );
 }
 
-const BASE_ARGS = { machine_id: 23, shift_id: 5, date: '2026-05-06' };
+const BASE_ARGS = { company_id: 4, machine_id: 23, shift_id: 5, date: '2026-05-06' };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getQualityDashboardService
@@ -182,6 +182,7 @@ describe('getQualityDashboardService', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const UPSERT_ARGS = {
+  company_id: 4,
   machine_id: 23,
   shift_id: 5,
   date: '2026-05-06',

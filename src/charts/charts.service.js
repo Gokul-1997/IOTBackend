@@ -1,4 +1,5 @@
 const db = require('../db');
+const { ownedOrThrow } = require('../lib/tenant');
 
 /* ─────────────────────────────────────────────────────────────
    META  –  machines + shifts for filter dropdowns
@@ -33,6 +34,9 @@ exports.getMeta = async (plantId, companyId) => {
      totalProduced
 ───────────────────────────────────────────────────────────── */
 exports.getChartData = async ({ plantId, companyId, machineId, shiftId, date }) => {
+  // the machine and shift come from the query string; the single-shift query
+  // below reads production_hourly by those ids alone
+  await ownedOrThrow(companyId, { machine_id: machineId, shift_id: shiftId });
 
   /* ── Hourly part count (line chart) ── */
   let hourlyRows = [];
@@ -114,14 +118,20 @@ exports.getChartData = async ({ plantId, companyId, machineId, shiftId, date }) 
      run_seconds – seconds machine was RUNNING while producing this part
      idle_seconds– seconds machine was IDLE before next part started
 ───────────────────────────────────────────────────────────── */
-exports.getPartTiming = async ({ machineId, shiftStartEpoch, shiftEndEpoch, maxParts }) => {
+// one shift is at most a day; the window comes from the query string and a
+// month of 1 Hz telemetry in one window-function query is a load on everyone
+const MAX_PART_WINDOW_SEC = 48 * 3600;
+
+exports.getPartTiming = async ({ companyId, machineId, shiftStartEpoch, shiftEndEpoch, maxParts }) => {
 
   if (!machineId || !shiftStartEpoch) return [];
+  await ownedOrThrow(companyId, { machine_id: machineId });
 
   // Cap end at now for live shifts; if no end provided default to now
   const effectiveEnd = shiftEndEpoch
     ? Math.min(Number(shiftEndEpoch), Math.floor(Date.now() / 1000))
     : Math.floor(Date.now() / 1000);
+  shiftStartEpoch = Math.max(Number(shiftStartEpoch), effectiveEnd - MAX_PART_WINDOW_SEC);
 
   const res = await db.query(`
     WITH ordered AS (

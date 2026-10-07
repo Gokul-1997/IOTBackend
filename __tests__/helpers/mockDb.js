@@ -28,10 +28,29 @@ const calls = [];
 const ADVISORY_LOCK = /pg_(try_)?advisory_(unlock|lock)/i;
 let grantLock = true;
 
+/*
+ * The company-ownership check (src/lib/tenant.js) is infrastructure in the
+ * same sense: nearly every write now asks it first. It is answered here as
+ * "every id belongs to the caller" unless a test calls `denyOwnership()`, and
+ * it is kept out of calls() so positional assertions do not shift.
+ */
+const OWNERSHIP = /^\s*SELECT 0 AS k, count\(\*\)::int AS n FROM/;
+let ownershipDenied = false;
+const ownershipCalls = [];
+
 const mockDb = {
   query: jest.fn(async (text, params) => {
     const sql = typeof text === 'string' ? text : text.text;
     calls.push({ text: sql, params });
+
+    if (OWNERSHIP.test(sql)) {
+      calls.pop();
+      ownershipCalls.push({ text: sql, params });
+      const denied = ownershipDenied;
+      ownershipDenied = false;     // denial applies to one check only
+      const rows = (params || []).slice(1).map((ids, k) => ({ k, n: denied ? 0 : ids.length }));
+      return { rows, rowCount: rows.length };
+    }
 
     if (ADVISORY_LOCK.test(sql)) {
       const locked = grantLock;
@@ -62,10 +81,16 @@ const mockDb = {
   },
   /** Make the next pg_try_advisory_lock report the machine already busy. */
   denyAdvisoryLock: () => { grantLock = false; },
+  /** Make the next ownership check find the ids in another company. */
+  denyOwnership: () => { ownershipDenied = true; },
+  /** The ownership checks made, with their parameters ([company_id, ids…]). */
+  ownershipChecks: () => [...ownershipCalls],
   reset: () => {
     responseQueue.length = 0;
     calls.length = 0;
     grantLock = true;
+    ownershipDenied = false;
+    ownershipCalls.length = 0;
     mockDb.query.mockClear();
     mockDb.connect.mockClear();
   },

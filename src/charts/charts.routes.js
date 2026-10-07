@@ -4,18 +4,17 @@ const auth = require('../middleware/auth.middleware');
 const svc        = require('./charts.service');
 
 /* GET /api/charts/meta */
-router.get('/meta', auth, async (req, res) => {
+router.get('/meta', auth, async (req, res, next) => {
   try {
     const data = await svc.getMeta(req.user.plant_id, req.user.company_id);
     res.json({ success: true, data });
   } catch (err) {
-    console.error('charts/meta error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 });
 
 /* GET /api/charts/data?machine_id=&shift_id=&date= */
-router.get('/data', auth, async (req, res) => {
+router.get('/data', auth, async (req, res, next) => {
   try {
     const { machine_id, shift_id, date } = req.query;
     const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })).toISOString().split('T')[0];
@@ -30,18 +29,18 @@ router.get('/data', auth, async (req, res) => {
 
     res.json({ success: true, data });
   } catch (err) {
-    console.error('charts/data error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 });
 
 /* GET /api/charts/parts?machine_id=&shift_start_epoch= */
-router.get('/parts', auth, async (req, res) => {
+router.get('/parts', auth, async (req, res, next) => {
   try {
     const { machine_id, shift_start_epoch, shift_end_epoch, max_parts } = req.query;
     if (!machine_id) return res.status(400).json({ success: false, message: 'machine_id required' });
 
     const result = await svc.getPartTiming({
+      companyId:       req.user.company_id,
       machineId:       machine_id,
       shiftStartEpoch: shift_start_epoch || Math.floor(Date.now() / 1000) - 28800, // default 8h ago
       shiftEndEpoch:   shift_end_epoch   || null,
@@ -57,8 +56,7 @@ router.get('/parts', auth, async (req, res) => {
       totalIdleMin: result.totalIdleMin
     });
   } catch (err) {
-    console.error('charts/parts error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    next(err);
   }
 });
 

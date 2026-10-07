@@ -14,10 +14,11 @@ const getQualityDashboard = async (req, res) => {
       });
     }
 
-    const data = await getQualityDashboardService({ machine_id, shift_id, date });
+    const data = await getQualityDashboardService({ company_id: req.user.company_id, machine_id, shift_id, date });
 
     return res.json({ success: true, data });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, message: error.message });
     console.error("Quality Dashboard Error:", error);
     return res.status(500).json({ success: false, message: "Internal Server Error" });
   }
@@ -35,6 +36,7 @@ const upsertQualityEntry = async (req, res) => {
     }
 
     const result = await upsertQualityEntryService({
+      company_id: req.user.company_id,
       machine_id,
       shift_id,
       date,

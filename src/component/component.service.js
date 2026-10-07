@@ -1,7 +1,11 @@
 const db = require('../db');
+const { ownedOrThrow } = require('../lib/tenant');
 
 /* CREATE */
 exports.create = async (data, plant_id, company_id) => {
+  // the machine comes from the request: it must be this company's, or the
+  // auto-switch below would rewrite another company's running job
+  await ownedOrThrow(company_id, { machine_id: data.machine_id });
 
   const result = await db.query(`
     INSERT INTO components
@@ -122,6 +126,10 @@ exports.update = async (id, data, plant_id, company_id) => {
     id,
     company_id
   ]);
+
+  // not this company's component (or gone): nothing to cascade, and the job
+  // update below must not run for another company's component id
+  if (!result.rowCount) throw { status: 404, message: 'Component not found' };
 
   // Cascade: keep active jobs in sync when component target changes
   await db.query(`

@@ -1,4 +1,5 @@
 const db = require('../db');
+const { ownedOrThrow } = require('../lib/tenant');
 
 const VALID_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
 const VALID_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -113,6 +114,7 @@ exports.getTicketById = async (id, company_id) => {
 
 exports.createTicket = async ({ company_id, machine_id, alarm_id, title, description, issue_type, priority, assigned_to, created_by }) => {
   if (!machine_id || !title) throw { status: 400, message: 'machine_id and title are required' };
+  await ownedOrThrow(company_id, { machine_id, alarm_id, assigned_to });
 
   const client = await db.connect();
   try {
@@ -239,6 +241,7 @@ exports.getAssignees = async (company_id) => {
 
 exports.assignTicket = async (id, company_id, { assigned_to, changed_by }) => {
   if (!assigned_to) throw { status: 400, message: 'assigned_to is required' };
+  await ownedOrThrow(company_id, { assigned_to });
 
   const client = await db.connect();
   try {

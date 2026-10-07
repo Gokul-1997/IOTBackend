@@ -1,4 +1,5 @@
 const db = require('../db');
+const { ownedOrThrow } = require('../lib/tenant');
 
 exports.getReasons = async (company_id) => {
   const res = await db.query(
@@ -32,6 +33,7 @@ exports.updateReason = async (id, company_id, { code, name, category, is_active 
 
 exports.logEvent = async ({ company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by }) => {
   if (!machine_id) throw { status: 400, message: 'machine_id is required' };
+  await ownedOrThrow(company_id, { machine_id, shift_id, downtime_reason_id });
   const res = await db.query(
     `INSERT INTO downtime_events (company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,

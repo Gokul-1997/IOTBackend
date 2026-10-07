@@ -1,4 +1,5 @@
 const db = require('../db');
+const { ownedOrThrow } = require('../lib/tenant');
 
 exports.getSchedules = async ({ company_id, machine_id, status, page = 1, limit = 20 }) => {
   const conditions = [`ms.company_id = $1`];
@@ -31,6 +32,7 @@ exports.getSchedules = async ({ company_id, machine_id, status, page = 1, limit 
 
 exports.createSchedule = async ({ company_id, machine_id, title, description, maintenance_type, scheduled_at, estimated_duration_minutes, assigned_to, recurrence, created_by }) => {
   if (!machine_id || !title || !scheduled_at) throw { status: 400, message: 'machine_id, title, and scheduled_at are required' };
+  await ownedOrThrow(company_id, { machine_id, assigned_to });
   const res = await db.query(
     `INSERT INTO maintenance_schedules (company_id, machine_id, title, description, maintenance_type, scheduled_at, estimated_duration_minutes, assigned_to, recurrence, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
@@ -42,6 +44,7 @@ exports.createSchedule = async ({ company_id, machine_id, title, description, ma
 
 exports.updateSchedule = async (id, company_id, fields) => {
   const { title, description, maintenance_type, scheduled_at, estimated_duration_minutes, assigned_to, status, recurrence } = fields;
+  await ownedOrThrow(company_id, { assigned_to });
   const res = await db.query(
     `UPDATE maintenance_schedules
      SET title=$1, description=$2, maintenance_type=$3, scheduled_at=$4,
@@ -91,6 +94,7 @@ exports.getLogs = async ({ company_id, machine_id, page = 1, limit = 20 }) => {
 
 exports.createLog = async ({ company_id, machine_id, maintenance_schedule_id, title, maintenance_type, started_at, completed_at, duration_minutes, technician_name, work_performed, parts_replaced, cost, status, logged_by }) => {
   if (!machine_id || !title || !started_at) throw { status: 400, message: 'machine_id, title, started_at required' };
+  await ownedOrThrow(company_id, { machine_id, maintenance_schedule_id });
   const res = await db.query(
     `INSERT INTO maintenance_logs (company_id, machine_id, maintenance_schedule_id, title, maintenance_type, started_at, completed_at, duration_minutes, technician_name, work_performed, parts_replaced, cost, status, logged_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,

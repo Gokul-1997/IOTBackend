@@ -1,7 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('./dashboard.controller');
 const auth = require('../middleware/auth.middleware');
-const permit = require('../middleware/permission.middleware');
 const access = require('../middleware/access.middleware');
 
 /* Each Phase 2 dashboard has a key of its own (see APP_MODULES). These routes
@@ -26,20 +25,27 @@ router.get('/maintenance', auth, view('maintenance'), ctrl.maintenance);
 router.get('/preventive', auth, view('preventive'), ctrl.preventive);
 
 /* Threshold rules: reading is part of the dashboard, but changing what
-   raises tickets is an edit and is gated accordingly. */
+   raises tickets is an edit and is gated accordingly.
+
+   access(), not permit(): permit() reads the role alone, and neither the
+   COMPANY_ADMIN system role nor the default company roles hold
+   page:maintenance:edit — so no one in a customer company could save a
+   threshold or a periodic schedule (403). access() lets the company admin
+   through on the company's grant and still needs the role permission for
+   everyone else, as on every other page. */
 router.get('/preventive/thresholds',        auth, view('preventive'), ctrl.listThresholds);
-router.post('/preventive/thresholds',       auth, permit('page:maintenance:edit'), ctrl.saveThreshold);
-router.delete('/preventive/thresholds/:id', auth, permit('page:maintenance:delete'), ctrl.deleteThreshold);
-router.post('/preventive/run',              auth, permit('page:maintenance:edit'), ctrl.runPmEngine);
+router.post('/preventive/thresholds',       auth, access('page:maintenance:edit'), ctrl.saveThreshold);
+router.delete('/preventive/thresholds/:id', auth, access('page:maintenance:delete'), ctrl.deleteThreshold);
+router.post('/preventive/run',              auth, access('page:maintenance:edit'), ctrl.runPmEngine);
 
 /* Phase 2 · Screen 4 — Periodic Maintenance.
    Literal segments before /:format so "schedules" is never read as one. */
 router.get('/periodic', auth, view('periodic'), ctrl.periodic);
 
 router.get('/periodic/schedules',        auth, view('periodic'), ctrl.listPeriodicSchedules);
-router.post('/periodic/schedules',       auth, permit('page:maintenance:edit'),   ctrl.savePeriodicSchedule);
-router.delete('/periodic/schedules/:id', auth, permit('page:maintenance:delete'), ctrl.deletePeriodicSchedule);
-router.post('/periodic/run',             auth, permit('page:maintenance:edit'),   ctrl.runPeriodicEngine);
+router.post('/periodic/schedules',       auth, access('page:maintenance:edit'),   ctrl.savePeriodicSchedule);
+router.delete('/periodic/schedules/:id', auth, access('page:maintenance:delete'), ctrl.deletePeriodicSchedule);
+router.post('/periodic/run',             auth, access('page:maintenance:edit'),   ctrl.runPeriodicEngine);
 
 router.get('/periodic/export/:format', auth, export_('periodic'), ctrl.exportPeriodic);
 
