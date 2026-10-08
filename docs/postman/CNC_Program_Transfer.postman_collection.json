@@ -1,0 +1,1783 @@
+{
+  "info": {
+    "name": "CNC Program Transfer - Simple operator and device flows",
+    "description": "Start with 1 Setup, then choose SEND or FETCH, then Check jobs / Download. User JWT and device token are deliberately separate. No credentials are included. Default URL is localhost:8000. Collection Runner stops after the current request: this is a manual integration guide, not an automated controller test. Do not run device claim/completion requests while a real device owns the queue. See ../PROGRAM_TRANSFER_QUICKSTART.md. All response examples are illustrative, not captured production data.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Stop a Runner after the manually selected request; never auto-chain device actions.",
+          "pm.execution.setNextRequest(null);",
+          "const base = String(pm.environment.get('base_url') || '');",
+          "if (!/^https:\\/\\//.test(base) && !/^http:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(base)) { pm.execution.skipRequest(); throw new Error('Use HTTPS, or http://localhost:<port> for local development. Do not include /api in base_url.'); }",
+          "if (/\\/api\\/?$/.test(base) || /\\/$/.test(base)) { pm.execution.skipRequest(); throw new Error('base_url must have no trailing slash or /api suffix.'); }"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1 Setup - user login and machine selection",
+      "item": [
+        {
+          "name": "01 Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/auth/login",
+            "description": "Use a company user with Program Transfer permissions. Stores access_token and refresh_token only after a successful response. Local values are private; do not export a filled environment.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.environment.get('email') || !pm.environment.get('password')) { pm.execution.skipRequest(); throw new Error('Fill email and password in your local environment.'); }",
+                  "pm.environment.unset('access_token'); pm.environment.unset('refresh_token');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (!b.accessToken || !b.refreshToken) throw new Error('Login did not return both tokens.');",
+                  "pm.environment.set('access_token', b.accessToken); pm.environment.set('refresh_token', b.refreshToken);",
+                  "['machine_id','machine_serial','job_id','job_action','job_status','file_id','claimed_job_id','claimed_machine_id','device_serial'].forEach(k => pm.environment.unset(k));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Login response (token placeholders)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/auth/login",
+                "description": "Use a company user with Program Transfer permissions. Stores access_token and refresh_token only after a successful response. Local values are private; do not export a filled environment.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"accessToken\": \"<user JWT>\",\n  \"refreshToken\": \"<refresh token>\",\n  \"user\": {\n    \"id\": 5,\n    \"email\": \"operator@example.invalid\",\n    \"username\": \"Operator\",\n    \"company_name\": \"Example company\",\n    \"plant_id\": null,\n    \"company_id\": 2,\n    \"user_type\": \"company_user\",\n    \"is_snt_super\": false,\n    \"roles\": [\n      \"COMPANY_ADMIN\"\n    ],\n    \"permissions\": [\n      \"page:programs:view\",\n      \"page:programs:upload\",\n      \"page:programs:transfer\",\n      \"page:programs:fetch\",\n      \"machine.update\"\n    ],\n    \"company_permissions\": [\n      \"page:programs:view\",\n      \"page:programs:upload\",\n      \"page:programs:transfer\",\n      \"page:programs:fetch\",\n      \"machine.update\"\n    ],\n    \"plan\": null\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "02 Refresh user token (only if expired)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/auth/refresh",
+            "description": "User refresh token only. Does not refresh device credentials.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (!b.accessToken) throw new Error('Missing accessToken'); pm.environment.set('access_token', b.accessToken);"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Refreshed",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/auth/refresh",
+                "description": "User refresh token only. Does not refresh device credentials.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refreshToken\": \"{{refresh_token}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"accessToken\": \"<new user JWT>\",\n  \"permissions\": [\n    \"page:programs:view\"\n  ],\n  \"company_permissions\": [\n    \"page:programs:view\"\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "03 List machines and choose machine_id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/programs/machines",
+            "description": "Run once, read data, set machine_id explicitly, then run again to capture its serial. Never automatically selects the first machine."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "const selected = String(pm.environment.get('machine_id') || '');",
+                  "pm.environment.unset('machine_serial');",
+                  "if (selected) { const m = b.data.find(x => String(x.id) === selected); if (!m) throw new Error('machine_id is not in your company machine list.'); pm.environment.set('machine_serial', m.machine_serial_no); }"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Company machines",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/programs/machines",
+                "description": "Run once, read data, set machine_id explicitly, then run again to capture its serial. Never automatically selects the first machine."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": [\n    {\n      \"id\": 7,\n      \"machine_serial_no\": \"VMC-1\",\n      \"ip_address\": \"192.168.200.3\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"device_id\": 3,\n      \"token_prefix\": \"mxd_example\",\n      \"device_label\": \"Factory agent\",\n      \"device_created_at\": \"2026-10-08T04:00:00.000Z\",\n      \"last_seen_at\": \"2026-10-08T05:00:00.000Z\",\n      \"last_seen_ip\": \"192.0.2.10\",\n      \"agent_version\": \"1.0.0\",\n      \"online\": true,\n      \"open_jobs\": 1,\n      \"controller_reported_at\": \"2026-10-08T05:00:00.000Z\",\n      \"folder\": \"company-2/192.168.200.3\"\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "04 Set machine program path (optional admin setup)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/machines/{{machine_id}}",
+            "description": "Updates only program_path. Use the actual controller path. Requires machine.update. Set confirm_setup_machine_id to machine_id once; this value is consumed.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"program_path\": \"{{program_path}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }",
+                  "const confirmation = String(pm.environment.get('confirm_setup_machine_id') || '');",
+                  "pm.environment.unset('confirm_setup_machine_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('machine_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_setup_machine_id to the reviewed machine_id for this one request.'); }",
+                  "if (!pm.environment.get('program_path')) { pm.execution.skipRequest(); throw new Error('Enter the actual program_path.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (String(b.data.id) !== String(pm.environment.get('machine_id'))) throw new Error('Wrong machine returned.');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "05 Create or replace device token (optional admin setup)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/programs/machines/{{machine_id}}/device-token",
+            "description": "CREATES a new token and immediately REVOKES the existing token for this machine. Skip if the device already works. Requires machine.update and configured program_path. Set confirm_replace_machine_id to machine_id once; copy returned token to the device securely.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"{{device_label}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }",
+                  "const confirmation = String(pm.environment.get('confirm_replace_machine_id') || '');",
+                  "pm.environment.unset('confirm_replace_machine_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('machine_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_replace_machine_id to the reviewed machine_id for this one request.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code !== 201) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (String(b.data.device.machine_id) !== String(pm.environment.get('machine_id')) || !b.data.token) throw new Error('Unexpected device credential response.');",
+                  "pm.environment.set('device_token', b.data.token); pm.environment.unset('device_serial'); pm.environment.unset('claimed_job_id');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Shown once; save securely",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/programs/machines/{{machine_id}}/device-token",
+                "description": "CREATES a new token and immediately REVOKES the existing token for this machine. Skip if the device already works. Requires machine.update and configured program_path. Set confirm_replace_machine_id to machine_id once; copy returned token to the device securely.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"label\": \"{{device_label}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"token\": \"<new mxd_ device token>\",\n    \"device\": {\n      \"id\": 3,\n      \"machine_id\": 7,\n      \"label\": \"Factory agent\",\n      \"token_prefix\": \"mxd_example\",\n      \"created_at\": \"2026-10-08T04:00:00.000Z\",\n      \"machine_serial_no\": \"VMC-1\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"folder\": \"company-2/192.168.200.3\"\n    }\n  }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2 Send program to machine - choose one request",
+      "item": [
+        {
+          "name": "01 Upload and send to machine",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/api/programs/files",
+            "description": "Simplest SEND: select file in Body > form-data. machine_id is the destination; send=true queues delivery. Leave overwrite=false. To save only, change send to false. Do not manually add Content-Type: Postman creates the multipart boundary. 201 means saved/queued, not controller completion.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select the actual NC text file on your computer."
+                },
+                {
+                  "key": "machine_id",
+                  "value": "{{machine_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "send",
+                  "value": "true",
+                  "type": "text"
+                },
+                {
+                  "key": "overwrite",
+                  "value": "false",
+                  "type": "text"
+                },
+                {
+                  "key": "program_name",
+                  "value": "{{program_name}}",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "note",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code !== 201) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "const f = b.data.file;",
+                  "if (String(f.machine_id) !== String(pm.environment.get('machine_id'))) throw new Error('Wrong machine file response.');",
+                  "pm.environment.set('file_id', String(f.id)); pm.environment.set('program_name', f.program_name);",
+                  "pm.environment.unset('job_id'); pm.environment.unset('claimed_job_id');",
+                  "if (b.data.job) { const j = b.data.job; if (String(j.machine_id) !== String(pm.environment.get('machine_id')) || j.action !== 'SEND') throw new Error('Unexpected SEND job.'); pm.environment.set('job_id', String(j.id)); pm.environment.set('job_action', j.action); pm.environment.set('job_status', j.status); }"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Saved and queued (not yet sent)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": "{{base_url}}/api/programs/files",
+                "description": "Simplest SEND: select file in Body > form-data. machine_id is the destination; send=true queues delivery. Leave overwrite=false. To save only, change send to false. Do not manually add Content-Type: Postman creates the multipart boundary. 201 means saved/queued, not controller completion.",
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "Select the actual NC text file on your computer."
+                    },
+                    {
+                      "key": "machine_id",
+                      "value": "{{machine_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "send",
+                      "value": "true",
+                      "type": "text"
+                    },
+                    {
+                      "key": "overwrite",
+                      "value": "false",
+                      "type": "text"
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "{{program_name}}",
+                      "type": "text",
+                      "disabled": true
+                    },
+                    {
+                      "key": "note",
+                      "value": "",
+                      "type": "text",
+                      "disabled": true
+                    }
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"file\": {\n      \"id\": 41,\n      \"machine_id\": 7,\n      \"folder\": \"company-2/192.168.200.3\",\n      \"stored_name\": \"20261008-103000_NEW_O1234.nc\",\n      \"program_name\": \"O1234.nc\",\n      \"kind\": \"NEW\",\n      \"size_bytes\": 2048,\n      \"sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n      \"note\": null,\n      \"created_at\": \"2026-10-08T05:00:00.000Z\"\n    },\n    \"job\": {\n      \"id\": 11,\n      \"machine_id\": 7,\n      \"machine_serial\": \"VMC-1\",\n      \"action\": \"SEND\",\n      \"program_name\": \"O1234.nc\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"overwrite\": false,\n      \"status\": \"QUEUED\",\n      \"message\": null,\n      \"file_id\": 41,\n      \"backup_file_id\": null,\n      \"requested_by\": 5,\n      \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n      \"delivered_at\": null,\n      \"finished_at\": null,\n      \"requested_by_name\": \"Operator\",\n      \"file_size\": 2048,\n      \"file_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n      \"target_file\": \"//CNC_MEM/USER/PATH1/O1234.nc\",\n      \"file_name\": \"20261008-103000_NEW_O1234.nc\",\n      \"backup_name\": null\n    }\n  },\n  \"message\": \"Uploaded and queued for the machine\"\n}"
+            },
+            {
+              "name": "Same program already present",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": "{{base_url}}/api/programs/files",
+                "description": "Simplest SEND: select file in Body > form-data. machine_id is the destination; send=true queues delivery. Leave overwrite=false. To save only, change send to false. Do not manually add Content-Type: Postman creates the multipart boundary. 201 means saved/queued, not controller completion.",
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "Select the actual NC text file on your computer."
+                    },
+                    {
+                      "key": "machine_id",
+                      "value": "{{machine_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "send",
+                      "value": "true",
+                      "type": "text"
+                    },
+                    {
+                      "key": "overwrite",
+                      "value": "false",
+                      "type": "text"
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "{{program_name}}",
+                      "type": "text",
+                      "disabled": true
+                    },
+                    {
+                      "key": "note",
+                      "value": "",
+                      "type": "text",
+                      "disabled": true
+                    }
+                  ]
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"FILE_EXISTS\",\n  \"names\": [\n    \"O1234.nc\"\n  ],\n  \"message\": \"O1234.nc is already on VMC-1.\"\n}"
+            },
+            {
+              "name": "Missing file field",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": "{{base_url}}/api/programs/files",
+                "description": "Simplest SEND: select file in Body > form-data. machine_id is the destination; send=true queues delivery. Leave overwrite=false. To save only, change send to false. Do not manually add Content-Type: Postman creates the multipart boundary. 201 means saved/queued, not controller completion.",
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "Select the actual NC text file on your computer."
+                    },
+                    {
+                      "key": "machine_id",
+                      "value": "{{machine_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "send",
+                      "value": "true",
+                      "type": "text"
+                    },
+                    {
+                      "key": "overwrite",
+                      "value": "false",
+                      "type": "text"
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "{{program_name}}",
+                      "type": "text",
+                      "disabled": true
+                    },
+                    {
+                      "key": "note",
+                      "value": "",
+                      "type": "text",
+                      "disabled": true
+                    }
+                  ]
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_FILE\",\n  \"message\": \"Choose a program file.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "02 Send an already saved file (alternative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/programs/jobs",
+            "description": "Alternative to Upload and send. Set file_id from Saved files. A file can be sent to another machine in the same company. Arrays are numeric IDs; maximum file_ids \u00d7 machine_ids is 50. Do not queue again while an open SEND exists.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"SEND\",\n  \"file_ids\": [\n    {{file_id}}\n  ],\n  \"machine_ids\": [\n    {{machine_id}}\n  ],\n  \"overwrite\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }",
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('file_id') || ''))) { pm.execution.skipRequest(); throw new Error('Choose file_id from Saved files.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code !== 201) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "const j = b.data.jobs[0];",
+                  "if (b.data.jobs.length !== 1 || String(j.machine_id) !== String(pm.environment.get('machine_id'))) throw new Error('Expected one job for the selected machine; inspect response.');",
+                  "pm.environment.set('job_id', String(j.id));",
+                  "pm.environment.set('job_action', j.action);",
+                  "pm.environment.set('program_name', j.program_name);",
+                  "pm.environment.set('job_status', j.status);",
+                  "pm.environment.unset('claimed_job_id');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "SEND queued",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/programs/jobs",
+                "description": "Alternative to Upload and send. Set file_id from Saved files. A file can be sent to another machine in the same company. Arrays are numeric IDs; maximum file_ids \u00d7 machine_ids is 50. Do not queue again while an open SEND exists.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"action\": \"SEND\",\n  \"file_ids\": [\n    {{file_id}}\n  ],\n  \"machine_ids\": [\n    {{machine_id}}\n  ],\n  \"overwrite\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"jobs\": [\n      {\n        \"id\": 11,\n        \"machine_id\": 7,\n        \"machine_serial\": \"VMC-1\",\n        \"action\": \"SEND\",\n        \"program_name\": \"O1234.nc\",\n        \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n        \"overwrite\": false,\n        \"status\": \"QUEUED\",\n        \"message\": null,\n        \"file_id\": 41,\n        \"backup_file_id\": null,\n        \"requested_by\": 5,\n        \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n        \"delivered_at\": null,\n        \"finished_at\": null,\n        \"requested_by_name\": \"Operator\",\n        \"file_size\": 2048,\n        \"file_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n        \"target_file\": \"//CNC_MEM/USER/PATH1/O1234.nc\",\n        \"file_name\": \"20261008-103000_NEW_O1234.nc\",\n        \"backup_name\": null\n      }\n    ]\n  },\n  \"message\": \"1 job queued\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3 Get program from machine",
+      "item": [
+        {
+          "name": "01 List programs currently reported on the machine",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/programs/machines/{{machine_id}}/controller-files",
+            "description": "This is the last device-reported list, not a direct live controller read. Inspect reported_at. Set program_name to the exact name to retrieve."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Last reported list",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/programs/machines/{{machine_id}}/controller-files",
+                "description": "This is the last device-reported list, not a direct live controller read. Inspect reported_at. Set program_name to the exact name to retrieve."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"files\": [\n      {\n        \"name\": \"O2001.nc\",\n        \"size\": 2048,\n        \"modified\": \"2026-10-08T05:00:00.000Z\",\n        \"comment\": \"FLANGE\"\n      }\n    ],\n    \"reported_at\": \"2026-10-08T05:00:00.000Z\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "02 Request a program from machine (FETCH)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/programs/jobs",
+            "description": "Set program_name from the controller list. Queues a FETCH job; does not return the program bytes. Wait for the real device to upload the requested controller program, then poll and Download saved file.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"FETCH\",\n  \"machine_id\": {{machine_id}},\n  \"program_names\": [\n    \"{{program_name}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }",
+                  "if (!pm.environment.get('program_name')) { pm.execution.skipRequest(); throw new Error('Set the exact program_name to retrieve.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code !== 201) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "const j = b.data.jobs[0];",
+                  "if (b.data.jobs.length !== 1 || String(j.machine_id) !== String(pm.environment.get('machine_id'))) throw new Error('Expected one job for the selected machine; inspect response.');",
+                  "pm.environment.set('job_id', String(j.id));",
+                  "pm.environment.set('job_action', j.action);",
+                  "pm.environment.set('program_name', j.program_name);",
+                  "pm.environment.set('job_status', j.status);",
+                  "pm.environment.unset('claimed_job_id');",
+                  "pm.environment.unset('file_id');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "FETCH queued",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/programs/jobs",
+                "description": "Set program_name from the controller list. Queues a FETCH job; does not return the program bytes. Wait for the real device to upload the requested controller program, then poll and Download saved file.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"action\": \"FETCH\",\n  \"machine_id\": {{machine_id}},\n  \"program_names\": [\n    \"{{program_name}}\"\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"jobs\": [\n      {\n        \"id\": 12,\n        \"machine_id\": 7,\n        \"machine_serial\": \"VMC-1\",\n        \"action\": \"FETCH\",\n        \"program_name\": \"O2001.nc\",\n        \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n        \"overwrite\": false,\n        \"status\": \"QUEUED\",\n        \"message\": null,\n        \"file_id\": null,\n        \"backup_file_id\": null,\n        \"requested_by\": 5,\n        \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n        \"delivered_at\": null,\n        \"finished_at\": null,\n        \"requested_by_name\": \"Operator\",\n        \"file_size\": null,\n        \"file_sha256\": null,\n        \"target_file\": \"//CNC_MEM/USER/PATH1/O2001.nc\",\n        \"file_name\": null,\n        \"backup_name\": null\n      }\n    ]\n  },\n  \"message\": \"1 job queued\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4 Check status and download saved program",
+      "item": [
+        {
+          "name": "01 Check jobs and capture completed FETCH file",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/programs/jobs?machine_id={{machine_id}}&page={{page}}&limit=50",
+            "description": "Read-only job status list. Finds your exact job_id in this page; never substitutes another job. For a DONE FETCH, captures its file_id for Download saved file. If absent, check other pages; there is no GET /jobs/:id endpoint. Poll no faster than every 15 seconds."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "const wanted = String(pm.environment.get('job_id') || '');",
+                  "if (wanted) {",
+                  " const j = b.data.find(x => String(x.id) === wanted);",
+                  " if (!j) throw new Error('Selected job is not on this page. Change page; do not assume completion.');",
+                  " if (String(j.machine_id) !== String(pm.environment.get('machine_id'))) throw new Error('Job belongs to another machine.');",
+                  " pm.environment.set('job_status', j.status);",
+                  " if (j.action === 'FETCH' && j.status === 'DONE' && j.file_id) pm.environment.set('file_id', String(j.file_id));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Queued",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/programs/jobs?machine_id={{machine_id}}&page={{page}}&limit=50",
+                "description": "Read-only job status list. Finds your exact job_id in this page; never substitutes another job. For a DONE FETCH, captures its file_id for Download saved file. If absent, check other pages; there is no GET /jobs/:id endpoint. Poll no faster than every 15 seconds."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": [\n    {\n      \"id\": 11,\n      \"machine_id\": 7,\n      \"machine_serial\": \"VMC-1\",\n      \"action\": \"SEND\",\n      \"program_name\": \"O1234.nc\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"overwrite\": false,\n      \"status\": \"QUEUED\",\n      \"message\": null,\n      \"file_id\": 41,\n      \"backup_file_id\": null,\n      \"requested_by\": 5,\n      \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n      \"delivered_at\": null,\n      \"finished_at\": null,\n      \"requested_by_name\": \"Operator\",\n      \"file_size\": 2048,\n      \"file_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n      \"target_file\": \"//CNC_MEM/USER/PATH1/O1234.nc\",\n      \"file_name\": \"20261008-103000_NEW_O1234.nc\",\n      \"backup_name\": null\n    }\n  ],\n  \"total\": 1,\n  \"page\": 1,\n  \"limit\": 50\n}"
+            },
+            {
+              "name": "FETCH complete; download file_id 42",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/programs/jobs?machine_id={{machine_id}}&page={{page}}&limit=50",
+                "description": "Read-only job status list. Finds your exact job_id in this page; never substitutes another job. For a DONE FETCH, captures its file_id for Download saved file. If absent, check other pages; there is no GET /jobs/:id endpoint. Poll no faster than every 15 seconds."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": [\n    {\n      \"id\": 12,\n      \"machine_id\": 7,\n      \"machine_serial\": \"VMC-1\",\n      \"action\": \"FETCH\",\n      \"program_name\": \"O2001.nc\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"overwrite\": false,\n      \"status\": \"DONE\",\n      \"message\": null,\n      \"file_id\": 42,\n      \"backup_file_id\": null,\n      \"requested_by\": 5,\n      \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n      \"delivered_at\": \"2026-10-08T05:00:15.000Z\",\n      \"finished_at\": \"2026-10-08T05:01:00.000Z\",\n      \"requested_by_name\": \"Operator\",\n      \"file_size\": 2048,\n      \"file_sha256\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n      \"target_file\": \"//CNC_MEM/USER/PATH1/O2001.nc\",\n      \"file_name\": \"20261008-103100_FETCHED_O2001.nc\",\n      \"backup_name\": null\n    }\n  ],\n  \"total\": 1,\n  \"page\": 1,\n  \"limit\": 50\n}"
+            }
+          ]
+        },
+        {
+          "name": "02 List saved files",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/programs/files?machine_id={{machine_id}}&page={{page}}&limit=50",
+            "description": "Server-saved programs. Optional query kind=NEW, BACKUP or FETCHED; search=O1234. Set file_id from the chosen row; never auto-selects first row."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Saved files",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/programs/files?machine_id={{machine_id}}&page={{page}}&limit=50",
+                "description": "Server-saved programs. Optional query kind=NEW, BACKUP or FETCHED; search=O1234. Set file_id from the chosen row; never auto-selects first row."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"success\",\n  \"data\": [\n    {\n      \"id\": 41,\n      \"machine_id\": 7,\n      \"folder\": \"company-2/192.168.200.3\",\n      \"stored_name\": \"20261008-103000_NEW_O1234.nc\",\n      \"program_name\": \"O1234.nc\",\n      \"kind\": \"NEW\",\n      \"size_bytes\": 2048,\n      \"sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n      \"note\": null,\n      \"created_at\": \"2026-10-08T05:00:00.000Z\",\n      \"machine_serial_no\": \"VMC-1\",\n      \"job_id\": null,\n      \"uploaded_by_name\": \"Operator\"\n    }\n  ],\n  \"total\": 1,\n  \"page\": 1,\n  \"limit\": 50\n}"
+            }
+          ]
+        },
+        {
+          "name": "03 Download saved file to computer",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/programs/files/{{file_id}}/download",
+            "description": "Use Send and Download (or save response) to save the file. This endpoint returns bytes with an attachment name, not JSON. file_id comes from an upload, Saved files, or a completed FETCH job."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('file_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set a saved file_id first.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Binary file returned', () => { pm.response.to.have.status(200); pm.expect(pm.response.headers.get('Content-Type')).to.include('application/octet-stream'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5 Device integration ONLY - manual guarded steps",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{device_token}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "01 Ping and verify device machine",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/device/v1/ping",
+            "description": "Device token only. Verify serial matches the selected machine. The actual device should ping/poll using poll_seconds (default 15); every accepted device request updates its heartbeat."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "pm.environment.unset('device_serial');",
+                  "if (!pm.environment.get('machine_serial') || b.machine.serial !== pm.environment.get('machine_serial')) throw new Error('Device is not the selected machine. Recheck machine_id and device_token.');",
+                  "pm.environment.set('device_serial', b.machine.serial); pm.environment.set('poll_seconds', String(b.poll_seconds));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Device heartbeat",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/ping",
+                "description": "Device token only. Verify serial matches the selected machine. The actual device should ping/poll using poll_seconds (default 15); every accepted device request updates its heartbeat."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"device_id\": 3,\n  \"machine\": {\n    \"serial\": \"VMC-1\",\n    \"ip_address\": \"192.168.200.3\",\n    \"program_path\": \"//CNC_MEM/USER/PATH1/\"\n  },\n  \"server_time\": \"2026-10-08T05:00:00.000Z\",\n  \"poll_seconds\": 15\n}"
+            },
+            {
+              "name": "Invalid token",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/ping",
+                "description": "Device token only. Verify serial matches the selected machine. The actual device should ping/poll using poll_seconds (default 15); every accepted device request updates its heartbeat."
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"TOKEN_INVALID\",\n  \"message\": \"This device token is not valid. Ask an admin for a new one.\"\n}"
+            },
+            {
+              "name": "Machine disabled",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/ping",
+                "description": "Device token only. Verify serial matches the selected machine. The actual device should ping/poll using poll_seconds (default 15); every accepted device request updates its heartbeat."
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_INACTIVE\",\n  \"message\": \"Machine VMC-1 is switched off in the platform.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "02 Claim next job (changes QUEUED to DELIVERED)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/device/v1/jobs/next",
+            "description": "MUTATES the queue despite GET. Device-integration testing only; avoid competing with the real device. Set confirm_claim_job_id to the queued job_id reviewed in Check jobs. It always claims the oldest job, not a chosen ID. If another job is returned, it has already been claimed: stop and hand that ID to the responsible device team. 204 is normal (no work). Never auto-completes."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }",
+                  "const confirmation = String(pm.environment.get('confirm_claim_job_id') || '');",
+                  "pm.environment.unset('confirm_claim_job_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('job_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_claim_job_id to the reviewed job_id for this one request.'); }",
+                  "if (!pm.environment.get('device_serial') || pm.environment.get('device_serial') !== pm.environment.get('machine_serial')) { pm.execution.skipRequest(); throw new Error('Run Ping and verify the selected machine first.'); }",
+                  "pm.environment.unset('claimed_job_id'); pm.environment.unset('unexpected_claim_id');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Job or empty queue', () => pm.expect([200,204]).to.include(pm.response.code));",
+                  "pm.environment.unset('claimed_job_id');",
+                  "if (pm.response.code === 200) {",
+                  " const j = pm.response.json().job;",
+                  " if (String(j.id) !== String(pm.environment.get('job_id')) || j.action !== pm.environment.get('job_action') || j.program_name !== pm.environment.get('program_name')) {",
+                  "  pm.environment.set('unexpected_claim_id', String(j.id));",
+                  "  throw new Error('A DIFFERENT job was claimed. Do not complete it from this flow. Inspect the response and hand the claimed ID to the responsible device team.');",
+                  " }",
+                  " pm.environment.set('claimed_job_id', String(j.id)); pm.environment.set('claimed_machine_id', String(pm.environment.get('machine_id')));",
+                  " pm.environment.set('claimed_action', j.action); pm.environment.set('claimed_program_name', j.program_name);",
+                  " pm.environment.set('claimed_target_file', j.target_file); pm.environment.set('claimed_overwrite', String(j.overwrite));",
+                  " if (j.file) { pm.environment.set('download_sha256', j.file.sha256); pm.environment.set('download_size', String(j.file.size)); }",
+                  "} else if (pm.response.code !== 204) throw new Error('Claim failed; inspect response.');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "SEND claimed",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/jobs/next",
+                "description": "MUTATES the queue despite GET. Device-integration testing only; avoid competing with the real device. Set confirm_claim_job_id to the queued job_id reviewed in Check jobs. It always claims the oldest job, not a chosen ID. If another job is returned, it has already been claimed: stop and hand that ID to the responsible device team. 204 is normal (no work). Never auto-completes."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job\": {\n    \"id\": 11,\n    \"action\": \"SEND\",\n    \"program_name\": \"O1234.nc\",\n    \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n    \"target_file\": \"//CNC_MEM/USER/PATH1/O1234.nc\",\n    \"overwrite\": false,\n    \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n    \"requested_by\": \"Operator\",\n    \"file\": {\n      \"size\": 2048,\n      \"sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n      \"url\": \"/api/device/v1/jobs/11/file\"\n    }\n  }\n}"
+            },
+            {
+              "name": "FETCH claimed",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/jobs/next",
+                "description": "MUTATES the queue despite GET. Device-integration testing only; avoid competing with the real device. Set confirm_claim_job_id to the queued job_id reviewed in Check jobs. It always claims the oldest job, not a chosen ID. If another job is returned, it has already been claimed: stop and hand that ID to the responsible device team. 204 is normal (no work). Never auto-completes."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job\": {\n    \"id\": 12,\n    \"action\": \"FETCH\",\n    \"program_name\": \"O2001.nc\",\n    \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n    \"target_file\": \"//CNC_MEM/USER/PATH1/O2001.nc\",\n    \"overwrite\": false,\n    \"requested_at\": \"2026-10-08T05:00:00.000Z\",\n    \"requested_by\": \"Operator\",\n    \"file\": null\n  }\n}"
+            },
+            {
+              "name": "No waiting jobs (valid)",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/jobs/next",
+                "description": "MUTATES the queue despite GET. Device-integration testing only; avoid competing with the real device. Set confirm_claim_job_id to the queued job_id reviewed in Check jobs. It always claims the oldest job, not a chosen ID. If another job is returned, it has already been claimed: stop and hand that ID to the responsible device team. 204 is normal (no work). Never auto-completes."
+              },
+              "status": "No Content",
+              "code": 204,
+              "header": [],
+              "body": ""
+            }
+          ]
+        },
+        {
+          "name": "03 SEND - Download claimed program bytes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/device/v1/jobs/{{claimed_job_id}}/file",
+            "description": "Save response bytes, then compare file size and SHA-256 with the claimed job and X-Sha256 header BEFORE writing to the controller. This test checks the header metadata only; it does not verify the downloaded bytes or controller write."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const id = String(pm.environment.get('job_id') || '');",
+                  "if (!id || id !== String(pm.environment.get('claimed_job_id')) || String(pm.environment.get('machine_id')) !== String(pm.environment.get('claimed_machine_id')) || pm.environment.get('program_name') !== pm.environment.get('claimed_program_name')) { pm.execution.skipRequest(); throw new Error('No matching claimed job for this machine/program. Inspect Claim next job response.'); }",
+                  "",
+                  "if (pm.environment.get('claimed_action') !== 'SEND') { pm.execution.skipRequest(); throw new Error('This download is only for SEND.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Download and checksum metadata match claimed job', () => {",
+                  " pm.response.to.have.status(200);",
+                  " pm.expect(pm.response.headers.get('Content-Type')).to.include('application/octet-stream');",
+                  " pm.expect(pm.response.headers.get('X-Sha256')).to.equal(pm.environment.get('download_sha256'));",
+                  " pm.expect(pm.response.headers.get('Content-Length')).to.equal(String(pm.environment.get('download_size')));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04 SEND - Upload controller backup before overwrite",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/api/device/v1/files",
+            "description": "Only when the target exists AND claimed_overwrite=true. Select the OLD bytes read from the controller, not the incoming program. A 201 BACKUP must succeed before the device overwrites. No result is reported by this request. For independent scheduled backups omit job_id instead.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select the actual NC text file on your computer."
+                },
+                {
+                  "key": "type",
+                  "value": "BACKUP",
+                  "type": "text"
+                },
+                {
+                  "key": "job_id",
+                  "value": "{{claimed_job_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "program_name",
+                  "value": "{{claimed_program_name}}",
+                  "type": "text"
+                },
+                {
+                  "key": "sha256",
+                  "value": "{{upload_sha256}}",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "note",
+                  "value": "Backup before overwrite",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const id = String(pm.environment.get('job_id') || '');",
+                  "if (!id || id !== String(pm.environment.get('claimed_job_id')) || String(pm.environment.get('machine_id')) !== String(pm.environment.get('claimed_machine_id')) || pm.environment.get('program_name') !== pm.environment.get('claimed_program_name')) { pm.execution.skipRequest(); throw new Error('No matching claimed job for this machine/program. Inspect Claim next job response.'); }",
+                  "",
+                  "if (pm.environment.get('claimed_action') !== 'SEND' || pm.environment.get('claimed_overwrite') !== 'true') { pm.execution.skipRequest(); throw new Error('Only for an overwrite-enabled SEND.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code !== 201) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (b.file.kind !== 'BACKUP') throw new Error('Expected BACKUP'); pm.environment.set('backup_file_id', String(b.file.id));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Backup saved",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/files",
+                "description": "Only when the target exists AND claimed_overwrite=true. Select the OLD bytes read from the controller, not the incoming program. A 201 BACKUP must succeed before the device overwrites. No result is reported by this request. For independent scheduled backups omit job_id instead.",
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "Select the actual NC text file on your computer."
+                    },
+                    {
+                      "key": "type",
+                      "value": "BACKUP",
+                      "type": "text"
+                    },
+                    {
+                      "key": "job_id",
+                      "value": "{{claimed_job_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "{{claimed_program_name}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "sha256",
+                      "value": "{{upload_sha256}}",
+                      "type": "text",
+                      "disabled": true
+                    },
+                    {
+                      "key": "note",
+                      "value": "Backup before overwrite",
+                      "type": "text"
+                    }
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"file\": {\n    \"id\": 43,\n    \"kind\": \"BACKUP\",\n    \"program_name\": \"O1234.nc\",\n    \"stored_as\": \"company-2/192.168.200.3/20261008-103015_BACKUP_O1234.nc\",\n    \"size\": 1990,\n    \"sha256\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"created_at\": \"2026-10-08T05:00:15.000Z\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "05 SEND - Report verified controller write DONE",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/device/v1/jobs/{{claimed_job_id}}/result",
+            "description": "Only the device integrator should use this after writing target_file and reading it back successfully. A successful API response alone proves no controller write. Set confirm_done_job_id to claimed_job_id ONLY after that verification. The one-use confirmation is consumed. If overwrite was necessary, first upload the old program as BACKUP.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"DONE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const id = String(pm.environment.get('job_id') || '');",
+                  "if (!id || id !== String(pm.environment.get('claimed_job_id')) || String(pm.environment.get('machine_id')) !== String(pm.environment.get('claimed_machine_id')) || pm.environment.get('program_name') !== pm.environment.get('claimed_program_name')) { pm.execution.skipRequest(); throw new Error('No matching claimed job for this machine/program. Inspect Claim next job response.'); }",
+                  "",
+                  "const confirmation = String(pm.environment.get('confirm_done_job_id') || '');",
+                  "pm.environment.unset('confirm_done_job_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('claimed_job_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_done_job_id to the reviewed claimed_job_id for this one request.'); }",
+                  "if (pm.environment.get('claimed_action') !== 'SEND') { pm.execution.skipRequest(); throw new Error('FETCH completes through file upload, not this request.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (String(b.job.id) !== String(pm.environment.get('claimed_job_id')) || b.job.status !== 'DONE') throw new Error('Unexpected result'); pm.environment.set('job_status', b.job.status);"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "SEND completed",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/device/v1/jobs/{{claimed_job_id}}/result",
+                "description": "Only the device integrator should use this after writing target_file and reading it back successfully. A successful API response alone proves no controller write. Set confirm_done_job_id to claimed_job_id ONLY after that verification. The one-use confirmation is consumed. If overwrite was necessary, first upload the old program as BACKUP.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job\": {\n    \"id\": 11,\n    \"status\": \"DONE\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "06 FETCH - Upload program read from controller",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/api/device/v1/files",
+            "description": "Select the actual bytes read from claimed_target_file. This upload automatically completes the FETCH job; do not call DONE afterward. Set confirm_fetch_job_id to claimed_job_id for this one upload. 201 returns the saved file id, which the user can download with their JWT.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select the actual NC text file on your computer."
+                },
+                {
+                  "key": "type",
+                  "value": "FETCHED",
+                  "type": "text"
+                },
+                {
+                  "key": "job_id",
+                  "value": "{{claimed_job_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "sha256",
+                  "value": "{{upload_sha256}}",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const id = String(pm.environment.get('job_id') || '');",
+                  "if (!id || id !== String(pm.environment.get('claimed_job_id')) || String(pm.environment.get('machine_id')) !== String(pm.environment.get('claimed_machine_id')) || pm.environment.get('program_name') !== pm.environment.get('claimed_program_name')) { pm.execution.skipRequest(); throw new Error('No matching claimed job for this machine/program. Inspect Claim next job response.'); }",
+                  "",
+                  "const confirmation = String(pm.environment.get('confirm_fetch_job_id') || '');",
+                  "pm.environment.unset('confirm_fetch_job_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('claimed_job_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_fetch_job_id to the reviewed claimed_job_id for this one request.'); }",
+                  "if (pm.environment.get('claimed_action') !== 'FETCH') { pm.execution.skipRequest(); throw new Error('Requires a FETCH job.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code !== 201) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();",
+                  "if (b.file.kind !== 'FETCHED' || b.file.program_name !== pm.environment.get('claimed_program_name')) throw new Error('Unexpected fetched file'); pm.environment.set('file_id', String(b.file.id)); pm.environment.set('job_status', 'DONE');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "FETCH saved and job completed",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": "{{base_url}}/api/device/v1/files",
+                "description": "Select the actual bytes read from claimed_target_file. This upload automatically completes the FETCH job; do not call DONE afterward. Set confirm_fetch_job_id to claimed_job_id for this one upload. 201 returns the saved file id, which the user can download with their JWT.",
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "Select the actual NC text file on your computer."
+                    },
+                    {
+                      "key": "type",
+                      "value": "FETCHED",
+                      "type": "text"
+                    },
+                    {
+                      "key": "job_id",
+                      "value": "{{claimed_job_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "sha256",
+                      "value": "{{upload_sha256}}",
+                      "type": "text",
+                      "disabled": true
+                    }
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"file\": {\n    \"id\": 42,\n    \"kind\": \"FETCHED\",\n    \"program_name\": \"O2001.nc\",\n    \"stored_as\": \"company-2/192.168.200.3/20261008-103100_FETCHED_O2001.nc\",\n    \"size\": 2048,\n    \"sha256\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n    \"created_at\": \"2026-10-08T05:01:00.000Z\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "07 Report an actual transfer failure",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/device/v1/jobs/{{claimed_job_id}}/result",
+            "description": "For the exact claimed job only. Set failure_message to the real failure, and confirm_failed_job_id to claimed_job_id. Repeating the same DONE or FAILED result is accepted; changing a completed result is refused.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"FAILED\",\n  \"message\": \"{{failure_message}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const id = String(pm.environment.get('job_id') || '');",
+                  "if (!id || id !== String(pm.environment.get('claimed_job_id')) || String(pm.environment.get('machine_id')) !== String(pm.environment.get('claimed_machine_id')) || pm.environment.get('program_name') !== pm.environment.get('claimed_program_name')) { pm.execution.skipRequest(); throw new Error('No matching claimed job for this machine/program. Inspect Claim next job response.'); }",
+                  "",
+                  "const confirmation = String(pm.environment.get('confirm_failed_job_id') || '');",
+                  "pm.environment.unset('confirm_failed_job_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('claimed_job_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_failed_job_id to the reviewed claimed_job_id for this one request.'); }",
+                  "if (!String(pm.environment.get('failure_message') || '').trim()) { pm.execution.skipRequest(); throw new Error('Enter what actually failed.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Failure recorded",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/device/v1/jobs/{{claimed_job_id}}/result",
+                "description": "For the exact claimed job only. Set failure_message to the real failure, and confirm_failed_job_id to claimed_job_id. Repeating the same DONE or FAILED result is accepted; changing a completed result is refused.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"FAILED\",\n  \"message\": \"{{failure_message}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job\": {\n    \"id\": 11,\n    \"status\": \"FAILED\"\n  }\n}"
+            },
+            {
+              "name": "Already finished",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/device/v1/jobs/{{claimed_job_id}}/result",
+                "description": "For the exact claimed job only. Set failure_message to the real failure, and confirm_failed_job_id to claimed_job_id. Repeating the same DONE or FAILED result is accepted; changing a completed result is refused.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"FAILED\",\n  \"message\": \"{{failure_message}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"JOB_NOT_OPEN\",\n  \"message\": \"Job 11 was already reported DONE.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "08 Report controller file list (replaces previous list)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/device/v1/controller-files",
+            "description": "Replace files with the actual controller inventory. Every call replaces the entire previous list; never send this example unchanged against a real machine. Set confirm_report_machine_id to machine_id once. Maximum 5000 entries.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"files\": [\n    {\n      \"name\": \"O1234.nc\",\n      \"size\": 2048,\n      \"modified\": \"2026-10-08T05:00:00.000Z\",\n      \"comment\": \"Example; replace with actual inventory\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!/^[1-9][0-9]*$/.test(String(pm.environment.get('machine_id') || ''))) { pm.execution.skipRequest(); throw new Error('Set machine_id after List machines.'); }",
+                  "const confirmation = String(pm.environment.get('confirm_report_machine_id') || '');",
+                  "pm.environment.unset('confirm_report_machine_id');",
+                  "if (!confirmation || confirmation !== String(pm.environment.get('machine_id'))) { pm.execution.skipRequest(); throw new Error('Set confirm_report_machine_id to the reviewed machine_id for this one request.'); }",
+                  "if (!pm.environment.get('device_serial') || pm.environment.get('device_serial') !== pm.environment.get('machine_serial')) { pm.execution.skipRequest(); throw new Error('Run Ping to verify the selected machine.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code !== 200) throw new Error('Request failed; inspect the response. No IDs were captured.');",
+                  "const b = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Inventory stored",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/api/device/v1/controller-files",
+                "description": "Replace files with the actual controller inventory. Every call replaces the entire previous list; never send this example unchanged against a real machine. Set confirm_report_machine_id to machine_id once. Maximum 5000 entries.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"files\": [\n    {\n      \"name\": \"O1234.nc\",\n      \"size\": 2048,\n      \"modified\": \"2026-10-08T05:00:00.000Z\",\n      \"comment\": \"Example; replace with actual inventory\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"count\": 1\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
