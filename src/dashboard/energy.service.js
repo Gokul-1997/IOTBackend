@@ -33,6 +33,7 @@
  */
 
 const pool = require('../db');
+const { parsePart, when } = require('./parts');
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -280,7 +281,15 @@ function round(v, dp = 2) {
   return v === null || v === undefined ? null : Number(Number(v).toFixed(dp));
 }
 
+/*
+ * The whole screen, or the parts asked for (`part`, see parts.js): kpis =
+ * the tiles; charts = the trend, shift, top-five and cost charts; table =
+ * Machine Detail. Every part rests on the per-machine figures (the tiles are
+ * their sums); the daily trend is drawn by a chart and gives the tiles their
+ * "vs yesterday", so it comes with either.
+ */
 exports.getEnergy = async (q = {}) => {
+  const want = parsePart(q.part);
   const companyId = q.company_id;
   const { start, end } = resolveRange(q);
   const machineId = parseId(q.machine_id, 'machine_id');
@@ -288,9 +297,9 @@ exports.getEnergy = async (q = {}) => {
 
   const [rows, trend, shifts, months, settings] = await Promise.all([
     perMachine({ companyId, machineId, start, end }),
-    dailyTrend({ companyId, machineId, start, end }),
-    byShift({ companyId, machineId, start, end }),
-    byMonth({ companyId, machineId, start, end }),
+    when(want.kpis || want.charts, () => dailyTrend({ companyId, machineId, start, end }), []),
+    when(want.charts, () => byShift({ companyId, machineId, start, end }), []),
+    when(want.charts, () => byMonth({ companyId, machineId, start, end }), []),
     settingsFor(companyId)
   ]);
 
@@ -340,7 +349,7 @@ exports.getEnergy = async (q = {}) => {
   const pageNum  = Math.max(1, Number(q.page) || 1);
   const limitNum = Math.min(200, Math.max(1, Number(q.limit) || 20));
   const offset   = (pageNum - 1) * limitNum;
-  const sorted = [...machines].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1));
+  const sorted = want.table ? [...machines].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1)) : [];
 
   /* Volts and amps averaged over the readings, each machine weighted by how
      many readings it sent; null when no machine sends them. */
@@ -368,39 +377,47 @@ exports.getEnergy = async (q = {}) => {
     currency: settings.currency,
     // the company tariff, so the cost trend can price each day, week or month
     rate_per_kwh: settings.company?.cost_per_kwh != null ? Number(settings.company.cost_per_kwh) : null,
-    kpis: {
-      total_kwh: reporting.length ? round(totalKwh) : null,
-      total_operating_seconds: totalRun,
-      total_produced: totalProduced,
-      kwh_per_part: (reporting.length && totalProduced > 0) ? round(totalKwh / totalProduced, 4) : null,
-      total_cost: hasAnyCost ? round(totalCost) : null,
-      avg_voltage: weighted('avg_voltage', 'voltage_readings'),
-      avg_current: weighted('avg_current', 'current_readings'),
-      kwh_vs_yesterday_pct: vsYesterday,
-      overload_alerts: machines.filter(m => m.is_overloaded).length,
-      overload_top: worst ? { machine_serial_no: worst.machine_serial_no, exceeded_kw: round(worst.peak_kw - worst.overload_kw, 1) } : null
-    },
-    /* Stated up front because it decides whether any of this means
-       anything: energy is only known for machines that report the counter. */
-    coverage: {
-      machines: machines.length,
-      reporting: reporting.length,
-      tariff_configured: settings.company?.cost_per_kwh != null,
-      note: reporting.length === 0
-        ? 'No machine is reporting an energy counter yet. Energy figures appear once the devices send the `energy` field over MQTT.'
-        : `${reporting.length} of ${machines.length} machines report an energy counter.`
-    },
-    trend,
-    by_shift: shifts,
-    by_month: months,
-    top_consumers: [...reporting].sort((a, b) => b.kwh - a.kwh).slice(0, 5),
-    overloads: machines.filter(m => m.is_overloaded),
-    machines: {
-      data: sorted.slice(offset, offset + limitNum),
-      total: sorted.length,
-      page: pageNum, limit: limitNum,
-      totalPages: Math.max(1, Math.ceil(sorted.length / limitNum))
-    },
+    ...(want.kpis && {
+      kpis: {
+        total_kwh: reporting.length ? round(totalKwh) : null,
+        total_operating_seconds: totalRun,
+        total_produced: totalProduced,
+        kwh_per_part: (reporting.length && totalProduced > 0) ? round(totalKwh / totalProduced, 4) : null,
+        total_cost: hasAnyCost ? round(totalCost) : null,
+        avg_voltage: weighted('avg_voltage', 'voltage_readings'),
+        avg_current: weighted('avg_current', 'current_readings'),
+        kwh_vs_yesterday_pct: vsYesterday,
+        overload_alerts: machines.filter(m => m.is_overloaded).length,
+        // whether any machine has a limit to be judged against: 0 alerts with none set is no all-clear
+        overload_limit_set: machines.some(m => m.overload_kw != null),
+        overload_top: worst ? { machine_serial_no: worst.machine_serial_no, exceeded_kw: round(worst.peak_kw - worst.overload_kw, 1) } : null
+      },
+      /* Stated up front because it decides whether any of this means
+         anything: energy is only known for machines that report the counter. */
+      coverage: {
+        machines: machines.length,
+        reporting: reporting.length,
+        tariff_configured: settings.company?.cost_per_kwh != null,
+        note: reporting.length === 0
+          ? 'No machine is reporting an energy counter yet. Energy figures appear once the devices send the `energy` field over MQTT.'
+          : `${reporting.length} of ${machines.length} machines report an energy counter.`
+      }
+    }),
+    ...(want.charts && {
+      trend,
+      by_shift: shifts,
+      by_month: months,
+      top_consumers: [...reporting].sort((a, b) => b.kwh - a.kwh).slice(0, 5),
+      overloads: machines.filter(m => m.is_overloaded)
+    }),
+    ...(want.table && {
+      machines: {
+        data: sorted.slice(offset, offset + limitNum),
+        total: sorted.length,
+        page: pageNum, limit: limitNum,
+        totalPages: Math.max(1, Math.ceil(sorted.length / limitNum))
+      }
+    }),
     updated_at: new Date().toISOString()
   };
 };
@@ -460,7 +477,8 @@ exports.saveSettings = async ({ company_id, machine_id, cost_per_kwh, currency, 
 };
 
 exports.getExportRows = async (q = {}) => {
-  const d = await exports.getEnergy({ ...q, page: 1, limit: 200 });
+  // the table's rows only: the export needs no trend or chart
+  const d = await exports.getEnergy({ ...q, part: 'table', page: 1, limit: 200 });
   const hhmm = s => `${Math.floor((Number(s) || 0) / 3600)}h ${String(Math.floor(((Number(s) || 0) % 3600) / 60)).padStart(2, '0')}m`;
   const nz = v => v === null || v === undefined ? '' : v;
 

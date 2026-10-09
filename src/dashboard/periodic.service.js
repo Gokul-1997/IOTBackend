@@ -14,6 +14,7 @@
  */
 
 const pool = require('../db');
+const { parsePart, when } = require('./parts');
 
 /* Statuses that mean the work has not been done yet. */
 const LIVE_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS'];
@@ -329,26 +330,36 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
 }
 
 /** Everything the screen needs, in one response. */
-exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page, limit }) => {
+/*
+ * The whole screen, or the parts asked for (`part`, see parts.js): kpis =
+ * the tiles; charts = the compliance trend, technician workload and Attention
+ * Required; table = Upcoming Maintenance, the type-wise summary and the
+ * tickets. The workload also gives the Overdue tile its "across N
+ * technicians", so it comes with kpis or charts.
+ */
+exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page, limit, part }) => {
+  const want = parsePart(part);
   const machineId = parseMachineId(machine_id);
 
   const [k, trend, freq, workload, next, list] = await Promise.all([
-    kpis(company_id, machineId),
-    complianceTrend(company_id, machineId),
-    byFrequency(company_id, machineId),
-    technicianWorkload(company_id, machineId),
-    upcoming(company_id, machineId),
-    tickets(company_id, machineId, { search, status, due, page, limit })
+    when(want.kpis, () => kpis(company_id, machineId)),
+    when(want.charts, () => complianceTrend(company_id, machineId)),
+    when(want.table, () => byFrequency(company_id, machineId)),
+    when(want.kpis || want.charts, () => technicianWorkload(company_id, machineId)),
+    when(want.table, () => upcoming(company_id, machineId)),
+    when(want.table, () => tickets(company_id, machineId, { search, status, due, page, limit }))
   ]);
 
   return {
     filters: { machine_id: machineId, search: search || null, status: status || null, due: due || null },
-    kpis: k,
-    compliance_trend: trend,
-    by_frequency: freq,
-    technician_workload: workload,
-    upcoming: next,
-    tickets: list,
+    ...(want.kpis && { kpis: k }),
+    ...((want.kpis || want.charts) && { technician_workload: workload }),
+    ...(want.charts && { compliance_trend: trend }),
+    ...(want.table && {
+      by_frequency: freq,
+      upcoming: next,
+      tickets: list
+    }),
     updated_at: new Date().toISOString()
   };
 };

@@ -30,6 +30,11 @@ function queueAll({ machines = [], trend = [], shifts = [], months = [], setting
   );
 }
 
+/* The table half (and the export) fires only perMachine and settings. */
+function queueTable({ machines = [], settings = [] } = {}) {
+  mockDb.queueResponse({ rows: machines }, { rows: settings });
+}
+
 const machineRow = (over = {}) => ({
   machine_id: 1, machine_serial_no: 'VMC-01', model: 'VF700',
   kwh: '30', days: 1, readings: '3',
@@ -271,16 +276,18 @@ describe('input validation', () => {
 
 describe('export', () => {
   test('names the cost column with the configured currency', async () => {
-    queueAll({
+    queueTable({
       machines: [machineRow()],
       settings: [{ machine_id: null, cost_per_kwh: '8.5', currency: 'EUR', overload_kw: null }]
     });
     const rows = await svc.getExportRows({ company_id });
+    // the export asks for the table's rows only: no trend, shift or month query
+    expect(mockDb.calls()).toHaveLength(2);
     expect(Object.keys(rows[0])).toContain('Cost (EUR)');
   });
 
   test('an unknown figure exports blank rather than a misleading zero', async () => {
-    queueAll({ machines: [machineRow({ kwh: null, produced: '0', peak_kw: null })] });
+    queueTable({ machines: [machineRow({ kwh: null, produced: '0', peak_kw: null })] });
     const rows = await svc.getExportRows({ company_id });
     expect(rows[0]['Energy (kWh)']).toBe('');
     expect(rows[0]['kWh per part']).toBe('');

@@ -23,6 +23,7 @@
  */
 
 const db = require('../db');
+const { parsePart, when } = require('./parts');
 
 const STATUSES   = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
 const ISSUES     = ['BREAKDOWN', 'ALARM', 'INSPECTION', 'OTHER'];
@@ -141,11 +142,18 @@ async function listTickets(f, { page, limit }) {
   };
 }
 
+/*
+ * The whole report, or the parts asked for (`part`, see parts.js): kpis =
+ * the tiles; charts = raised vs resolved, by type and stopped time; table =
+ * Machine Summary and Maintenance Tickets. The per-machine totals feed the
+ * stopped-time chart and the summary table, so charts and table each bring them.
+ */
 exports.getReport = async (q = {}) => {
+  const want = parsePart(q.part);
   const f = buildFilter(q);
 
   const [kpiRes, byMachineRes, byTypeRes, byStatusRes, trendRes, tickets] = await Promise.all([
-    db.query(
+    when(want.kpis, () => db.query(
       `SELECT COUNT(*)::int AS tickets,
               COUNT(*) FILTER (WHERE t.status = ANY($${f.next}))::int  AS settled,
               COUNT(*) FILTER (WHERE NOT (t.status = ANY($${f.next})))::int AS open,
@@ -157,9 +165,9 @@ exports.getReport = async (q = {}) => {
               COUNT(*) FILTER (WHERE t.resolved_at IS NOT NULL)::int   AS mttr_basis
          FROM maintenance_tickets t
          JOIN machines m ON m.id = t.machine_id
-        WHERE ${f.sql}`, [...f.params, SETTLED]),
+        WHERE ${f.sql}`, [...f.params, SETTLED])),
 
-    db.query(
+    when(want.charts || want.table, () => db.query(
       `SELECT m.machine_serial_no,
               COUNT(*)::int AS tickets,
               COUNT(*) FILTER (WHERE t.issue_type = 'BREAKDOWN')::int AS breakdowns,
@@ -170,35 +178,35 @@ exports.getReport = async (q = {}) => {
         WHERE ${f.sql}
         GROUP BY m.machine_serial_no
         ORDER BY COALESCE(SUM(t.downtime_minutes), 0) DESC, COUNT(*) DESC
-        LIMIT 20`, f.params),
+        LIMIT 20`, f.params)),
 
-    db.query(
+    when(want.charts, () => db.query(
       `SELECT t.issue_type, COUNT(*)::int AS n
          FROM maintenance_tickets t
          JOIN machines m ON m.id = t.machine_id
         WHERE ${f.sql}
-        GROUP BY t.issue_type`, f.params),
+        GROUP BY t.issue_type`, f.params)),
 
-    db.query(
+    when(want.charts, () => db.query(
       `SELECT t.status, COUNT(*)::int AS n
          FROM maintenance_tickets t
          JOIN machines m ON m.id = t.machine_id
         WHERE ${f.sql}
-        GROUP BY t.status`, f.params),
+        GROUP BY t.status`, f.params)),
 
-    db.query(
+    when(want.charts, () => db.query(
       `SELECT date_trunc('day', t.created_at) AS day,
               COUNT(*)::int AS raised,
               COUNT(*) FILTER (WHERE t.resolved_at IS NOT NULL)::int AS resolved
          FROM maintenance_tickets t
          JOIN machines m ON m.id = t.machine_id
         WHERE ${f.sql}
-        GROUP BY 1 ORDER BY 1`, f.params),
+        GROUP BY 1 ORDER BY 1`, f.params)),
 
-    listTickets(f, { page: q.page, limit: q.limit })
+    when(want.table, () => listTickets(f, { page: q.page, limit: q.limit }))
   ]);
 
-  const kpis = kpiRes.rows[0];
+  const kpis = want.kpis ? kpiRes.rows[0] : null;
   const countsFor = (rows, key, allowed) =>
     Object.fromEntries(allowed.map(k => [k, rows.find(r => r[key] === k)?.n || 0]));
 
@@ -209,22 +217,26 @@ exports.getReport = async (q = {}) => {
       machine_id: f.machineId
     },
     updated_at: new Date().toISOString(),
-    kpis: {
-      ...kpis,
-      /* Stated rather than left to the reader: an average over three
-         tickets is not the same claim as one over three hundred. */
-      mttr_basis_note: kpis.mttr_basis
-        ? `Mean of ${kpis.mttr_basis} resolved ticket${kpis.mttr_basis === 1 ? '' : 's'}`
-        : 'No ticket has been resolved in this period',
-      downtime_note: kpis.downtime_unrecorded
-        ? `${kpis.downtime_unrecorded} ticket${kpis.downtime_unrecorded === 1 ? '' : 's'} recorded no downtime`
-        : null
-    },
-    by_machine: byMachineRes.rows,
-    by_type:    countsFor(byTypeRes.rows,   'issue_type', ISSUES),
-    by_status:  countsFor(byStatusRes.rows, 'status',     STATUSES),
-    trend:      trendRes.rows,
-    tickets
+    ...(want.kpis && {
+      kpis: {
+        ...kpis,
+        /* Stated rather than left to the reader: an average over three
+           tickets is not the same claim as one over three hundred. */
+        mttr_basis_note: kpis.mttr_basis
+          ? `Mean of ${kpis.mttr_basis} resolved ticket${kpis.mttr_basis === 1 ? '' : 's'}`
+          : 'No ticket has been resolved in this period',
+        downtime_note: kpis.downtime_unrecorded
+          ? `${kpis.downtime_unrecorded} ticket${kpis.downtime_unrecorded === 1 ? '' : 's'} recorded no downtime`
+          : null
+      }
+    }),
+    ...(want.charts && {
+      by_type:    countsFor(byTypeRes.rows,   'issue_type', ISSUES),
+      by_status:  countsFor(byStatusRes.rows, 'status',     STATUSES),
+      trend:      trendRes.rows
+    }),
+    ...((want.charts || want.table) && { by_machine: byMachineRes.rows }),
+    ...(want.table && { tickets })
   };
 };
 

@@ -37,6 +37,7 @@
  */
 
 const pool = require('../db');
+const { parsePart } = require('./parts');
 const oeeSvc = require('./oee.dashboard.service');
 
 /** Score bands, lowest bound of each. Below `average` needs help. */
@@ -247,7 +248,14 @@ function leaders(rows, field, keep = () => true) {
   };
 }
 
+/*
+ * The whole screen, or the parts asked for (`part`, see parts.js): kpis =
+ * the tiles and the operator list for the filter; charts = the rankings;
+ * table = Operator Performance Details. All three rest on the same
+ * per-operator figures, so a part saves sending, not working out.
+ */
 exports.getOperators = async (q = {}) => {
+  const want = parsePart(q.part);
   const companyId = q.company_id;
   const { start, end } = resolveRange(q);
   const machineId  = parseId(q.machine_id, 'machine_id');
@@ -283,7 +291,7 @@ exports.getOperators = async (q = {}) => {
   }
 
   const all = [...byOperator.values()].map(e => derive(e.op, e.machines));
-  const sorted = sortRows(all, sort, dir);
+  const sorted = want.table ? sortRows(all, sort, dir) : [];
 
   // Fleet figures over the machines these operators hold, each counted once.
   const held = [...new Set(links.map(l => l.machine_id))].map(id => machinesById.get(id)).filter(Boolean);
@@ -300,48 +308,55 @@ exports.getOperators = async (q = {}) => {
       machine_id: machineId, shift_id: shiftId, operator_id: operatorId,
       search: search || null, sort, dir
     },
-    kpis: {
-      produced: fleet.produced, good: fleet.good, rejected: fleet.rejected,
-      run_seconds: fleet.run_seconds, idle_seconds: fleet.idle_seconds,
-      quality_rate_pct: fleet.quality_pct,
-      utilization_pct: (fleet.run_seconds + fleet.idle_seconds) > 0
-        ? round1((fleet.run_seconds / (fleet.run_seconds + fleet.idle_seconds)) * 100) : null,
-      oee_pct: fleet.oee_pct
-    },
-    // OEE needs a cycle time; say how many of the running machines have one
-    oee_coverage: {
-      machines: producing.length,
-      with_cycle_time: producing.filter(m => m.has_cycle_time).length
-    },
-    attribution: {
-      operators: all.length,
-      shared_machines: all.reduce((n, r) => n + (r.shared_machines > 0 ? 1 : 0), 0),
-      note: 'Figures are for the machines each operator is assigned to. Machines with more than one assigned operator appear in each of their rows.'
-    },
-    score_bands: SCORE_BANDS,
-    bands: band(all),
-    leaders: {
-      score:     leaders(all, 'score'),
-      rejection: leaders(all, 'rejection_rate_pct'),
-      // only operators whose machines reported any time at all
-      downtime:  leaders(all, 'downtime_seconds', r => r.run_seconds + r.idle_seconds > 0),
-      oee:       leaders(all, 'oee_pct')
-    },
-    operator_list,
-    operators: {
-      data: sorted.slice(offset, offset + limitNum),
-      total: sorted.length,
-      page: pageNum,
-      limit: limitNum,
-      totalPages: Math.max(1, Math.ceil(sorted.length / limitNum))
-    },
+    ...(want.kpis && {
+      kpis: {
+        produced: fleet.produced, good: fleet.good, rejected: fleet.rejected,
+        run_seconds: fleet.run_seconds, idle_seconds: fleet.idle_seconds,
+        quality_rate_pct: fleet.quality_pct,
+        utilization_pct: (fleet.run_seconds + fleet.idle_seconds) > 0
+          ? round1((fleet.run_seconds / (fleet.run_seconds + fleet.idle_seconds)) * 100) : null,
+        oee_pct: fleet.oee_pct
+      },
+      // OEE needs a cycle time; say how many of the running machines have one
+      oee_coverage: {
+        machines: producing.length,
+        with_cycle_time: producing.filter(m => m.has_cycle_time).length
+      },
+      attribution: {
+        operators: all.length,
+        shared_machines: all.reduce((n, r) => n + (r.shared_machines > 0 ? 1 : 0), 0),
+        note: 'Figures are for the machines each operator is assigned to. Machines with more than one assigned operator appear in each of their rows.'
+      },
+      score_bands: SCORE_BANDS,
+      bands: band(all),
+      operator_list
+    }),
+    ...(want.charts && {
+      leaders: {
+        score:     leaders(all, 'score'),
+        rejection: leaders(all, 'rejection_rate_pct'),
+        // only operators whose machines reported any time at all
+        downtime:  leaders(all, 'downtime_seconds', r => r.run_seconds + r.idle_seconds > 0),
+        oee:       leaders(all, 'oee_pct')
+      }
+    }),
+    ...(want.table && {
+      operators: {
+        data: sorted.slice(offset, offset + limitNum),
+        total: sorted.length,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.max(1, Math.ceil(sorted.length / limitNum))
+      }
+    }),
     updated_at: new Date().toISOString()
   };
 };
 
 /** Flat rows for Excel / CSV / PDF, in the table's order and columns. */
 exports.getExportRows = async (q = {}) => {
-  const d = await exports.getOperators({ ...q, page: 1, limit: 200 });
+  // the table's rows only: the export needs no ranking or chart
+  const d = await exports.getOperators({ ...q, part: 'table', page: 1, limit: 200 });
   const hhmm = s => `${Math.floor((Number(s) || 0) / 3600)}h ${String(Math.floor(((Number(s) || 0) % 3600) / 60)).padStart(2, '0')}m`;
   const pct = v => v === null || v === undefined ? '' : `${v}%`;
   const label = { EXCELLENT: 'Excellent', GOOD: 'Good', AVERAGE: 'Avg', NEEDS_HELP: 'Help', UNRATED: 'Unrated' };

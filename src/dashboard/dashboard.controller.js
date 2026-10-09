@@ -419,7 +419,8 @@ exports.periodic = async (req, res) => {
       status:     req.query.status,
       due:        req.query.due,
       page:       req.query.page,
-      limit:      req.query.limit
+      limit:      req.query.limit,
+      part:       req.query.part
     });
     return res.json({ status: 'success', data });
   } catch (err) {

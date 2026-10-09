@@ -14,6 +14,7 @@
  */
 
 const pool = require('../db');
+const { parsePart, when } = require('./parts');
 
 /* The severities the screen groups by. Anything a controller sends that is
    not CRITICAL is reported as Normal rather than silently dropped — an
@@ -323,8 +324,13 @@ async function facets(companyId, { start, end }) {
   };
 }
 
-/** Everything the screen needs, in one response. */
+/**
+ * Everything the screen needs, in one response — or the parts asked for
+ * (`part`, see parts.js): kpis = the cards and the alarm types for the
+ * filter bar; charts = the four charts; table = Alarms Details.
+ */
 exports.getAlarms = async (q = {}) => {
+  const want = parsePart(q.part);
   const companyId = q.company_id;
   const { start, end } = resolveRange(q);
   const machineId = parseId(q.machine_id, 'machine_id');
@@ -343,9 +349,14 @@ exports.getAlarms = async (q = {}) => {
   const oneDay = q.from && q.to && q.from === q.to;
 
   const [k, machines, shifts, severity, tr, rows, f, top] = await Promise.all([
-    kpis(filter), byMachine(filter), byShift(filter), bySeverity(filter),
-    oneDay ? hourlyTrend(filter, q.from) : trend(filter, { start, end }),
-    list(tableFilter, q), facets(companyId, { start, end }), longest(filter)
+    when(want.kpis, () => kpis(filter)),
+    when(want.charts, () => byMachine(filter)),
+    when(want.charts, () => byShift(filter)),
+    when(want.charts, () => bySeverity(filter)),
+    when(want.charts, () => (oneDay ? hourlyTrend(filter, q.from) : trend(filter, { start, end }))),
+    when(want.table, () => list(tableFilter, q)),
+    when(want.kpis, () => facets(companyId, { start, end })),
+    when(want.kpis, () => longest(filter))
   ]);
 
   return {
@@ -356,14 +367,15 @@ exports.getAlarms = async (q = {}) => {
       severity: q.severity || null, search: (q.search || '').trim() || null,
       show: q.show && q.show !== 'all' ? String(q.show).toLowerCase() : null
     },
-    kpis: { ...k, longest: top },
-    by_machine: machines,
-    by_shift: shifts,
-    by_severity: severity,
-    trend: tr,
-    trend_by: oneDay ? 'hour' : 'day',
-    alarms: rows,
-    facets: f,
+    ...(want.kpis && { kpis: { ...k, longest: top }, facets: f }),
+    ...(want.charts && {
+      by_machine: machines,
+      by_shift: shifts,
+      by_severity: severity,
+      trend: tr,
+      trend_by: oneDay ? 'hour' : 'day'
+    }),
+    ...(want.table && { alarms: rows }),
     updated_at: new Date().toISOString()
   };
 };

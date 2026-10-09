@@ -22,6 +22,7 @@
  */
 
 const pool = require('../db');
+const { parsePart, when } = require('./parts');
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -333,7 +334,14 @@ async function list(filter, { page = 1, limit = 20 }) {
 }
 
 /** Everything the screen needs. */
+/*
+ * The whole screen, or the parts asked for (`part`, see parts.js): kpis =
+ * the tiles; charts = the Pareto, shift, status and hourly charts; table =
+ * the reason summary and Downtime Details. The reason totals feed both the
+ * Pareto and the summary table, so charts and table each bring them.
+ */
 exports.getDowntime = async (q = {}) => {
+  const want = parsePart(q.part);
   const companyId = q.company_id;
   const { start, end } = resolveRange(q);
   const machineId  = parseId(q.machine_id, 'machine_id');
@@ -348,14 +356,14 @@ exports.getDowntime = async (q = {}) => {
 
   const [measured, alarms, declared, reasons, categories, shifts, hourly, rows] =
     await Promise.all([
-      measuredTime({ companyId, machineId, shiftId, start, end }),
-      alarmTime({ companyId, machineId, start, end }),
-      declaredTotals(filter),
-      byReason(filter),
-      byCategory(filter),
-      byShift(filter),
-      hourlyTrend(filter),
-      list(filter, q)
+      when(want.kpis, () => measuredTime({ companyId, machineId, shiftId, start, end })),
+      when(want.kpis, () => alarmTime({ companyId, machineId, start, end })),
+      when(want.kpis, () => declaredTotals(filter)),
+      when(want.charts || want.table, () => byReason(filter)),
+      when(want.charts, () => byCategory(filter)),
+      when(want.charts, () => byShift(filter)),
+      when(want.charts, () => hourlyTrend(filter)),
+      when(want.table, () => list(filter, q))
     ]);
 
   /*
@@ -364,7 +372,7 @@ exports.getDowntime = async (q = {}) => {
    * point — it is the number that tells a plant whether its downtime
    * reporting is worth anything.
    */
-  const unaccounted = Math.max(0, measured.idle_seconds - declared.downtime_seconds);
+  const unaccounted = want.kpis ? Math.max(0, measured.idle_seconds - declared.downtime_seconds) : null;
 
   return {
     filters: {
@@ -373,32 +381,36 @@ exports.getDowntime = async (q = {}) => {
       reason_id: reasonId, category: q.category || null,
       search: (q.search || '').trim() || null
     },
-    kpis: {
-      total_downtime_seconds: declared.downtime_seconds,
-      downtime_events:        declared.events,
-      open_events:            declared.open_events,
-      run_seconds:            measured.run_seconds,
-      idle_seconds:           measured.idle_seconds,
-      alarm_seconds:          alarms.seconds,
-      /* Lost time in rupees, at each machine's hour rate. Alarm time is
-         mostly part of idle time (a machine in alarm is not running), so
-         the two are shown side by side, never added. */
-      idle_cost:              measured.idle_cost,
-      alarm_cost:             alarms.cost,
-      cost_machines:          { priced: measured.priced_machines, of: measured.machines },
-      availability_pct:       measured.availability_pct,
-      unaccounted_seconds:    unaccounted,
-      // how much of the idle time actually has a reason against it
-      reason_coverage_pct: measured.idle_seconds > 0
-        ? Number(((declared.downtime_seconds / measured.idle_seconds) * 100).toFixed(1))
-        : null
-    },
-    by_reason:   reasons,
-    top_reasons: reasons.slice(0, 5),
-    by_category: categories,
-    by_shift:    shifts,
-    hourly:      hourly,
-    events:      rows,
+    ...(want.kpis && {
+      kpis: {
+        total_downtime_seconds: declared.downtime_seconds,
+        downtime_events:        declared.events,
+        open_events:            declared.open_events,
+        run_seconds:            measured.run_seconds,
+        idle_seconds:           measured.idle_seconds,
+        alarm_seconds:          alarms.seconds,
+        /* Lost time in rupees, at each machine's hour rate. Alarm time is
+           mostly part of idle time (a machine in alarm is not running), so
+           the two are shown side by side, never added. */
+        idle_cost:              measured.idle_cost,
+        alarm_cost:             alarms.cost,
+        cost_machines:          { priced: measured.priced_machines, of: measured.machines },
+        availability_pct:       measured.availability_pct,
+        unaccounted_seconds:    unaccounted,
+        // how much of the idle time actually has a reason against it
+        reason_coverage_pct: measured.idle_seconds > 0
+          ? Number(((declared.downtime_seconds / measured.idle_seconds) * 100).toFixed(1))
+          : null
+      }
+    }),
+    ...(want.charts && {
+      top_reasons: reasons.slice(0, 5),
+      by_category: categories,
+      by_shift:    shifts,
+      hourly:      hourly
+    }),
+    ...((want.charts || want.table) && { by_reason: reasons }),
+    ...(want.table && { events: rows }),
     updated_at:  new Date().toISOString()
   };
 };

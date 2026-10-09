@@ -9,6 +9,7 @@
  * exists at all.
  */
 const db = require('../db');
+const { parsePart, when } = require('./parts');
 const { severityClass } = require('./severity');
 const { parseRange, parseMachineId, httpError } = require('./window');
 
@@ -25,7 +26,15 @@ function parsePaging({ page, limit }) {
   return { limit: lim, page: pg, offset: (pg - 1) * lim };
 }
 
+/*
+ * The whole screen, or the parts asked for (`part`, see parts.js): kpis =
+ * the tiles; charts = the alarm trend, severity, per-machine and top-reason
+ * charts; table = the PM ticket list. The status split and the trigger
+ * summary are drawn by no screen, so only the full answer carries them.
+ */
 exports.getPreventiveDashboard = async (req) => {
+  const want = parsePart(req.query.part);
+  const full = want.all;
   const companyId = req.user.company_id;
   const machineId = parseMachineId(req.query.machine_id);
   const search    = (req.query.search || '').trim();
@@ -77,16 +86,16 @@ exports.getPreventiveDashboard = async (req) => {
   ] = await Promise.all([
 
     /* critical alarms in the range */
-    db.query(`
+    when(want.kpis, () => db.query(`
       SELECT COUNT(*)::int AS total,
              COUNT(*) FILTER (WHERE a.is_resolved IS NOT TRUE)::int AS open
       FROM machine_alarms a
       WHERE a.company_id = $1 AND a.started_at >= $2 AND a.started_at < $3
         AND a.severity = 'CRITICAL' ${alarmScope}`, alarmParams
-    ),
+    )),
 
     /* PM tickets raised in the range: how many, and where they stand now */
-    db.query(`
+    when(want.kpis, () => db.query(`
       SELECT
         COUNT(*)::int                                                          AS generated,
         COUNT(*) FILTER (WHERE t.status = ANY($${statusIdx}::ticket_status[]))::int AS open,
@@ -96,24 +105,24 @@ exports.getPreventiveDashboard = async (req) => {
       FROM maintenance_tickets t
       WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
       [...ticketParams, OPEN_STATUSES]
-    ),
+    )),
 
     /* average time from raised to resolved, for tickets raised in the range */
-    db.query(`
+    when(want.kpis, () => db.query(`
       SELECT ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600)::numeric, 1)::float
                AS avg_resolution_hours,
              COUNT(*)::int AS resolved_count
       FROM maintenance_tickets t
       WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE'
         AND t.resolved_at IS NOT NULL ${ticketScope}`, ticketParams
-    ),
+    )),
 
     /* critical alarm trend, one point per plant-time day across the range.
        generate_series so days with no alarms appear as zero rather than
        vanishing and making the line lie about the shape. Days are cut at
        IST midnight: comparing to a bare date used the database session's
        zone, which put a 02:00 IST alarm on the previous day. */
-    db.query(`
+    when(want.charts, () => db.query(`
       WITH days AS (
         SELECT generate_series($2::date, $3::date, '1 day')::date AS d
       )
@@ -129,18 +138,18 @@ exports.getPreventiveDashboard = async (req) => {
        ${machineId ? 'AND a.machine_id = $4' : ''}
       GROUP BY days.d ORDER BY days.d`,
       machineId ? [companyId, trendFrom, range.to, machineId] : [companyId, trendFrom, range.to]
-    ),
+    )),
 
     /* alarms by severity class in the range */
-    db.query(`
+    when(want.charts, () => db.query(`
       SELECT ${SEVERITY_CLASS} AS class, COUNT(*)::int AS total
       FROM machine_alarms a
       WHERE a.company_id = $1 AND a.started_at >= $2 AND a.started_at < $3 ${alarmScope}
       GROUP BY 1`, alarmParams
-    ),
+    )),
 
     /* critical alarms per machine */
-    db.query(`
+    when(want.charts, () => db.query(`
       SELECT m.machine_serial_no, COUNT(a.id)::int AS critical
       FROM machine_alarms a
       JOIN machines m ON m.id = a.machine_id
@@ -149,10 +158,10 @@ exports.getPreventiveDashboard = async (req) => {
       GROUP BY m.machine_serial_no
       ORDER BY critical DESC, m.machine_serial_no
       LIMIT 15`, alarmParams
-    ),
+    )),
 
     /* top alarm reasons by occurrence */
-    db.query(`
+    when(want.charts, () => db.query(`
       SELECT a.alarm_type, COUNT(*)::int AS occurrences,
              COUNT(*) FILTER (WHERE a.severity = 'CRITICAL')::int AS critical
       FROM machine_alarms a
@@ -160,12 +169,12 @@ exports.getPreventiveDashboard = async (req) => {
       GROUP BY a.alarm_type
       ORDER BY occurrences DESC
       LIMIT 10`, alarmParams
-    ),
+    )),
 
     /* PM ticket status split for tickets raised in the range — the three
        the agreement names, with the rest folded in so the parts always sum
        to the whole */
-    db.query(`
+    when(full, () => db.query(`
       SELECT
         COUNT(*) FILTER (WHERE t.status = 'OPEN')::int                    AS open,
         COUNT(*) FILTER (WHERE t.status IN ('ASSIGNED','IN_PROGRESS'))::int AS in_progress,
@@ -173,10 +182,10 @@ exports.getPreventiveDashboard = async (req) => {
       FROM maintenance_tickets t
       WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
       ticketParams
-    ),
+    )),
 
     /* the open PM ticket list */
-    db.query(`
+    when(want.table, () => db.query(`
       SELECT
         t.id AS ticket_id,
         m.machine_serial_no,
@@ -200,20 +209,20 @@ exports.getPreventiveDashboard = async (req) => {
       ORDER BY (t.due_date IS NULL), t.due_date ASC, t.created_at DESC
       LIMIT $${listParams.length + 2} OFFSET $${listParams.length + 3}`,
       [...listParams, ['RESOLVED', 'CLOSED'], limit, offset]
-    ),
+    )),
 
-    db.query(`
+    when(want.table, () => db.query(`
       SELECT COUNT(*)::int AS total
       FROM maintenance_tickets t
       LEFT JOIN machines m        ON m.id  = t.machine_id
       LEFT JOIN machine_alarms al ON al.id = t.alarm_id
       WHERE ${listWhere}`, listParams
-    ),
+    )),
 
     /* alarm trigger summary: the rule, how often it fired, how many PM
        tickets it produced. This is what migration 014's rules table exists
        for — before it there was nowhere to read "threshold" from. */
-    db.query(`
+    when(full, () => db.query(`
       SELECT
         th.id, th.alarm_type, th.threshold_count, th.window_hours,
         th.due_hours, th.priority, th.is_active,
@@ -239,17 +248,17 @@ exports.getPreventiveDashboard = async (req) => {
       WHERE th.company_id = $1
       ORDER BY occurrences DESC, th.alarm_type`,
       [companyId, from, to]
-    )
+    ))
   ]);
 
   const severity = { critical: 0, non_critical: 0, information: 0 };
-  for (const r of severityRes.rows) {
+  for (const r of severityRes?.rows ?? []) {
     if (r.class === 'CRITICAL')          severity.critical     = r.total;
     else if (r.class === 'NON_CRITICAL') severity.non_critical = r.total;
     else                                 severity.information  = r.total;
   }
 
-  const total = listCountRes.rows[0].total;
+  const total = want.table ? listCountRes.rows[0].total : 0;
 
   return {
     filters: {
@@ -259,32 +268,39 @@ exports.getPreventiveDashboard = async (req) => {
     },
     updated_at: new Date().toISOString(),
 
-    kpis: {
-      critical_alarms:      alarmKpiRes.rows[0].total,
-      critical_alarms_open: alarmKpiRes.rows[0].open,
-      pm_generated:         ticketKpiRes.rows[0].generated,
-      pm_open:              ticketKpiRes.rows[0].open,
-      pm_completed:         ticketKpiRes.rows[0].completed,
-      pm_overdue:           ticketKpiRes.rows[0].overdue,
-      avg_resolution_hours: resolutionRes.rows[0].avg_resolution_hours,
-      resolved_count:       resolutionRes.rows[0].resolved_count
-    },
+    ...(want.kpis && {
+      kpis: {
+        critical_alarms:      alarmKpiRes.rows[0].total,
+        critical_alarms_open: alarmKpiRes.rows[0].open,
+        pm_generated:         ticketKpiRes.rows[0].generated,
+        pm_open:              ticketKpiRes.rows[0].open,
+        pm_completed:         ticketKpiRes.rows[0].completed,
+        pm_overdue:           ticketKpiRes.rows[0].overdue,
+        avg_resolution_hours: resolutionRes.rows[0].avg_resolution_hours,
+        resolved_count:       resolutionRes.rows[0].resolved_count
+      }
+    }),
 
-    alarm_trend:     trendRes.rows,
-    alarm_severity:  severity,
-    alarms_by_machine: byMachineRes.rows,
-    top_alarm_reasons: topReasonsRes.rows,
-    ticket_status:   statusSplitRes.rows[0] || { open: 0, in_progress: 0, completed: 0 },
+    ...(want.charts && {
+      alarm_trend:     trendRes.rows,
+      alarm_severity:  severity,
+      alarms_by_machine: byMachineRes.rows,
+      top_alarm_reasons: topReasonsRes.rows
+    }),
+    ...(full && {
+      ticket_status: statusSplitRes.rows[0] || { open: 0, in_progress: 0, completed: 0 },
+      alarm_triggers: triggerRes.rows
+    }),
 
-    tickets: {
-      data: listRes.rows,
-      total,
-      page,
-      limit,
-      totalPages: Math.max(Math.ceil(total / limit), 1)
-    },
-
-    alarm_triggers: triggerRes.rows
+    ...(want.table && {
+      tickets: {
+        data: listRes.rows,
+        total,
+        page,
+        limit,
+        totalPages: Math.max(Math.ceil(total / limit), 1)
+      }
+    })
   };
 };
 
