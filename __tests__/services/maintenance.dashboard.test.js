@@ -309,3 +309,61 @@ describe('maintenance dashboard — machine card and cycle time', () => {
     expect(svc.cycleTrend(null)).toEqual([]);
   });
 });
+
+/*
+ * The supply voltage (Oct 2026, the embedded team: "PowerData has LN and LL
+ * parameters — use them separately for voltage"). From the machine's energy
+ * meter, the latest reading in the day or shift; only VMC - 2 - F has one.
+ */
+describe('maintenance dashboard — supply voltage', () => {
+  const supplyCall = () => mockDb.calls().find(c => /FROM energy_meter_readings/.test(c.text));
+  const reading = { read_at: '2026-10-09T06:30:15Z', v1n: 242.3, v2n: 243.79, v3n: 242.22, v_ln_avg: 242.77,
+                    v12: 421.2, v23: 421.16, v31: 419.12, v_ll_avg: 420.49 };
+
+  test('no machine selected: no meter query, no supply', async () => {
+    queueAll();
+    const res = await svc.getMaintenanceDashboard(req());
+    expect(supplyCall()).toBeUndefined();
+    expect(res.supply).toBeNull();
+  });
+
+  test('one machine: its latest reading in the window, scoped to the company, binding exactly its parameters', async () => {
+    queueAll();
+    mockDb.queueResponse({ rows: [] }, { rows: [] }, { rows: [reading] });   // trend, cycle time, supply
+    const res = await svc.getMaintenanceDashboard(req({ machine_id: '19' }));
+
+    const call = supplyCall();
+    expect(call.text).toMatch(/m\.company_id = \$1/);
+    expect(call.text).toMatch(/r\.machine_id = \$4 AND r\.read_at >= \$2 AND r\.read_at < \$3/);
+    expect(call.text).toMatch(/ORDER BY r\.read_at DESC\s+LIMIT 1/);
+    const highest = Math.max(...[...call.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
+    expect(call.params.length).toBe(highest);
+    expect(call.params[0]).toBe(company_id);
+    expect(call.params[3]).toBe(19);
+
+    // two groups, as the meter sends them
+    expect(res.supply.ln).toEqual({ v1n: 242.3, v2n: 243.79, v3n: 242.22, avg: 242.77 });
+    expect(res.supply.ll).toEqual({ v12: 421.2, v23: 421.16, v31: 419.12, avg: 420.49 });
+    expect(res.supply.limits).toEqual({ ll_nominal: 415, ln_nominal: 240, tolerance_pct: 10, imbalance_pct: 2 });
+  });
+
+  test('a machine without a meter, or a database before migration 029, has no supply — not an error', async () => {
+    queueAll();
+    mockDb.queueResponse({ rows: [] }, { rows: [] }, { rows: [] });
+    expect((await svc.getMaintenanceDashboard(req({ machine_id: '20' }))).supply).toBeNull();
+
+    resetDb();
+    queueAll();
+    mockDb.queueResponse({ rows: [] }, { rows: [] });
+    mockDb.queueError(Object.assign(new Error('relation "energy_meter_readings" does not exist'), { code: '42P01' }));
+    expect((await svc.getMaintenanceDashboard(req({ machine_id: '20' }))).supply).toBeNull();
+  });
+
+  test('a reading older than two minutes is marked stale; values come back as numbers', () => {
+    const now = Date.parse('2026-10-09T06:40:00Z');
+    expect(svc.supplyOf({ ...reading, v1n: '242.3' }, now)).toMatchObject({ stale: true, ln: { v1n: 242.3 } });
+    expect(svc.supplyOf(reading, Date.parse('2026-10-09T06:31:00Z')).stale).toBe(false);
+    expect(svc.supplyOf({ ...reading, v2n: null }, now).ln.v2n).toBeNull();
+    expect(svc.supplyOf(undefined)).toBeNull();
+  });
+});

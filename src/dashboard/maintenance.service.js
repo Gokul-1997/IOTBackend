@@ -23,6 +23,7 @@ const db = require('../db');
 const { severityClass } = require('./severity');
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
+const { LIMITS: METER_LIMITS } = require('./energy-meter.service');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
 const SEVERITY_CLASS = severityClass('severity');
@@ -48,6 +49,49 @@ const FRESH_WINDOW       = `INTERVAL '60 seconds'`;
  * the screen keeps working and this build can go out before the migration —
  * as energy-meter.service does for 029's table.
  */
+/*
+ * The supply voltage, from the machine's energy meter (migration 029 keeps
+ * every PowerData value): each phase to neutral (L-N) and each pair of
+ * phases (L-L), as the embedded team asked them shown — two groups, not the
+ * one line-to-line average telemetry_raw keeps. Only a machine with a meter
+ * has a reading; before 029 there is no table and so no meter yet.
+ */
+const SUPPLY_STALE_MS = 120e3;   // the meter writes at most every 15 s
+async function latestSupply(companyId, machineId, from, to) {
+  try {
+    return await db.query(`
+      SELECT r.read_at, r.v1n, r.v2n, r.v3n, r.v_ln_avg, r.v12, r.v23, r.v31, r.v_ll_avg
+        FROM energy_meter_readings r
+        JOIN machines m ON m.id = r.machine_id AND m.company_id = $1
+       WHERE r.machine_id = $4 AND r.read_at >= $2 AND r.read_at < $3
+       ORDER BY r.read_at DESC
+       LIMIT 1`, [companyId, from, to, machineId]);
+  } catch (err) {
+    if (err?.code === '42P01') return { rows: [] };
+    throw err;
+  }
+}
+
+/** The latest meter reading as the screen shows it: two groups of three phases, their averages, and the limits they are judged by. */
+function supplyOf(r, nowMs = Date.now()) {
+  if (!r) return null;
+  const n = v => (v === null || v === undefined ? null : Number(v));
+  const at = new Date(r.read_at).getTime();
+  return {
+    read_at: r.read_at,
+    stale: !Number.isFinite(at) || nowMs - at > SUPPLY_STALE_MS,
+    ln: { v1n: n(r.v1n), v2n: n(r.v2n), v3n: n(r.v3n), avg: n(r.v_ln_avg) },
+    ll: { v12: n(r.v12), v23: n(r.v23), v31: n(r.v31), avg: n(r.v_ll_avg) },
+    limits: {
+      ll_nominal: METER_LIMITS.v_ll_nominal,
+      // phase to neutral on the same supply: 415 / √3
+      ln_nominal: Math.round(METER_LIMITS.v_ll_nominal / Math.sqrt(3)),
+      tolerance_pct: METER_LIMITS.v_tolerance_pct,
+      imbalance_pct: METER_LIMITS.v_imbalance_pct
+    }
+  };
+}
+
 async function withBatteryFlags(query) {
   try {
     return await query('t.apc_battery_status');
@@ -67,7 +111,7 @@ exports.getMaintenanceDashboard = async (req) => {
     ? [companyId, win.from, win.to, machineId]
     : [companyId, win.from, win.to];
 
-  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, conditionRes, cycleRes] = await Promise.all([
+  const [healthRes, rowsRes, alarmRes, oeeRes, prodRes, conditionRes, cycleRes, supplyRes] = await Promise.all([
 
     /* fleet health: how many machines are reporting and not alarming.
        "Health" is not defined in the agreement, so it is stated plainly
@@ -247,6 +291,12 @@ exports.getMaintenanceDashboard = async (req) => {
             FROM production_hourly
            WHERE ${s.sql}
            GROUP BY hour_start ORDER BY hour_start`, s.params)
+      : Promise.resolve({ rows: [] }),
+
+    /* the supply voltage on the one machine selected: its meter's latest
+       reading within the day or shift, like every other reading here */
+    machineId
+      ? latestSupply(companyId, machineId, win.from, win.to)
       : Promise.resolve({ rows: [] })
   ]);
 
@@ -287,6 +337,7 @@ exports.getMaintenanceDashboard = async (req) => {
     rows:       rowsRes.rows,
     condition_trend: conditionRes.rows,
     cycle_trend: cycleTrend(cycleRes.rows),
+    supply:     supplyOf(supplyRes.rows[0]),
 
     /* Measured, not declared. This used to be a fixed list, true only while
        nothing could store these signals. Now a signal is named here when no
@@ -311,6 +362,7 @@ function cycleTrend(rows) {
 }
 
 exports.cycleTrend = cycleTrend;
+exports.supplyOf = supplyOf;
 
 /** The machine totals as the four OEE figures, null where unmeasurable. */
 function oeeOf(machineRows) {
