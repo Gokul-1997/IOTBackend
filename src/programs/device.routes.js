@@ -4,6 +4,9 @@
  * change the two together.
  *
  *   GET  /ping                     check the token; the device's heartbeat
+ *   GET  /program                  download the current program repeatedly
+ *   GET  /program/info             current program metadata, or file: null
+ *   POST /backup                   save a machine backup, without changing the current program
  *   GET  /jobs/next                the next job for this machine (204: none)
  *   GET  /jobs/:id/file            the program of a SEND job
  *   POST /files                    a program read off the controller (type BACKUP | FETCHED)
@@ -50,6 +53,36 @@ router.use(deviceFailLimiter, deviceAuth, deviceLimiter);
 
 router.get('/ping', handle(async (req, res) => res.json(await service.ping(req.device))));
 
+router.get('/program/info', handle(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(await service.currentInfo(req.device));
+}));
+
+router.get('/program', handle(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const file = await service.currentFile(req.device);
+  const stream = storage.open(file.folder, file.stored_name);
+  // Open before setting a byte length so a missing disk file can still
+  // return a complete JSON error response.
+  await new Promise((resolve, reject) => {
+    stream.once('open', resolve);
+    stream.once('error', err => reject(Object.assign(err, err.code === 'ENOENT'
+      ? { status: 404, code: 'FILE_GONE', message: 'The current program file is unavailable. Upload it again.' } : {})));
+  });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', String(file.size_bytes));
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.program_name)}"`);
+  res.setHeader('X-Program-Name', encodeURIComponent(file.program_name));
+  res.setHeader('X-File-Id', String(file.id));
+  res.setHeader('X-Sha256', file.sha256);
+  res.once('close', () => stream.destroy());
+  await new Promise((resolve, reject) => {
+    stream.once('error', reject);
+    stream.once('end', resolve);
+    stream.pipe(res);
+  });
+}));
+
 router.get('/jobs/next', handle(async (req, res) => {
   const job = await service.nextJob(req.device);
   if (!job) return res.status(204).end();
@@ -76,6 +109,16 @@ router.get('/jobs/:id/file', handle(async (req, res) => {
    same JSON shape as every other error */
 const parseUpload = (req, res) => new Promise((resolve, reject) =>
   upload.single('file')(req, res, err => (err ? reject(err) : resolve())));
+
+router.post('/backup', handle(async (req, res) => {
+  await parseUpload(req, res);
+  const body = req.body || {};
+  const file = await service.uploadFile(req.device, {
+    file: req.file, type: 'BACKUP', program_name: body.program_name,
+    sha256: body.sha256, note: body.note
+  });
+  res.status(201).json({ file });
+}));
 
 router.post('/files', handle(async (req, res) => {
   await parseUpload(req, res);

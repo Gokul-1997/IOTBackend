@@ -1,18 +1,17 @@
 /**
  * Program Transfer, the people's side (/api/programs).
  *
- * The server no longer reaches into the factory. A person uploads a program
- * into the machine's folder and asks for it to be sent, or asks for a
- * program on the controller; each becomes a job, and the machine's device
- * collects it the next time it asks for work (device.service). The device
- * writes the program to the controller — saving what it replaces as a
- * BACKUP first — or uploads what was asked for, and reports back.
+ * A person uploads the current program for a machine; the device can read
+ * that file repeatedly until another upload replaces the publication.
+ * Device backups are kept separately and never change the current file.
+ * Legacy queued SEND/FETCH operations remain available for existing agents.
  */
 const pool = require('../db');
 const storage = require('./storage');
 const jobs = require('./jobs');
 const deviceToken = require('./device-token');
 const audit = require('../audit/audit.service');
+const currentProgram = require('./current-program');
 
 const MAX_JOBS_PER_REQUEST = 50;
 
@@ -40,8 +39,8 @@ async function getMachine(machineId, companyId) {
 }
 
 /**
- * Every machine must say where its programs go before anything is sent to it,
- * read from it, or a device is linked to it: the device saves and reads there.
+ * Legacy SEND/FETCH jobs need a controller path. Direct publication and
+ * device-token creation do not: the machine decides where to use the file.
  */
 function requirePath(machine) {
   if (!machine.program_path) {
@@ -102,9 +101,9 @@ async function insertJob({ companyId, machine, action, programName, fileId = nul
   return jobs.view(job);
 }
 
-async function insertFile({ machine, saved, userId, note }) {
+async function insertFile({ machine, saved, userId, note, db = pool }) {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await db.query(
       `INSERT INTO program_files (company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, uploaded_by, note)
        VALUES ($1, $2, $3, $4, $5, 'NEW', $6, $7, $8, $9)
        RETURNING id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, note, created_at`,
@@ -167,10 +166,12 @@ exports.listFiles = async (req) => {
   const [data, count] = await Promise.all([
     pool.query(
       `SELECT f.id, f.machine_id, m.machine_serial_no, f.folder, f.stored_name, f.program_name, f.kind,
-              f.size_bytes, f.sha256, f.note, f.job_id, f.created_at, u.username AS uploaded_by_name
+              f.size_bytes, f.sha256, f.note, f.job_id, f.created_at, u.username AS uploaded_by_name,
+              (c.file_id IS NOT NULL) AS is_current
          FROM program_files f
          LEFT JOIN machines m ON m.id = f.machine_id
          LEFT JOIN users u    ON u.id = f.uploaded_by
+         LEFT JOIN program_current c ON c.file_id = f.id AND c.machine_id = f.machine_id AND c.company_id = f.company_id
         WHERE ${where}
         ORDER BY f.created_at DESC, f.id DESC
         LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
@@ -179,6 +180,53 @@ exports.listFiles = async (req) => {
     pool.query(`SELECT COUNT(*)::int AS total FROM program_files f WHERE ${where}`, values)
   ]);
   return { data: data.rows, total: count.rows[0].total, page, limit };
+};
+
+/** Publish one immutable file for repeated machine downloads. No job is created. */
+exports.publishCurrentProgram = async (req) => {
+  if (!allowed(req, 'page:programs:upload') || !allowed(req, 'page:programs:transfer')) {
+    throw fail('Uploading a program for the machine is not part of your role.', 'FORBIDDEN', 403);
+  }
+  if (!req.file) throw fail('Choose a program file.', 'NO_FILE');
+  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const body = req.body || {};
+  const saved = await storage.save({
+    machine, kind: 'NEW', programName: body.program_name || req.file.originalname, buffer: req.file.buffer
+  });
+  let client;
+  let file;
+  let committing = false;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    file = await insertFile({ machine, saved, userId: req.user.id, note: body.note, db: client });
+    await client.query(
+      `INSERT INTO program_current (company_id, machine_id, file_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (machine_id) DO UPDATE
+         SET company_id = EXCLUDED.company_id, file_id = EXCLUDED.file_id, updated_at = NOW()`,
+      [machine.company_id, machine.id, file.id]
+    );
+    committing = true;
+    await client.query('COMMIT');
+  } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    // A lost COMMIT response is ambiguous: retain the bytes in case the
+    // publication committed. Earlier failures remove only this new upload.
+    if (!committing) await storage.remove(saved.folder, saved.storedName).catch(() => {});
+    throw err;
+  } finally {
+    if (client) client.release();
+  }
+  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'PROGRAM_PUBLISH', resource: 'program_file',
+    resource_id: file.id, new_value: { machine: machine.machine_serial_no, program_name: file.program_name },
+    ip_address: req.ip, user_agent: req.headers['user-agent'] });
+  return { file: { ...file, is_current: true } };
+};
+
+exports.getCurrentProgram = async (req) => {
+  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  return { file: await currentProgram.get(machine.company_id, machine.id) };
 };
 
 /**
@@ -227,6 +275,11 @@ exports.getFileForDownload = async (req) => getFile(req.params.id, req.user.comp
 /** Delete a file from the folder. Its row stays (deleted_at), so the history still names it. */
 exports.deleteFile = async (req) => {
   const file = await getFile(req.params.id, req.user.company_id);
+  const current = await pool.query(
+    `SELECT file_id FROM program_current WHERE company_id = $1 AND machine_id = $2 AND file_id = $3`,
+    [req.user.company_id, file.machine_id, file.id]
+  );
+  if (current.rows.length) throw fail('Upload a new program before deleting the current machine program.', 'CURRENT_PROGRAM', 409);
   const open = await pool.query(
     `SELECT id FROM program_jobs WHERE file_id = $1 AND status = ANY($2) LIMIT 1`, [file.id, jobs.OPEN]
   );
@@ -380,7 +433,6 @@ exports.cancelJob = async (req) => {
  */
 exports.createDeviceToken = async (req) => {
   const machine = await getMachine(req.params.machineId, req.user.company_id);
-  requirePath(machine);
   const label = req.body?.label ? String(req.body.label).trim().slice(0, 100) : null;
   const { token, hash, prefix } = deviceToken.generate();
 

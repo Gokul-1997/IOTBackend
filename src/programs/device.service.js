@@ -8,6 +8,7 @@ const pool = require('../db');
 const storage = require('./storage');
 const jobs = require('./jobs');
 const { targetFile } = require('./program-path');
+const currentProgram = require('./current-program');
 
 /** How often a device should ask for work, said back on /ping so it can be tuned centrally. */
 const POLL_SECONDS = Number(process.env.DEVICE_POLL_SECONDS) || 15;
@@ -53,12 +54,27 @@ function forDevice(job, device) {
 
 exports.ping = async (device) => ({
   device_id: device.id,
-  machine: { serial: device.machine.machine_serial_no, ip_address: storage.machineIp(device.machine),
+  machine: { id: Number(device.machine.id), serial: device.machine.machine_serial_no, ip_address: storage.machineIp(device.machine),
              // where this machine's programs live: list it, back it up, save new programs there
              program_path: device.machine.program_path || null },
   server_time: new Date().toISOString(),
   poll_seconds: POLL_SECONDS
 });
+
+/** Repeated reads return the same published program until a person uploads another. */
+exports.currentFile = async (device) => {
+  const file = await currentProgram.get(device.company_id, device.machine.id);
+  if (!file) throw fail('No program has been uploaded for this machine yet.', 'NO_PROGRAM', 404);
+  return file;
+};
+
+exports.currentInfo = async (device) => {
+  const file = await currentProgram.get(device.company_id, device.machine.id);
+  return { file: file ? {
+    id: Number(file.id), program_name: file.program_name, size: file.size_bytes,
+    sha256: file.sha256, url: '/api/device/v1/program'
+  } : null };
+};
 
 /**
  * The oldest queued job for this machine, now marked DELIVERED to this

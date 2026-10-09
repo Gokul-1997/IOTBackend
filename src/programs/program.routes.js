@@ -17,6 +17,8 @@ const permit = require('../middleware/permission.middleware');
 const controller = require('./program.controller');
 
 router.get('/machines', auth, permit('page:programs:view'), controller.listMachines);
+router.get('/machines/:machineId/current-program', auth, permit('page:programs:view'), controller.getCurrentProgram);
+router.post('/machines/:machineId/current-program', auth, permit('page:programs:upload'), permit('page:programs:transfer'), controller.publishCurrentProgram);
 router.get('/machines/:machineId/controller-files', auth, permit('page:programs:view'), controller.controllerFiles);
 router.post('/machines/:machineId/device-token', auth, permit('machine.update'), controller.createDeviceToken);
 router.delete('/machines/:machineId/device-token', auth, permit('machine.update'), controller.revokeDeviceToken);

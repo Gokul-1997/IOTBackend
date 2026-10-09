@@ -33,6 +33,17 @@ exports.listMachines = handle(async (req, res) => res.json({ status: 'success', 
 
 exports.controllerFiles = handle(async (req, res) => res.json({ status: 'success', data: await service.controllerFiles(req) }));
 
+exports.getCurrentProgram = handle(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ status: 'success', data: await service.getCurrentProgram(req) });
+});
+
+exports.publishCurrentProgram = handle(async (req, res) => {
+  await parseUpload(req, res);
+  const data = await service.publishCurrentProgram(req);
+  res.status(201).json({ status: 'success', data, message: 'Program ready for the machine' });
+});
+
 exports.listFiles = handle(async (req, res) => {
   const r = await service.listFiles(req);
   res.json({ status: 'success', data: r.data, total: r.total, page: r.page, limit: r.limit });

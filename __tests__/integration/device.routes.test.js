@@ -56,13 +56,106 @@ test('ping names the machine and the poll interval', async () => {
   const res = await request(app).get('/api/device/v1/ping').set(AUTH);
   expect(res.status).toBe(200);
   expect(res.body).toMatchObject({ device_id: 3, poll_seconds: 15,
-    machine: { serial: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/' } });
+    machine: { id: 7, serial: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/' } });
 });
 
 test('ping: a machine with no IP set gives the IP its controller reports', async () => {
   authRow({ ip_address: null, controller_ip: '192.168.200.1' });
   const res = await request(app).get('/api/device/v1/ping').set(AUTH);
   expect(res.body.machine.ip_address).toBe('192.168.200.1');
+});
+
+describe('direct program download and backup', () => {
+  const binary = (r, cb) => {
+    const chunks = [];
+    r.on('data', chunk => chunks.push(chunk));
+    r.on('end', () => cb(null, Buffer.concat(chunks)));
+  };
+
+  test('the same current program can be downloaded repeatedly, with identity headers and no jobs', async () => {
+    const body = Buffer.from('%\nO8001\nG0 X25\nM30\n%\n');
+    const saved = await storage.save({ machine, kind: 'NEW', programName: 'O8001.nc', buffer: body });
+    const file = { id: '81', machine_id: 7, program_name: 'O8001.nc', folder: saved.folder, stored_name: saved.storedName,
+      size_bytes: saved.size, sha256: saved.sha256 };
+    for (let n = 0; n < 2; n++) {
+      authRow({ program_path: null });
+      mockDb.queueResponse(one(file));
+      const res = await request(app).get('/api/device/v1/program?machine_id=999').set(AUTH).buffer(true).parse(binary);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(body);
+      expect(res.headers).toMatchObject({
+        'x-file-id': '81', 'x-program-name': 'O8001.nc', 'x-sha256': saved.sha256,
+        'cache-control': 'no-store', 'content-type': 'application/octet-stream', 'content-length': String(body.length)
+      });
+    }
+    const lookups = mockDb.calls().filter(call => /FROM program_current/.test(call.text));
+    expect(lookups).toHaveLength(2);
+    for (const lookup of lookups) {
+      expect(lookup.params).toEqual([5, 7]); // Query parameters never override the device's scope.
+      expect(lookup.text).toMatch(/c\.company_id = \$1 AND c\.machine_id = \$2/);
+      expect(lookup.text).toMatch(/f\.company_id = c\.company_id AND f\.machine_id = c\.machine_id/);
+    }
+    expect(mockDb.calls().some(call => /program_jobs|UPDATE program_current/.test(call.text))).toBe(false);
+  });
+
+  test('no publication returns an actionable JSON 404, while metadata returns file:null', async () => {
+    authRow();
+    const download = await request(app).get('/api/device/v1/program').set(AUTH);
+    expect(download.status).toBe(404);
+    expect(download.body).toMatchObject({ status: 'error', code: 'NO_PROGRAM' });
+    expect(download.headers['cache-control']).toBe('no-store');
+    expect(download.headers['content-type']).toMatch(/application\/json/);
+    authRow();
+    const info = await request(app).get('/api/device/v1/program/info').set(AUTH);
+    expect(info.status).toBe(200);
+    expect(info.body).toEqual({ file: null });
+    expect(info.headers['cache-control']).toBe('no-store');
+  });
+
+  test('metadata exposes the published file ID, checksum and direct download URL', async () => {
+    authRow();
+    mockDb.queueResponse(one({ id: '81', program_name: 'O8001.nc', size_bytes: 42, sha256: 'a'.repeat(64) }));
+    const res = await request(app).get('/api/device/v1/program/info').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ file: { id: 81, program_name: 'O8001.nc', size: 42, sha256: 'a'.repeat(64), url: '/api/device/v1/program' } });
+  });
+
+  test('a missing disk file returns a complete JSON response instead of a truncated program', async () => {
+    authRow();
+    mockDb.queueResponse(one({ id: '82', program_name: 'O_MISSING.nc', folder: 'company-5/machine-7', stored_name: 'missing.nc', size_bytes: 1234 }));
+    const res = await request(app).get('/api/device/v1/program').set(AUTH);
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ code: 'FILE_GONE' });
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(res.headers['content-length']).not.toBe('1234');
+  });
+
+  test('backup is saved separately even if the request includes job or type fields', async () => {
+    const current = { id: '81', program_name: 'O8001.nc', size_bytes: 42, sha256: 'a'.repeat(64) };
+    authRow();
+    mockDb.queueResponse(one({ id: '90', program_name: 'O8001.nc', kind: 'BACKUP', folder: 'f', stored_name: 'backup.nc', size_bytes: 3, sha256: 'x', created_at: 'now' }));
+    const res = await request(app).post('/api/device/v1/backup').set(AUTH)
+      .field('type', 'NEW').field('job_id', '11').field('machine_id', '999').attach('file', Buffer.from('M30'), 'O8001.nc');
+    expect(res.status).toBe(201);
+    expect(res.body.file).toMatchObject({ id: 90, kind: 'BACKUP', program_name: 'O8001.nc' });
+    const write = mockDb.calls().find(call => /INSERT INTO program_files/.test(call.text));
+    expect(write.params.slice(0, 2)).toEqual([5, 7]);
+    expect(write.params[5]).toBe('BACKUP');
+    expect(write.params[9]).toBeNull();
+    expect(mockDb.calls().some(call => /program_current|program_jobs/.test(call.text))).toBe(false);
+    authRow();
+    mockDb.queueResponse(one(current));
+    const info = await request(app).get('/api/device/v1/program/info').set(AUTH);
+    expect(info.body.file.id).toBe(81);
+  });
+
+  test('device credentials are required for both direct endpoints', async () => {
+    const download = await request(app).get('/api/device/v1/program');
+    const backup = await request(app).post('/api/device/v1/backup').attach('file', Buffer.from('M30'), 'O1.nc');
+    expect(download.status).toBe(401);
+    expect(backup.status).toBe(401);
+    expect(mockDb.calls()).toHaveLength(0);
+  });
 });
 
 describe('GET /jobs/next', () => {
@@ -72,6 +165,8 @@ describe('GET /jobs/next', () => {
     expect(res.status).toBe(204);
     const take = mockDb.calls()[1];
     expect(take.text).toMatch(/FOR UPDATE SKIP LOCKED/);
+    expect(take.text).toMatch(/SET status = 'DELIVERED'/);
+    expect(take.text).toMatch(/machine_id = \$1 AND company_id = \$3 AND status = 'QUEUED'/);
     expect(take.params).toEqual([7, 3, 5]);            // its own machine, company and device only
   });
 
@@ -86,6 +181,26 @@ describe('GET /jobs/next', () => {
       requested_at: '2026-10-05T05:00:00Z', requested_by: 'Priya',
       file: { size: 24, sha256: 'a'.repeat(64), url: '/api/device/v1/jobs/11/file' }
     });
+  });
+
+  test('an empty next poll does not remove the file of the job already claimed', async () => {
+    const body = Buffer.from('%\nO1234\nM30\n%\n');
+    const saved = await storage.save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: body });
+    authRow();
+    mockDb.queueResponse(one({ id: '11' }), one(jobRow({ file_size: saved.size, file_sha256: saved.sha256 })));
+    const claimed = await request(app).get('/api/device/v1/jobs/next').set(AUTH);
+    expect(claimed.status).toBe(200);
+
+    authRow();
+    const next = await request(app).get('/api/device/v1/jobs/next').set(AUTH);
+    expect(next.status).toBe(204);
+
+    authRow();
+    mockDb.queueResponse(one(jobRow()), one({ folder: saved.folder, stored_name: saved.storedName, size_bytes: saved.size, sha256: saved.sha256 }));
+    const downloaded = await request(app).get(claimed.body.job.file.url).set(AUTH).buffer(true)
+      .parse((r, cb) => { const chunks = []; r.on('data', d => chunks.push(d)); r.on('end', () => cb(null, Buffer.concat(chunks))); });
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.body.equals(body)).toBe(true);
   });
 });
 

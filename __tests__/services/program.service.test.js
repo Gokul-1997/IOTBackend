@@ -73,9 +73,20 @@ describe('uploading a program', () => {
     const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
     expect(job.params).toEqual([5, 7, 'VMC-1', 'SEND', 'O1234.nc', '40', false, 2, '//CNC_MEM/USER/PATH1/']);
   });
+
+  test.each([undefined, 'false'])('send=%s only saves the file; it creates no device work', async (send) => {
+    mockDb.queueResponse(
+      one(machine7),
+      one({ id: '42', machine_id: 7, program_name: 'O1234.nc', kind: 'NEW' })
+    );
+    const result = await svc.uploadFile(upload(send === undefined ? {} : { send }));
+    expect(result.file).toMatchObject({ id: '42', kind: 'NEW' });
+    expect(result.job).toBeNull();
+    expect(mockDb.calls().some(call => /INSERT INTO program_jobs/.test(call.text))).toBe(false);
+  });
 });
 
-describe('every machine must have its program path', () => {
+describe('legacy queued jobs must have their program path', () => {
   const noPath = { ...machine7, program_path: null };
 
   test('nothing is sent to a machine without one, and nothing is written', async () => {
@@ -85,12 +96,10 @@ describe('every machine must have its program path', () => {
     expect(folderFiles(noPath).filter(f => /_O1\.nc$/.test(f))).toEqual([]);
   });
 
-  test('nothing is fetched from it, and no device is linked to it', async () => {
+  test('nothing is fetched from it', async () => {
     mockDb.queueResponse(one(noPath));
     await expect(svc.createJobs(req({ body: { action: 'FETCH', machine_id: 7, program_names: ['O1'] } })))
       .rejects.toMatchObject({ code: 'NO_PROGRAM_PATH' });
-    mockDb.queueResponse(one(noPath));
-    await expect(svc.createDeviceToken(req({ params: { machineId: '7' } }))).rejects.toMatchObject({ code: 'NO_PROGRAM_PATH' });
   });
 
   test('a plain upload into the server folder does not need it', async () => {
@@ -149,11 +158,18 @@ describe('jobs', () => {
 });
 
 test('a file waiting to be sent cannot be deleted', async () => {
-  mockDb.queueResponse(one({ id: '40', company_id: 5, folder: 'f', stored_name: 's' }), one({ id: '11' }));
+  mockDb.queueResponse(one({ id: '40', company_id: 5, folder: 'f', stored_name: 's' }), none, one({ id: '11' }));
   await expect(svc.deleteFile(req({ params: { id: '40' } }))).rejects.toMatchObject({ status: 409, code: 'IN_USE' });
 });
 
 describe('device tokens', () => {
+  test('the direct download token can be created without a controller program path', async () => {
+    mockDb.queueResponse(one({ ...machine7, program_path: null }), none, none,
+      one({ id: 9, machine_id: 7, label: null, token_prefix: 'mxd_abcdefgh', created_at: 'now' }), none);
+    const result = await svc.createDeviceToken(req({ params: { machineId: '7' } }));
+    expect(result.token).toMatch(deviceToken.SHAPE);
+    expect(result.device.program_path).toBeNull();
+  });
   test('a new token replaces the old one; only its hash and prefix are stored or logged', async () => {
     mockDb.queueResponse(
       one(machine7),
@@ -198,4 +214,87 @@ test('the machine list shows the IP the controller reports when none is set, and
 test('"O1234.nc" and "o1234" are the same program to a controller', () => {
   expect(svc._internal.sameProgram('O1234.nc', 'o1234')).toBe(true);
   expect(svc._internal.sameProgram('O1234.nc', 'O12345')).toBe(false);
+});
+
+describe('direct current program publication', () => {
+  const publishRequest = (overrides = {}) => req({
+    params: { machineId: '7' }, body: {}, file: { originalname: 'O7001.nc', buffer: program }, ...overrides
+  });
+
+  test.each([
+    ['page:programs:upload'], ['page:programs:transfer'], ['page:programs:view']
+  ])('both upload and transfer permissions are required (%s alone is denied)', async permission => {
+    await expect(svc.publishCurrentProgram(publishRequest({ user: user([permission]) })))
+      .rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('a machine outside the caller company is refused before a file is saved', async () => {
+    const before = folderFiles(machine7);
+    mockDb.queueResponse(none);
+    await expect(svc.publishCurrentProgram(publishRequest({ user: { ...user(), company_id: 9 } })))
+      .rejects.toMatchObject({ status: 404, code: 'MACHINE_NOT_FOUND' });
+    expect(mockDb.calls()[0].params).toEqual([7, 9]);
+    expect(folderFiles(machine7)).toEqual(before);
+  });
+
+  test('saves the file and publishes its pointer in one transaction without a path or jobs', async () => {
+    mockDb.queueResponse(
+      one({ ...machine7, program_path: null }), none,
+      one({ id: '70', machine_id: 7, program_name: 'O7001.nc', kind: 'NEW' }), none, none
+    );
+    const result = await svc.publishCurrentProgram(publishRequest());
+    expect(result).toEqual({ file: { id: '70', machine_id: 7, program_name: 'O7001.nc', kind: 'NEW', is_current: true } });
+    const calls = mockDb.calls();
+    expect(calls[1].text).toBe('BEGIN');
+    expect(calls[2].text).toMatch(/INSERT INTO program_files/);
+    expect(calls[3].text).toMatch(/INSERT INTO program_current/);
+    expect(calls[3].params).toEqual([5, 7, '70']);
+    expect(calls[4].text).toBe('COMMIT');
+    expect(calls.some(call => /program_jobs/.test(call.text))).toBe(false);
+    const insert = calls[2];
+    expect(fs.readFileSync(path.join(storage.ROOT, insert.params[2], insert.params[3]))).toEqual(program);
+  });
+
+  test('a publication failure rolls back its row and removes only the new file', async () => {
+    const old = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O_OLD.nc', buffer: program });
+    const before = folderFiles(machine7);
+    mockDb.queueResponse(one(machine7), none,
+      one({ id: '71', machine_id: 7, program_name: 'O7002.nc', kind: 'NEW' }), new Error('pointer write failed'), none);
+    await expect(svc.publishCurrentProgram(publishRequest({ file: { originalname: 'O7002.nc', buffer: program } })))
+      .rejects.toThrow('pointer write failed');
+    expect(mockDb.calls().some(call => call.text === 'ROLLBACK')).toBe(true);
+    expect(mockDb.calls().some(call => call.text === 'COMMIT')).toBe(false);
+    expect(folderFiles(machine7)).toEqual(before);
+    expect(fs.readFileSync(path.join(storage.ROOT, old.folder, old.storedName))).toEqual(program);
+  });
+
+  test('current metadata is null until an explicit publication and always company and machine scoped', async () => {
+    mockDb.queueResponse(one(machine7), none);
+    await expect(svc.getCurrentProgram(req({ params: { machineId: '7' } }))).resolves.toEqual({ file: null });
+    const lookup = mockDb.calls()[1];
+    expect(lookup.params).toEqual([5, 7]);
+    expect(lookup.text).toMatch(/c\.company_id = \$1 AND c\.machine_id = \$2/);
+    expect(lookup.text).toMatch(/f\.company_id = c\.company_id AND f\.machine_id = c\.machine_id/);
+    expect(lookup.text).toMatch(/f\.deleted_at IS NULL AND m\.is_active = true/);
+  });
+
+  test('the published file cannot be deleted while devices can download it', async () => {
+    const saved = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O_KEEP.nc', buffer: program });
+    mockDb.queueResponse(one({ id: '72', company_id: 5, machine_id: 7, folder: saved.folder, stored_name: saved.storedName }),
+      one({ file_id: '72' }));
+    await expect(svc.deleteFile(req({ params: { id: '72' } }))).rejects.toMatchObject({ status: 409, code: 'CURRENT_PROGRAM' });
+    expect(mockDb.calls()[1].params).toEqual([5, 7, '72']);
+    expect(fs.readFileSync(path.join(storage.ROOT, saved.folder, saved.storedName))).toEqual(program);
+    expect(mockDb.calls()).toHaveLength(2);
+  });
+
+  test('file history marks only the current pointer with the same company and machine', async () => {
+    mockDb.queueResponse(one({ id: '70', is_current: true, kind: 'NEW' }), one({ total: 1 }));
+    const result = await svc.listFiles(req({ query: { machine_id: 7 } }));
+    expect(result.data[0].is_current).toBe(true);
+    const lookup = mockDb.calls()[0];
+    expect(lookup.params.slice(0, 2)).toEqual([5, 7]);
+    expect(lookup.text).toMatch(/c\.file_id = f\.id AND c\.machine_id = f\.machine_id AND c\.company_id = f\.company_id/);
+  });
 });
