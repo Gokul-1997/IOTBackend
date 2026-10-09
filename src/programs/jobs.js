@@ -6,6 +6,7 @@
 const pool = require('../db');
 const { emitToUser } = require('../lib/realtime');
 const { targetFile } = require('./program-path');
+const { announceUnread } = require('../notifications/notification.service');
 
 /** A device that called within this window counts as online (it calls every ~15 s). */
 const ONLINE_WINDOW_SEC = 60;
@@ -69,6 +70,8 @@ async function announce(job) {
   } catch (err) {
     console.error('Program job notification failed:', err.message);
   }
+  // their open screens show the new unread count at once
+  await announceUnread([job.requested_by]);
 }
 
 /** Finish a job that is still open; returns the job, or null when it was not open. */

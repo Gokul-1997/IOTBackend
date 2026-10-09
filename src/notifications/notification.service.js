@@ -1,4 +1,5 @@
 const db = require('../db');
+const realtime = require('../lib/realtime');
 
 exports.getNotifications = async ({ user_id, company_id, page = 1, limit = 20, unread_only }) => {
   const conditions = [`n.user_id = $1`];
@@ -46,6 +47,33 @@ exports.markAllRead = async (user_id) => {
      WHERE user_id = $1 AND is_read = false`,
     [user_id]
   );
+};
+
+/**
+ * Tell these people's open screens their unread count, over the live
+ * connection (event `unreadCount`, room user:<id>): after notifications are
+ * created for them, and after they read some — so every tab and device they
+ * have open shows the new count at once, without asking the server every
+ * few seconds. One query for all of them; a user with nothing unread is told
+ * 0. Best effort: a failure here never fails what caused it.
+ */
+exports.announceUnread = async (userIds = []) => {
+  if (!realtime.isLive()) return;
+  const ids = [...new Set(userIds.map(Number).filter(n => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return;
+  try {
+    const { rows } = await db.query(
+      `SELECT user_id, COUNT(*)::int AS count
+         FROM notifications
+        WHERE user_id = ANY($1::int[]) AND is_read = false
+        GROUP BY user_id`,
+      [ids]
+    );
+    const counts = new Map(rows.map(r => [Number(r.user_id), Number(r.count)]));
+    for (const id of ids) realtime.emitToUser(id, 'unreadCount', { count: counts.get(id) || 0 });
+  } catch (err) {
+    console.error('Unread count announce failed:', err.message);
+  }
 };
 
 exports.getUnreadCount = async (user_id) => {

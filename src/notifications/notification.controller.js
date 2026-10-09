@@ -12,6 +12,8 @@ exports.getNotifications = async (req, res) => {
 exports.markRead = async (req, res) => {
   try {
     await service.markRead({ user_id: req.user.id, notification_id: req.params.id });
+    // the person's other tabs and devices show the new count at once
+    service.announceUnread([req.user.id]);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
@@ -21,6 +23,7 @@ exports.markRead = async (req, res) => {
 exports.markAllRead = async (req, res) => {
   try {
     await service.markAllRead(req.user.id);
+    service.announceUnread([req.user.id]);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });

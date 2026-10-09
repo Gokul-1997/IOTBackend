@@ -19,10 +19,15 @@ function emitToUser(userId, event, payload) {
   io.to(`user:${userId}`).emit(event, payload);
 }
 
+/** Whether this process serves sockets (the API does; cron-only processes and tests do not). */
+function isLive() {
+  return !!io;
+}
+
 /** Close every open socket these users have — live data stops at once. */
 function disconnectUsers(userIds = []) {
   if (!io || !userIds.length) return;
   io.in(userIds.map(id => `user:${id}`)).disconnectSockets(true);
 }
 
-module.exports = { setIo, emitToUser, disconnectUsers };
+module.exports = { setIo, emitToUser, disconnectUsers, isLive };

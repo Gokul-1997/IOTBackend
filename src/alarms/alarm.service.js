@@ -1,5 +1,6 @@
 const db = require('../db');
 const { sendBulkEmails } = require('../utils/nodemailer');
+const { announceUnread } = require('../notifications/notification.service');
 
 exports.createAlarm = async ({ company_id, machine_id, alarm_type, severity, message }) => {
   // Check if there's already an open alarm for this machine+type
@@ -124,6 +125,8 @@ exports.createAlarmNotification = async (company_id, machine_id, alarm_type, mes
       [company_id, alarm_type === 'ALARM' ? 'ALARM' : 'WARNING', `${alarm_type} — ${machineName}`,
        message || '', usersRes.rows.map(u => u.id), usersRes.rows.map(u => u.link)]
     );
+    // each recipient's open screens show the new count at once
+    await announceUnread(usersRes.rows.map(u => u.id));
   } catch (err) {
     console.error('createAlarmNotification error:', err.message);
   }
