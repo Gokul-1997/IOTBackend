@@ -181,6 +181,11 @@ async function bySeverity(filter) {
  * generate_series supplies the days, so a quiet day is a zero on the chart
  * rather than a missing point that makes the line jump straight from
  * Tuesday to Thursday.
+ *
+ * The selection is counted per plant-time day first and only then laid on
+ * the days. Joining every alarm to the days on its date (and testing it
+ * against the selection) read the whole alarm table — every company's,
+ * every year's — once per request, and grew slower every week.
  */
 async function trend(filter, { start, end }) {
   const params = [...filter.params, start, end];
@@ -193,17 +198,21 @@ async function trend(filter, { start, end }) {
                 COALESCE(${s}::timestamptz, NOW() - INTERVAL '7 days')::date,
                 COALESCE(${e}::timestamptz, NOW())::date,
                 INTERVAL '1 day')::date AS day
+     ),
+     hits AS (
+       SELECT (a.started_at AT TIME ZONE 'Asia/Kolkata')::date              AS day,
+              COUNT(*)::int                                                 AS total,
+              COUNT(*) FILTER (WHERE UPPER(a.severity) = '${CRITICAL}')::int AS critical
+         FROM machine_alarms a
+         LEFT JOIN machines m ON m.id = a.machine_id
+         ${filter.sql}
+        GROUP BY 1
      )
      SELECT d.day,
-            COUNT(a.id)::int                                                 AS total,
-            COUNT(a.id) FILTER (WHERE UPPER(a.severity) = '${CRITICAL}')::int AS critical
+            COALESCE(h.total, 0)::int    AS total,
+            COALESCE(h.critical, 0)::int AS critical
        FROM days d
-       LEFT JOIN machine_alarms a
-              ON (a.started_at AT TIME ZONE 'Asia/Kolkata')::date = d.day
-             AND a.id IN (SELECT a2.id FROM machine_alarms a2
-                          LEFT JOIN machines m ON m.id = a2.machine_id
-                          ${filter.sql.replace(/\ba\./g, 'a2.')})
-      GROUP BY d.day
+       LEFT JOIN hits h ON h.day = d.day
       ORDER BY d.day`,
     params
   );
@@ -231,24 +240,28 @@ async function longest(filter) {
   return rows[0] || null;
 }
 
-/** Alarms hour by hour over one IST day — the design's "Alarms Trend (By Hour)". */
+/** Alarms hour by hour over one IST day — the design's "Alarms Trend (By Hour)". Counted first, then laid on the hours, as trend(). */
 async function hourlyTrend(filter, day) {
   const params = [...filter.params, day];
   const d = `$${params.length}`;
   const { rows } = await pool.query(
-    `WITH hours AS (SELECT generate_series(0, 23) AS h)
-     SELECT h.h AS hour,
-            COUNT(a.id)::int                                                 AS total,
-            COUNT(a.id) FILTER (WHERE UPPER(a.severity) = '${CRITICAL}')::int AS critical
-       FROM hours h
-       LEFT JOIN machine_alarms a
-              ON (a.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${d}::date
-             AND EXTRACT(HOUR FROM a.started_at AT TIME ZONE 'Asia/Kolkata')::int = h.h
-             AND a.id IN (SELECT a2.id FROM machine_alarms a2
-                          LEFT JOIN machines m ON m.id = a2.machine_id
-                          ${filter.sql.replace(/\ba\./g, 'a2.')})
-      GROUP BY h.h
-      ORDER BY h.h`,
+    `WITH hours AS (SELECT generate_series(0, 23) AS h),
+     hits AS (
+       SELECT EXTRACT(HOUR FROM a.started_at AT TIME ZONE 'Asia/Kolkata')::int  AS h,
+              COUNT(*)::int                                                 AS total,
+              COUNT(*) FILTER (WHERE UPPER(a.severity) = '${CRITICAL}')::int AS critical
+         FROM machine_alarms a
+         LEFT JOIN machines m ON m.id = a.machine_id
+         ${filter.sql}
+          AND (a.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${d}::date
+        GROUP BY 1
+     )
+     SELECT hours.h AS hour,
+            COALESCE(hits.total, 0)::int    AS total,
+            COALESCE(hits.critical, 0)::int AS critical
+       FROM hours
+       LEFT JOIN hits ON hits.h = hours.h
+      ORDER BY hours.h`,
     params
   );
   return rows;

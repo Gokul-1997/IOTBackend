@@ -101,7 +101,10 @@ exports.getPreventiveDashboard = async (req) => {
         COUNT(*) FILTER (WHERE t.status = ANY($${statusIdx}::ticket_status[]))::int AS open,
         COUNT(*) FILTER (WHERE t.status IN ('RESOLVED','CLOSED'))::int         AS completed,
         COUNT(*) FILTER (WHERE t.status = ANY($${statusIdx}::ticket_status[])
-                           AND t.due_date IS NOT NULL AND t.due_date < NOW())::int AS overdue
+                           AND t.due_date IS NOT NULL AND t.due_date < NOW())::int AS overdue,
+        -- the company's alarm rules: none at all is a setup gap the page says
+        -- in words, without loading the rules to know
+        (SELECT COUNT(*) FROM alarm_thresholds th WHERE th.company_id = $1)::int AS rules
       FROM maintenance_tickets t
       WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
       [...ticketParams, OPEN_STATUSES]
@@ -277,7 +280,8 @@ exports.getPreventiveDashboard = async (req) => {
         pm_completed:         ticketKpiRes.rows[0].completed,
         pm_overdue:           ticketKpiRes.rows[0].overdue,
         avg_resolution_hours: resolutionRes.rows[0].avg_resolution_hours,
-        resolved_count:       resolutionRes.rows[0].resolved_count
+        resolved_count:       resolutionRes.rows[0].resolved_count,
+        rules:                ticketKpiRes.rows[0].rules
       }
     }),
 

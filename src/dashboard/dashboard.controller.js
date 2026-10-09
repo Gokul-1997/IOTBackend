@@ -17,6 +17,20 @@ const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
 const { toCsv, tablePdf } = require('../utils/export.util');
+const dashCache     = require('./cache');
+
+/**
+ * A dashboard's answer, shared by everyone in the company who asks for the
+ * same filters at about the same time (see cache.js): worked out once, not
+ * once per person. `live`: the answer is about now whatever the dates (a
+ * backlog, what is overdue), so it is never kept as history.
+ */
+async function sendShared(res, name, req, compute, { live = false } = {}) {
+  const ttl = live ? dashCache.LIVE_TTL : dashCache.ttlFor(req.query);
+  const body = await dashCache.json(name, req.user.company_id, req.query, ttl,
+    async () => ({ status: 'success', data: await compute() }));
+  return res.type('application/json').send(body);
+}
 
 /* =====================================================
    DASHBOARD (Paginated Machine Cards)
@@ -145,8 +159,7 @@ exports.machineDetail = async (req, res) => {
 
 exports.energy = async (req, res) => {
   try {
-    const data = await energySvc.getEnergy({ ...req.query, company_id: req.user.company_id });
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'energy', req, () => energySvc.getEnergy({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Energy dashboard error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -263,8 +276,7 @@ exports.exportOee = async (req, res) => {
 
 exports.operators = async (req, res) => {
   try {
-    const data = await operatorSvc.getOperators({ ...req.query, company_id: req.user.company_id });
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'operators', req, () => operatorSvc.getOperators({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Operator dashboard error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -312,8 +324,7 @@ exports.exportOperators = async (req, res) => {
 
 exports.downtime = async (req, res) => {
   try {
-    const data = await downtimeSvc.getDowntime({ ...req.query, company_id: req.user.company_id });
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'downtime', req, () => downtimeSvc.getDowntime({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Downtime dashboard error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -360,8 +371,7 @@ exports.exportDowntime = async (req, res) => {
 
 exports.alarms = async (req, res) => {
   try {
-    const data = await alarmSvc.getAlarms({ ...req.query, company_id: req.user.company_id });
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'alarms', req, () => alarmSvc.getAlarms({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Alarm dashboard error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -412,7 +422,7 @@ exports.exportAlarms = async (req, res) => {
 
 exports.periodic = async (req, res) => {
   try {
-    const data = await periodicSvc.getPeriodic({
+    return await sendShared(res, 'periodic', req, () => periodicSvc.getPeriodic({
       company_id: req.user.company_id,
       machine_id: req.query.machine_id,
       search:     req.query.search,
@@ -421,8 +431,7 @@ exports.periodic = async (req, res) => {
       page:       req.query.page,
       limit:      req.query.limit,
       part:       req.query.part
-    });
-    return res.json({ status: 'success', data });
+    }), { live: true });
   } catch (err) {
     console.error('Periodic dashboard error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -530,8 +539,7 @@ exports.exportPeriodic = async (req, res) => {
 /* Phase 2 · Screen 3 — Preventive Maintenance Dashboard */
 exports.preventive = async (req, res) => {
   try {
-    const data = await preventiveSvc.getPreventiveDashboard(req);
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'preventive', req, () => preventiveSvc.getPreventiveDashboard(req), { live: true });
   } catch (err) {
     console.error('Preventive dashboard error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -605,8 +613,7 @@ exports.factory = async (req, res) => {
 
 exports.maintenanceReport = async (req, res) => {
   try {
-    const data = await maintReportSvc.getReport({ ...req.query, company_id: req.user.company_id });
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'maintenance-report', req, () => maintReportSvc.getReport({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Maintenance report error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });

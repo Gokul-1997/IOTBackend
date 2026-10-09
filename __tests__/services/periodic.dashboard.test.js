@@ -118,6 +118,17 @@ describe('KPI counts', () => {
   });
 });
 
+describe('whether there is a plan at all', () => {
+  test('the tiles say how many schedules the company has — whatever machine is chosen — so the page need not load the plan to know', async () => {
+    queueDashboard({ plans: '0' });
+    const d = await svc.getPeriodic({ company_id, machine_id: 36 });
+    expect(d.kpis.plans).toBe(0);
+
+    const sql = mockDb.calls()[0].text;
+    expect(sql).toMatch(/FROM maintenance_schedules s\s+WHERE s\.company_id = \$1 AND s\.frequency IS NOT NULL\)\s+AS plans/);
+  });
+});
+
 describe('the ticket table', () => {
   test('orders by a total order so pages cannot repeat a row', async () => {
     queueDashboard();

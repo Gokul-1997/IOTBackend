@@ -75,7 +75,7 @@ const cases = [
     sql: { kpis: /FROM production_hourly/, charts: /GROUP BY r\.category/, table: /ORDER BY e\.started_at DESC/ } },
   { name: 'Energy', call: part => energy.getEnergy({ company_id, ...range, part }),
     keys: { kpis: ['kpis', 'coverage'], charts: ['trend', 'by_shift', 'by_month', 'top_consumers'], table: ['machines'] },
-    sql: { charts: /date_trunc\('month'/ } },
+    sql: { charts: /GROUP BY s\.shift_name, ph\.shift_id/ } },
   { name: 'Maintenance Report', call: part => report.getReport({ company_id, ...range, part }),
     keys: { kpis: ['kpis'], charts: ['by_type', 'by_status', 'trend'], table: ['tickets'] },
     sql: { kpis: /AS mttr_basis/, charts: /GROUP BY t\.issue_type/, table: /LIMIT \$\d+ OFFSET/ } },
@@ -160,12 +160,14 @@ describe('what two parts share', () => {
     expect(await periodic.getPeriodic({ company_id, part: 'table' })).not.toHaveProperty('technician_workload');
   });
 
-  test('Energy: the daily trend draws a chart and gives the tiles "vs yesterday"; the table needs neither', async () => {
-    await energy.getEnergy({ company_id, part: 'kpis' });
-    expect(ran(/generate_series|date_trunc\('day'/)).toBe(true);
-    sql = [];
-    await energy.getEnergy({ company_id, part: 'table' });
-    expect(ran(/generate_series|date_trunc\('day'|date_trunc\('month'/)).toBe(false);
+  test('Energy: one pass over the meter counters serves every part (machines, days, months); only the charts split by shift', async () => {
+    for (const part of ['kpis', 'charts', 'table', undefined]) {
+      sql = [];
+      await energy.getEnergy({ company_id, part });
+      // per machine, per day and per month from the same readings: it was a pass for each
+      expect(sql.filter(t => /LAG\(t\.energy\)/.test(t))).toHaveLength(1);
+      expect(ran(/GROUP BY s\.shift_name/)).toBe(part === 'charts' || part === undefined);
+    }
   });
 
   test('Preventive: the status split and trigger summary, which no screen draws, only in the full answer', async () => {
@@ -178,6 +180,6 @@ describe('what two parts share', () => {
 
   test('the energy and operator exports ask for the table alone', async () => {
     await energy.getExportRows({ company_id });
-    expect(ran(/generate_series|date_trunc\('month'/)).toBe(false);
+    expect(ran(/GROUP BY s\.shift_name/)).toBe(false);
   });
 });

@@ -39,6 +39,7 @@
 const pool = require('../db');
 const { parsePart } = require('./parts');
 const oeeSvc = require('./oee.dashboard.service');
+const cache = require('./cache');
 
 /** Score bands, lowest bound of each. Below `average` needs help. */
 const SCORE_BANDS = { excellent: 75, good: 60, average: 45 };
@@ -265,11 +266,18 @@ exports.getOperators = async (q = {}) => {
   const sort       = SORTABLE.has(q.sort) ? q.sort : 'score';
   const dir        = q.dir === 'asc' ? 'asc' : 'desc';
 
-  const [links, machineRows, operator_list] = await Promise.all([
-    assignments({ companyId, start, end, machineId, operatorId, search }),
-    oeeSvc.machineTotals({ companyId, machineId, shiftId, start, end }),
-    operatorOptions(companyId)
-  ]);
+  /* Every part, every page and every sort of the table rests on these three,
+     so they are read once per company and filters and shared (cache.js):
+     paging or sorting the table does not add up the machines again. */
+  const { links, machineRows, operator_list } = await cache.remember('operators:figures', companyId,
+    { start, end, machineId, shiftId, operatorId, search }, cache.ttlFor(q), async () => {
+      const [links, machineRows, operator_list] = await Promise.all([
+        assignments({ companyId, start, end, machineId, operatorId, search }),
+        oeeSvc.machineTotals({ companyId, machineId, shiftId, start, end }),
+        operatorOptions(companyId)
+      ]);
+      return { links, machineRows, operator_list };
+    });
 
   const machinesById = new Map(
     machineRows.map(r => [r.machine_id, oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS)])

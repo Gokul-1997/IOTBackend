@@ -1,7 +1,8 @@
 /*
  * An in-memory stand-in for src/redis.js (an ioredis client) for tests —
- * the commands the app uses: get / set (EX) / setex / del, multi().exec(),
- * publish, and call() for the rate limiters' store.
+ * the commands the app uses: get / set (EX) / setex / del / incr,
+ * multi().exec(), publish, and call() for the rate limiters' store; and
+ * flushall() for a test to start from nothing.
  *
  * status is never 'ready', so the rate limiters skip, exactly as they do in
  * production when Redis is down.
@@ -27,6 +28,12 @@ function createFakeRedis() {
       return 'OK';
     },
     async setex(key, ttlSeconds, value) { write(key, value, Number(ttlSeconds)); return 'OK'; },
+    async flushall() { store.clear(); return 'OK'; },
+    async incr(key) {
+      const n = (Number(read(key)) || 0) + 1;
+      write(key, n, null);
+      return n;
+    },
     async del(...keys) {
       let removed = 0;
       for (const key of keys.flat()) if (store.delete(key)) removed++;

@@ -34,6 +34,7 @@
 
 const pool = require('../db');
 const { parsePart, when } = require('./parts');
+const cache = require('./cache');
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -108,12 +109,18 @@ const DAILY_ENERGY_CTE = `
      *
      * The delta is attributed to the day of the later reading, so overnight
      * consumption lands on the day it finished rather than being lost.
+     *
+     * A rise no bigger than the smallest limit (${MAX_KW} kW over
+     * ${MIN_WINDOW_SEC / 60} minutes) cannot be a misread, so it is kept
+     * without working out its own limit — the same answer, without exact
+     * decimal arithmetic on every one of millions of readings.
      */
     SELECT machine_id,
            (received_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
            CASE
              WHEN prev_energy IS NULL THEN NULL
              WHEN energy <= prev_energy THEN 0
+             WHEN energy - prev_energy <= (${MAX_KW} * ${MIN_WINDOW_SEC} / 3600.0)::float8 THEN energy - prev_energy
              WHEN energy - prev_energy
                   > ${MAX_KW} * GREATEST(EXTRACT(EPOCH FROM received_at - prev_at), ${MIN_WINDOW_SEC}) / 3600.0 THEN 0
              ELSE energy - prev_energy
@@ -149,20 +156,17 @@ async function settingsFor(companyId) {
   };
 }
 
-async function perMachine({ companyId, machineId, start, end }) {
+/**
+ * Each machine's running time and output (production_hourly), and its peak
+ * power and average supply voltage and current (telemetry) — every active
+ * machine, whether or not it reports anything.
+ */
+async function machineFigures({ companyId, machineId, start, end }) {
   const params = [companyId, start, end];
   const mf = machineId ? (params.push(machineId), ` AND t.machine_id = $${params.length}`) : '';
 
   const { rows } = await pool.query(
-    `WITH ${DAILY_ENERGY_CTE.replace('%MACHINE%', mf)},
-     per_machine AS (
-       SELECT machine_id,
-              SUM(kwh)::numeric      AS kwh,
-              SUM(readings)::bigint  AS readings,
-              COUNT(*)::int          AS days
-         FROM daily GROUP BY machine_id
-     ),
-     run AS (
+    `WITH run AS (
        SELECT ph.machine_id,
               SUM(ph.run_seconds)::bigint  AS run_seconds,
               SUM(ph.produced_qty)::bigint AS produced
@@ -189,12 +193,10 @@ async function perMachine({ companyId, machineId, start, end }) {
         GROUP BY t.machine_id
      )
      SELECT m.id AS machine_id, m.machine_serial_no, m.model,
-            pm.kwh, pm.days, pm.readings,
             COALESCE(r.run_seconds, 0)::bigint AS run_seconds,
             COALESCE(r.produced, 0)::bigint    AS produced,
             pk.peak_kw, pk.avg_voltage, pk.avg_current, pk.voltage_readings, pk.current_readings
        FROM machines m
-       LEFT JOIN per_machine pm ON pm.machine_id = m.id
        LEFT JOIN run r          ON r.machine_id = m.id
        LEFT JOIN peak pk        ON pk.machine_id = m.id
       WHERE m.company_id = $1 AND m.is_active = TRUE
@@ -205,30 +207,82 @@ async function perMachine({ companyId, machineId, start, end }) {
   return rows;
 }
 
-/** Consumption per day across the fleet, for the trend chart. */
-async function dailyTrend({ companyId, machineId, start, end }) {
+/**
+ * Consumption from the meter counters, in one pass over telemetry: per
+ * machine (the table and the tiles), per day (the trend, and the tiles'
+ * "vs yesterday") and per calendar month — plus the days of the range, so a
+ * day no machine reported is a zero on the chart rather than a missing
+ * point. These were three passes over the same readings, one for each.
+ */
+async function consumption({ companyId, machineId, start, end }) {
   const params = [companyId, start, end];
   const mf = machineId ? (params.push(machineId), ` AND t.machine_id = $${params.length}`) : '';
 
   const { rows } = await pool.query(
-    `WITH ${DAILY_ENERGY_CTE.replace('%MACHINE%', mf)},
-     days AS (
-       SELECT generate_series($2::timestamptz::date, $3::timestamptz::date, INTERVAL '1 day')::date AS day
-     )
-     SELECT d.day,
-            COALESCE(SUM(dl.kwh), 0)::numeric AS kwh,
-            COUNT(dl.machine_id)::int         AS machines
-       FROM days d LEFT JOIN daily dl ON dl.day = d.day
-      GROUP BY d.day ORDER BY d.day`,
+    `WITH ${DAILY_ENERGY_CTE.replace('%MACHINE%', mf)}
+     SELECT CASE WHEN GROUPING(machine_id) = 0 THEN 'machine'
+                 WHEN GROUPING(day) = 0        THEN 'day'
+                 ELSE 'month' END               AS kind,
+            machine_id, day, date_trunc('month', day)::date AS month,
+            SUM(kwh)::numeric                   AS kwh,
+            SUM(readings)::bigint               AS readings,
+            COUNT(*)::int                       AS n
+       FROM daily
+      GROUP BY GROUPING SETS ((machine_id), (day), (date_trunc('month', day)::date))
+     UNION ALL
+     SELECT 'calendar', NULL, g::date, NULL, NULL, NULL, NULL
+       FROM generate_series($2::timestamptz::date, $3::timestamptz::date, INTERVAL '1 day') AS g`,
     params
   );
-  return rows.map(r => ({
-    day: r.day,
-    kwh: Number(r.kwh),
-    // a day with no reporting machines has no consumption figure at all,
-    // which is different from a day that consumed nothing
-    machines: Number(r.machines)
-  }));
+  return rows;
+}
+
+/**
+ * Everything the screen draws from the meters and the hourly figures, for
+ * one company, machine and range: each machine's row, the daily trend and
+ * the months. Every part rests on it, so it is worked out once and shared
+ * (cache.js) — by the parts, by paging and searching the table, and by
+ * everyone in the company looking at the same range.
+ */
+async function figures({ companyId, machineId, start, end }) {
+  const [energyRows, machineRows] = await Promise.all([
+    consumption({ companyId, machineId, start, end }),
+    machineFigures({ companyId, machineId, start, end })
+  ]);
+
+  const perMachine = new Map();
+  const perDay = new Map();
+  const calendar = [];
+  const months = [];
+  for (const r of energyRows) {
+    if (r.kind === 'machine') perMachine.set(r.machine_id, r);
+    else if (r.kind === 'day') perDay.set(+new Date(r.day), r);
+    else if (r.kind === 'month') months.push(r);
+    else if (r.kind === 'calendar') calendar.push(r.day);
+  }
+
+  const machines = machineRows.map(m => {
+    const e = perMachine.get(m.machine_id);
+    // no counter reading: unknown, not zero
+    return { ...m, kwh: e ? e.kwh : null, days: e ? e.n : null, readings: e ? e.readings : null };
+  });
+
+  const trend = calendar.sort((a, b) => a - b).map(day => {
+    const d = perDay.get(+new Date(day));
+    return {
+      day,
+      kwh: d ? Number(d.kwh) : 0,
+      // a day with no reporting machines has no consumption figure at all,
+      // which is different from a day that consumed nothing
+      machines: d ? Number(d.n) : 0
+    };
+  });
+
+  return {
+    machines,
+    trend,
+    months: months.sort((a, b) => a.month - b.month).map(r => ({ month: r.month, kwh: Number(r.kwh) }))
+  };
 }
 
 /** Consumption by shift, to compare usage across them. */
@@ -262,21 +316,6 @@ async function byShift({ companyId, machineId, start, end }) {
   }));
 }
 
-/** Consumption by calendar month, for the longer view. */
-async function byMonth({ companyId, machineId, start, end }) {
-  const params = [companyId, start, end];
-  const mf = machineId ? (params.push(machineId), ` AND t.machine_id = $${params.length}`) : '';
-
-  const { rows } = await pool.query(
-    `WITH ${DAILY_ENERGY_CTE.replace('%MACHINE%', mf)}
-     SELECT date_trunc('month', day)::date AS month,
-            SUM(kwh)::numeric AS kwh
-       FROM daily GROUP BY 1 ORDER BY 1`,
-    params
-  );
-  return rows.map(r => ({ month: r.month, kwh: Number(r.kwh) }));
-}
-
 function round(v, dp = 2) {
   return v === null || v === undefined ? null : Number(Number(v).toFixed(dp));
 }
@@ -284,9 +323,9 @@ function round(v, dp = 2) {
 /*
  * The whole screen, or the parts asked for (`part`, see parts.js): kpis =
  * the tiles; charts = the trend, shift, top-five and cost charts; table =
- * Machine Detail. Every part rests on the per-machine figures (the tiles are
- * their sums); the daily trend is drawn by a chart and gives the tiles their
- * "vs yesterday", so it comes with either.
+ * Machine Detail. Every part rests on figures() — the per-machine rows (the
+ * tiles are their sums) and the daily trend (a chart, and the tiles' "vs
+ * yesterday") — worked out once per company, machine and range and shared.
  */
 exports.getEnergy = async (q = {}) => {
   const want = parsePart(q.part);
@@ -295,13 +334,15 @@ exports.getEnergy = async (q = {}) => {
   const machineId = parseId(q.machine_id, 'machine_id');
   const search = (q.search || '').trim().toLowerCase();
 
-  const [rows, trend, shifts, months, settings] = await Promise.all([
-    perMachine({ companyId, machineId, start, end }),
-    when(want.kpis || want.charts, () => dailyTrend({ companyId, machineId, start, end }), []),
+  const [figs, shifts, settings] = await Promise.all([
+    cache.remember('energy:figures', companyId, { machineId, start, end }, cache.ttlFor(q),
+      () => figures({ companyId, machineId, start, end })),
     when(want.charts, () => byShift({ companyId, machineId, start, end }), []),
-    when(want.charts, () => byMonth({ companyId, machineId, start, end }), []),
     settingsFor(companyId)
   ]);
+  const rows = figs.machines;
+  const trend = figs.trend;
+  const months = figs.months;
 
   let machines = rows.map(r => {
     const cfg  = settings.forMachine(r.machine_id);

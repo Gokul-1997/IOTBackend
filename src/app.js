@@ -99,6 +99,9 @@ roleService.seedPagePermissions()
 app.use('/api/auth/login', authLimiter, loginAccountLimiter);
 app.use(['/api/auth/forgot-password', '/api/auth/reset-password'], passwordLimiter);
 
+// a company's change through the API puts its shared dashboard answers out of date (dashboard/cache.js)
+app.use(require('./dashboard/cache').invalidateOnWrite);
+
 require('./routes')(app);
 
 // FIX: cron jobs were never imported anywhere — scheduled jobs never ran

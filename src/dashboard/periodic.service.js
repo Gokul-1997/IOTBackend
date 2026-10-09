@@ -74,7 +74,11 @@ async function kpis(companyId, machineId) {
        COUNT(*) FILTER (WHERE deadline < NOW()
                           AND status = ANY($4)
                           AND finished_at IS NOT NULL
-                          AND finished_at <= deadline)                      AS on_time
+                          AND finished_at <= deadline)                      AS on_time,
+       -- the company's schedules, whichever machine is chosen: none at all is
+       -- a setup gap the page says in words, without loading the plan to know
+       (SELECT COUNT(*) FROM maintenance_schedules s
+         WHERE s.company_id = $1 AND s.frequency IS NOT NULL)               AS plans
      FROM judged`,
     [companyId, machineId, LIVE_STATUSES, DONE_STATUSES]
   );
@@ -89,7 +93,8 @@ async function kpis(companyId, machineId) {
     // null, not 0, when nothing has come due yet — "0% compliance" on a
     // plant with no deadlines behind it is a lie the screen would repeat.
     compliance_pct: judged > 0 ? Number(((Number(row.on_time) / judged) * 100).toFixed(1)) : null,
-    compliance_basis: { on_time: Number(row.on_time), judged }
+    compliance_basis: { on_time: Number(row.on_time), judged },
+    plans:         Number(row.plans)
   };
 }
 

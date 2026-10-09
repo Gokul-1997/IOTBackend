@@ -56,6 +56,16 @@ describe('every query binds exactly the parameters it references', () => {
   });
 });
 
+describe('whether there are any rules at all', () => {
+  test('the tiles say how many alarm rules the company has, so the page need not load the rules to know', async () => {
+    queueAll();
+    const d = await svc.getPreventiveDashboard(req({ machine_id: 36 }));
+    expect(d.kpis).toHaveProperty('rules');
+    // the company's rules, not the chosen machine's: none at all is the setup gap
+    expect(byText(/AS rules/).text).toMatch(/\(SELECT COUNT\(\*\) FROM alarm_thresholds th WHERE th\.company_id = \$1\)::int AS rules/);
+  });
+});
+
 describe('the date range', () => {
   test('bounds the alarm figures in plant time', async () => {
     queueAll();

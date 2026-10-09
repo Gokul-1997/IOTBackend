@@ -23,17 +23,38 @@ const svc = require('../../src/dashboard/energy.service');
 
 const company_id = 4;
 
-/* getEnergy fires: perMachine, dailyTrend, byShift, byMonth, settings. */
-function queueAll({ machines = [], trend = [], shifts = [], months = [], settings = [] } = {}) {
+/*
+ * getEnergy asks, in this order: the shift split (charts only), the
+ * settings, then — worked out once per company, machine and range and
+ * shared (cache.js) — the one pass over the meter counters (per machine,
+ * per day, per month, and the days of the range) and the per-machine
+ * running time, output and peak power.
+ *
+ * The fixtures describe a machine as one row; these split it into what each
+ * of the two queries answers.
+ */
+const COUNTER = ['kwh', 'days', 'readings'];
+const counterRows = (machines, extra = []) => [
+  ...machines.filter(m => m.kwh !== null && m.kwh !== undefined)
+    .map(m => ({ kind: 'machine', machine_id: m.machine_id, kwh: m.kwh, readings: m.readings, n: m.days })),
+  ...extra
+];
+const machineOnly = machines => machines.map(m =>
+  Object.fromEntries(Object.entries(m).filter(([k]) => !COUNTER.includes(k))));
+
+function queueAll({ machines = [], shifts = [], settings = [], counters = [] } = {}) {
   mockDb.queueResponse(
-    { rows: machines }, { rows: trend }, { rows: shifts }, { rows: months }, { rows: settings }
+    { rows: shifts }, { rows: settings }, { rows: counterRows(machines, counters) }, { rows: machineOnly(machines) }
   );
 }
 
-/* The table half (and the export) fires only perMachine and settings. */
+/* The table (and the export) asks for no shift split. */
 function queueTable({ machines = [], settings = [] } = {}) {
-  mockDb.queueResponse({ rows: machines }, { rows: settings });
+  mockDb.queueResponse({ rows: settings }, { rows: counterRows(machines) }, { rows: machineOnly(machines) });
 }
+
+/* Every statement sent, as one text. */
+const allSql = () => mockDb.calls().map(c => c.text).join('\n');
 
 const machineRow = (over = {}) => ({
   machine_id: 1, machine_serial_no: 'VMC-01', model: 'VF700',
@@ -53,7 +74,7 @@ describe('consumption comes from differences, not sums', () => {
     queueAll();
     await svc.getEnergy({ company_id });
 
-    const sql = executable(mockDb.calls()[0].text);
+    const sql = executable(allSql());
     expect(sql).toMatch(/LAG\(t\.energy\)\s+OVER w/);
     expect(sql).toMatch(/WINDOW w AS \(PARTITION BY t\.machine_id ORDER BY t\.received_at\)/);
     // MAX-MIN cannot see a reset inside the period
@@ -64,14 +85,14 @@ describe('consumption comes from differences, not sums', () => {
     queueAll();
     await svc.getEnergy({ company_id });
     // a machine cannot un-consume electricity
-    expect(executable(mockDb.calls()[0].text)).toMatch(/WHEN energy <= prev_energy THEN 0/);
+    expect(executable(allSql())).toMatch(/WHEN energy <= prev_energy THEN 0/);
   });
 
   test('a 0 is a dropped read, so the climb back from it is not consumption', async () => {
     queueAll();
     await svc.getEnergy({ company_id });
     // VMC - 13 - M sent 0 in most messages; 0 → 107,615,280 is not 107 million kWh
-    const sql = executable(mockDb.calls()[0].text);
+    const sql = executable(allSql());
     expect(sql).toMatch(/AND t\.energy > 0/);
     expect(sql).not.toMatch(/energy IS NOT NULL/);
   });
@@ -80,8 +101,19 @@ describe('consumption comes from differences, not sums', () => {
     queueAll();
     await svc.getEnergy({ company_id });
     // over 2,000 kW since the last reading, measured over at least five minutes
-    expect(executable(mockDb.calls()[0].text)).toMatch(
+    expect(executable(allSql())).toMatch(
       /energy - prev_energy\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM received_at - prev_at\), 300\) \/ 3600\.0 THEN 0/);
+  });
+
+  test('a rise below the smallest possible limit is kept without its own limit; the exact limit still decides every larger one', async () => {
+    queueAll();
+    await svc.getEnergy({ company_id });
+    const sql = executable(allSql());
+    // 2,000 kW over the 5-minute minimum is the smallest limit any interval can have
+    const quick = sql.search(/WHEN energy - prev_energy <= \(2000 \* 300 \/ 3600\.0\)::float8 THEN energy - prev_energy/);
+    const exact = sql.search(/energy - prev_energy\s+> 2000 \* GREATEST/);
+    expect(quick).toBeGreaterThan(-1);
+    expect(exact).toBeGreaterThan(quick);
   });
 
   test('a machine with a single reading has no interval and so no consumption', async () => {
@@ -89,15 +121,45 @@ describe('consumption comes from differences, not sums', () => {
     await svc.getEnergy({ company_id });
     // the first reading of a machine has no predecessor, so its delta is
     // NULL and must be excluded rather than treated as zero usage
-    expect(mockDb.calls()[0].text).toMatch(/WHERE delta IS NOT NULL/);
+    expect(allSql()).toMatch(/WHERE delta IS NOT NULL/);
   });
 
   test('the telemetry read is bounded so the hypertable can be pruned', async () => {
     queueAll();
     await svc.getEnergy({ company_id });
-    const sql = mockDb.calls()[0].text;
-    expect(sql).toMatch(/t\.received_at >= \$2/);
-    expect(sql).toMatch(/t\.received_at <= \$3/);
+    const reads = mockDb.calls().map(c => c.text).filter(t => /FROM telemetry_raw/.test(t));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const sql of reads) {
+      expect(sql).toMatch(/t\.received_at >= \$2/);
+      expect(sql).toMatch(/t\.received_at <= \$3/);
+    }
+  });
+
+  test('one pass over the counters gives the machines, the days and the months', async () => {
+    queueAll();
+    await svc.getEnergy({ company_id });
+    // it was three: one for the table and tiles, one for the trend, one for the months
+    const passes = mockDb.calls().filter(c => /LAG\(t\.energy\)/.test(c.text));
+    expect(passes).toHaveLength(1);
+    expect(passes[0].text).toMatch(/GROUPING SETS \(\(machine_id\), \(day\), \(date_trunc\('month', day\)::date\)\)/);
+  });
+
+  test('the trend has every day of the range, a quiet day as zero, and the months add up the days', async () => {
+    const d1 = new Date(2026, 9, 7), d2 = new Date(2026, 9, 8), d3 = new Date(2026, 9, 9);
+    queueAll({
+      machines: [machineRow({ kwh: '30' })],
+      counters: [
+        { kind: 'calendar', day: d3 }, { kind: 'calendar', day: d1 }, { kind: 'calendar', day: d2 },
+        { kind: 'day', day: d1, kwh: '10', n: 2 }, { kind: 'day', day: d3, kwh: '20', n: 1 },
+        { kind: 'month', month: new Date(2026, 9, 1), kwh: '30' }
+      ]
+    });
+    const d = await svc.getEnergy({ company_id, from: '2026-10-07', to: '2026-10-09' });
+
+    expect(d.trend.map(t => [new Date(t.day).getDate(), t.kwh, t.machines])).toEqual([[7, 10, 2], [8, 0, 0], [9, 20, 1]]);
+    expect(d.by_month).toEqual([{ month: new Date(2026, 9, 1).toISOString(), kwh: 30 }]);
+    // the last day against the one before: the day before reported nothing, so no comparison
+    expect(d.kpis.kwh_vs_yesterday_pct).toBeNull();
   });
 });
 
@@ -192,7 +254,7 @@ describe('overload alerts', () => {
     // current transformers face the wrong way); MAX alone would never flag it
     queueAll();
     await svc.getEnergy({ company_id });
-    expect(mockDb.calls()[0].text).toMatch(/MAX\(ABS\(t\.power\)\) AS peak_kw/);
+    expect(allSql()).toMatch(/MAX\(ABS\(t\.power\)\) AS peak_kw/);
   });
 
   test('never flags when no threshold is configured', async () => {
@@ -281,8 +343,9 @@ describe('export', () => {
       settings: [{ machine_id: null, cost_per_kwh: '8.5', currency: 'EUR', overload_kw: null }]
     });
     const rows = await svc.getExportRows({ company_id });
-    // the export asks for the table's rows only: no trend, shift or month query
-    expect(mockDb.calls()).toHaveLength(2);
+    // the export asks for the table's rows only: the settings and the machines' figures, no shift split
+    expect(mockDb.calls()).toHaveLength(3);
+    expect(allSql()).not.toMatch(/GROUP BY s\.shift_name/);
     expect(Object.keys(rows[0])).toContain('Cost (EUR)');
   });
 
