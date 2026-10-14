@@ -29,7 +29,7 @@ const options = {
       { name: 'Downtime',     description: 'Downtime reason codes and events' },
       { name: 'Maintenance',  description: 'Maintenance scheduling and logs' },
       { name: 'Notifications',description: 'In-app notifications' },
-      { name: 'Reports',      description: 'Export reports (PDF/Excel/CSV)' },
+      { name: 'Reports',      description: 'Export reports (Excel/CSV)' },
     ]
   },
   apis: ['./src/**/*.routes.js'],

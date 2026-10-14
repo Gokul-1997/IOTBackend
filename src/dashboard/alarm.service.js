@@ -394,7 +394,7 @@ exports.getAlarms = async (q = {}) => {
   };
 };
 
-/** Flat rows for Excel / CSV / PDF. */
+/** Flat rows for Excel / CSV. */
 exports.getExportRows = async (q = {}) => {
   const { start, end } = resolveRange(q);
   const filter = buildFilter({

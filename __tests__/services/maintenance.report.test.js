@@ -201,7 +201,7 @@ describe('maintenance report — shaping', () => {
 });
 
 describe('maintenance report — export rows', () => {
-  test('the columns match the PDF header the controller passes', async () => {
+  test('the export columns, in the order the Excel and CSV files list them', async () => {
     mockDb.queueResponse(
       { rows: [{ n: 1 }] },
       { rows: [{

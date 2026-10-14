@@ -1,6 +1,8 @@
 /**
  * Maintenance Report — the contract line "the system shall generate and
- * export maintenance reports in Excel, CSV, and PDF formats".
+ * export maintenance reports in Excel, CSV, and PDF formats". Excel and CSV
+ * only since 2026-10-14: the PDF exports were taken out at the owner's
+ * request, as nobody used them.
  *
  * The Maintenance *Dashboard* answers "what is the floor doing right now":
  * machine health, live alarms, condition trends. This answers the other

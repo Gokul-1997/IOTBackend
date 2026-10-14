@@ -375,7 +375,7 @@ exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page
   };
 };
 
-/** Flat rows for Excel / CSV / PDF export. */
+/** Flat rows for Excel / CSV export. */
 exports.getExportRows = async ({ company_id, machine_id, search, status, due }) => {
   const machineId = parseMachineId(machine_id);
   // Bounded: an unbounded export on a plant with years of history is a

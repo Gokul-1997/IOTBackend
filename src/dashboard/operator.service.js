@@ -379,7 +379,7 @@ exports.getOperators = async (q = {}) => {
   };
 };
 
-/** Flat rows for Excel / CSV / PDF, in the table's order and columns. */
+/** Flat rows for Excel / CSV, in the table's order and columns. */
 exports.getExportRows = async (q = {}) => {
   // the table's rows only: the export needs no ranking or chart
   const d = await exports.getOperators({ ...q, part: 'table', page: 1, limit: 200 });

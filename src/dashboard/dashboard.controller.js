@@ -17,8 +17,19 @@ const meterSvc      = require('./energy-meter.service');
 const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
-const { toCsv, tablePdf } = require('../utils/export.util');
+const { toCsv } = require('../utils/export.util');
 const dashCache     = require('./cache');
+
+/* Exports are Excel or CSV — the PDF exports were taken out (2026-10-14):
+   nobody used them, and a table is read in a spreadsheet. The format is
+   checked before anything is read, so a refused one costs no query. */
+const EXPORT_FORMATS = ['xlsx', 'csv'];
+function exportFormat(req, res) {
+  const format = String(req.params.format || '').toLowerCase();
+  if (EXPORT_FORMATS.includes(format)) return format;
+  res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
+  return null;
+}
 const { current: readAuthorization } = require('../lib/read-scope');
 
 /**
@@ -191,7 +202,8 @@ exports.saveEnergySettings = async (req, res) => {
 
 exports.exportEnergy = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await energySvc.getExportRows({ ...req.query, company_id: req.user.company_id });
     if (!rows.length) {
       return res.status(404).json({ status: 'error', message: 'No machines match these filters' });
@@ -210,14 +222,6 @@ exports.exportEnergy = async (req, res) => {
         .setHeader('Content-Disposition', `attachment; filename=energy_${stamp}.csv`)
         .send(toCsv(rows));
     }
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=energy_${stamp}.pdf`);
-      // headers are taken from the rows because the cost column carries the
-      // configured currency in its name
-      return tablePdf(res, 'Energy Report', rows, headers, [100, 80, 90, 75, 80, 90, 70, 60]);
-    }
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('Energy export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -240,12 +244,8 @@ exports.oeeDashboard = async (req, res) => {
 
 exports.exportOee = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
-    // the machine-wise OEE summary is exported as Excel or CSV only — no PDF;
-    // checked first, so a refused format costs no query
-    if (!['xlsx', 'csv'].includes(format)) {
-      return res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
-    }
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await oeeDashSvc.getExportRows({ ...req.query, company_id: req.user.company_id });
     if (!rows.length) {
       return res.status(404).json({ status: 'error', message: 'No machines match these filters' });
@@ -284,7 +284,8 @@ exports.operators = async (req, res) => {
 
 exports.exportOperators = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await operatorSvc.getExportRows({ ...req.query, company_id: req.user.company_id });
     if (!rows.length) {
       return res.status(404).json({ status: 'error', message: 'No operators match these filters' });
@@ -302,15 +303,6 @@ exports.exportOperators = async (req, res) => {
         .setHeader('Content-Disposition', `attachment; filename=operator_performance_${stamp}.csv`)
         .send(toCsv(rows));
     }
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=operator_performance_${stamp}.pdf`);
-      return tablePdf(res, 'Operator Performance', rows,
-        ['Operator ID', 'Operator', 'Machines', 'Run time', 'Down time', 'Utilization',
-         'Produced', 'Good', 'Rejected', 'Quality rate', 'Alarms', 'OEE'],
-        [70, 130, 55, 60, 60, 60, 55, 50, 55, 65, 45, 45]);
-    }
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('Operator export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -332,7 +324,8 @@ exports.downtime = async (req, res) => {
 
 exports.exportDowntime = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await downtimeSvc.getExportRows({ ...req.query, company_id: req.user.company_id });
     if (!rows.length) {
       return res.status(404).json({ status: 'error', message: 'No downtime records match these filters' });
@@ -350,14 +343,6 @@ exports.exportDowntime = async (req, res) => {
         .setHeader('Content-Disposition', `attachment; filename=downtime_${stamp}.csv`)
         .send(toCsv(rows));
     }
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=downtime_${stamp}.pdf`);
-      return tablePdf(res, 'Downtime Analysis', rows,
-        ['Machine', 'Shift', 'Start', 'End', 'Duration', 'Reason', 'Category', 'Sub reason', 'Operator', 'Status'],
-        [75, 55, 105, 105, 55, 105, 75, 90, 75, 45]);
-    }
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('Downtime export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -379,7 +364,8 @@ exports.alarms = async (req, res) => {
 
 exports.exportAlarms = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await alarmSvc.getExportRows({ ...req.query, company_id: req.user.company_id });
 
     if (!rows.length) {
@@ -399,14 +385,6 @@ exports.exportAlarms = async (req, res) => {
         .setHeader('Content-Disposition', `attachment; filename=alarms_${stamp}.csv`)
         .send(toCsv(rows));
     }
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=alarms_${stamp}.pdf`);
-      return tablePdf(res, 'Alarm Report', rows,
-        ['Machine', 'Shift', 'Alarm code', 'Alarm name', 'Severity', 'Generated', 'Closed', 'Duration', 'Status'],
-        [80, 60, 70, 150, 55, 105, 105, 60, 50]);
-    }
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('Alarm export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -487,10 +465,11 @@ exports.runPeriodicEngine = async (req, res) => {
 };
 
 /* Export the ticket list. Excel and CSV come from the same rows so the two
-   downloads can never disagree; PDF is a printed summary, not a data dump. */
+   downloads can never disagree. */
 exports.exportPeriodic = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await periodicSvc.getExportRows({
       company_id: req.user.company_id,
       machine_id: req.query.machine_id,
@@ -519,15 +498,7 @@ exports.exportPeriodic = async (req, res) => {
         .send(toCsv(rows));
     }
 
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=periodic_maintenance_${stamp}.pdf`);
-      return tablePdf(res, 'Periodic Maintenance', rows,
-        ['Ticket', 'Machine', 'Task', 'Frequency', 'Priority', 'Status', 'Due date', 'Completed', 'Overdue', 'Technician'],
-        [45, 85, 175, 70, 60, 70, 70, 70, 50, 90]);
-    }
 
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('Periodic export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
@@ -623,7 +594,8 @@ exports.maintenanceReport = async (req, res) => {
 
 exports.exportMaintenanceReport = async (req, res) => {
   try {
-    const format = String(req.params.format || '').toLowerCase();
+    const format = exportFormat(req, res);
+    if (!format) return;
     const rows = await maintReportSvc.getExportRows({ ...req.query, company_id: req.user.company_id });
     if (!rows.length) {
       return res.status(404).json({ status: 'error', message: 'No maintenance tickets match these filters' });
@@ -641,14 +613,6 @@ exports.exportMaintenanceReport = async (req, res) => {
         .setHeader('Content-Disposition', `attachment; filename=maintenance_${stamp}.csv`)
         .send(toCsv(rows));
     }
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=maintenance_${stamp}.pdf`);
-      return tablePdf(res, 'Maintenance Report', rows,
-        ['Machine', 'Title', 'Type', 'Priority', 'Status', 'Raised', 'Resolved', 'Repair (h)', 'Downtime (min)', 'Assigned to', 'Parts used'],
-        [70, 110, 62, 52, 58, 92, 92, 50, 62, 70, 70]);
-    }
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('Maintenance report export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });

@@ -25,7 +25,6 @@ module.exports = app => {
 
   // ── Reports & Exports ─────────────────────────────────────────
   app.use('/api/reports',              require('./reports/report.routes'));
-  app.use('/api/reports/pdf',          require('./reports/pdf.routes'));
   app.use('/api/reports/operator',     require('./reports/operator.report.routes'));
 
   // ── New Features ──────────────────────────────────────────────
