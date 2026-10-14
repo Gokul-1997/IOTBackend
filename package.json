@@ -10,7 +10,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "lint": "echo 'lint not configured yet'",
-    "migrate": "node scripts/migrate.js"
+    "migrate": "node scripts/migrate.js",
+    "migrate:images": "node scripts/import-machine-images.js"
   },
   "author": "Gokul",
   "license": "ISC",

@@ -50,9 +50,53 @@ If 046 failed with `syntax error at or near "("`, deploy the corrected migration
 
 Set `STORAGE_ROOT` to the new persistent directory. Keep the previous `PROGRAM_TRANSFER_DIR` unchanged: historical relative `company-N/<IP>` and `company-N/machine-N` program references continue using that legacy root. If that variable was previously omitted, the legacy root remains `Backend/storage/ProgramTransfer`; preserve it when moving the checkout. New program records use the unified directory even while old records remain readable.
 
-Existing S3 images are not automatically downloaded or deleted. Re-upload each machine's image through its company account to replace its old URL. Before moving a company to a disconnected customer server, copy/import every required old image and verify its local reference; a remaining S3 URL still needs internet access. Retain the original bucket until the local copy and backups are checked. Never replace every stored URL by string substitution: URLs alone do not create local bytes or ownership metadata.
+Existing S3 images keep their old URLs until they are imported or re-uploaded. Migration 046 creates the catalogue; it does not copy image bytes. Use the one-time `migrate:images` command below to copy old images and change each machine to its authenticated local URL. Retain the original bucket until the local copies and backups are checked. Never replace stored URLs by string substitution: URLs alone do not create local bytes or ownership metadata.
 
 Build and deploy the frontend with the customer's API URL; canonical local references resolve against that API's origin. Move the database and the matching complete `STORAGE_ROOT` tree plus any legacy program root, preserve relative names, set the new root paths, and verify upload/download/Backup as the relevant company and plant users.
+
+## Move older machine images from S3
+
+Run this from `IOTBackend` on the server which owns the database and `STORAGE_ROOT`, after migration 046 succeeds. It uses the backend database/TLS configuration from `.env`. Take the database and file backup first. Replace the example bucket origin with the exact origin from your old machine image URLs, and `4` with the company ID you intend to migrate.
+
+First review the plan. This reads machine references and placement only; it does not download files or change the database/storage:
+
+```sh
+npm run migrate:images -- \
+  --company-id 4 \
+  --source-origin https://your-old-bucket.s3.ap-south-1.amazonaws.com \
+  --source-prefix /images/ \
+  --dry-run
+```
+
+Then copy and switch the matching public images:
+
+```sh
+npm run migrate:images -- \
+  --company-id 4 \
+  --source-origin https://your-old-bucket.s3.ap-south-1.amazonaws.com \
+  --source-prefix /images/ \
+  --apply
+```
+
+The command processes images sequentially. It downloads only the approved HTTPS origin and prefix, rejects redirects/private network targets, checks the 5 MB image contract and saves a new immutable UUID file under the machine's actual company. It locks and rechecks the machine before changing its URL. The image catalogue insertion and machine URL update commit together. A failed copy or known failed transaction leaves the old URL intact. An uncertain commit keeps its file for reconciliation instead of risking deletion of a committed image. Files already migrated to local URLs are skipped when rerun; no S3 object is deleted.
+
+Missing, inaccessible, oversized or invalid images are reported by machine ID and code. Invalid/unassigned plant ownership must be corrected through administration before retry. A file over 5 MB needs an optimized image re-uploaded through the machine form; the importer never truncates file bytes. Images at another bucket/CDN origin are reported as `OTHER_REMOTE_SOURCE` and remain unchanged until a separate reviewed run for that origin. Apply exits with status 1 if a copy failed, a machine changed during the import, or a commit needs reconciliation; review the reported IDs before retry. Dry-run eligibility is not proof that an object exists or can be downloaded.
+
+For a private bucket, use your configured AWS CLI read access to stage an object copy locally. Preserve the bucket key layout: an old URL ending in `/images/file-123.jpg` must be available as `<source-dir>/images/file-123.jpg`. This copies S3 objects to a local directory using [AWS CLI sync](https://docs.aws.amazon.com/cli/latest/reference/s3/sync.html):
+
+```sh
+umask 077
+aws s3 sync s3://your-old-bucket/ /home/ubuntu/legacy-s3-images/ \
+  --exclude '*' --include 'images/*' --only-show-errors
+npm run migrate:images -- \
+  --company-id 4 \
+  --source-origin https://your-old-bucket.s3.ap-south-1.amazonaws.com \
+  --source-prefix /images/ \
+  --source-dir /home/ubuntu/legacy-s3-images \
+  --apply
+```
+
+The source-directory mode uses the original URL to choose its key inside the staged directory and reads bounded local bytes; it makes no HTTPS/S3 request. AWS credentials are used by your AWS CLI for this one-time copy, not by normal application uploads or the importer. Keep the staging folder private. Do not remove the original bucket or its backup until every required machine shows a local image. After a successful run, reload the web page; existing dashboard answers can retain old URLs for up to their five-minute cache lifetime. Verify the local URLs while blocking access to S3 before moving the installation offline. The current machine image views already support local API references, so no additional frontend rollout is needed if the local-storage frontend is installed.
 
 ## Backup and capacity
 
