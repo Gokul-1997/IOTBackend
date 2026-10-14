@@ -334,6 +334,10 @@ exports.getEnergy = async (q = {}) => {
   const { start, end } = resolveRange(q);
   const machineId = parseId(q.machine_id, 'machine_id');
   const search = (q.search || '').trim().toLowerCase();
+  /* The Overload Alerts tile narrows Machine Detail to the machines behind
+     its number (the table and its export only; the tiles keep every machine). */
+  const show = q.show === undefined || q.show === null || q.show === '' || q.show === 'all' ? null : String(q.show).toLowerCase();
+  if (show && show !== 'overload') throw httpError('show must be all or overload', 400);
 
   const [figs, shifts, settings] = await Promise.all([
     cache.remember('energy:figures', companyId, { machineId, start, end }, cache.ttlFor(q),
@@ -391,7 +395,8 @@ exports.getEnergy = async (q = {}) => {
   const pageNum  = Math.max(1, Number(q.page) || 1);
   const limitNum = Math.min(200, Math.max(1, Number(q.limit) || 20));
   const offset   = (pageNum - 1) * limitNum;
-  const sorted = want.table ? [...machines].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1)) : [];
+  const listed = show === 'overload' ? machines.filter(m => m.is_overloaded) : machines;
+  const sorted = want.table ? [...listed].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1)) : [];
 
   /* Volts and amps averaged over the readings, each machine weighted by how
      many readings it sent; null when no machine sends them. */
@@ -414,7 +419,7 @@ exports.getEnergy = async (q = {}) => {
   return {
     filters: {
       from: q.from || null, to: q.to || null,
-      machine_id: machineId, search: (q.search || '').trim() || null
+      machine_id: machineId, search: (q.search || '').trim() || null, show
     },
     currency: settings.currency,
     // the company tariff, so the cost trend can price each day, week or month

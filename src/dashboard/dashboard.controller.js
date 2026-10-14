@@ -241,6 +241,11 @@ exports.oeeDashboard = async (req, res) => {
 exports.exportOee = async (req, res) => {
   try {
     const format = String(req.params.format || '').toLowerCase();
+    // the machine-wise OEE summary is exported as Excel or CSV only — no PDF;
+    // checked first, so a refused format costs no query
+    if (!['xlsx', 'csv'].includes(format)) {
+      return res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
+    }
     const rows = await oeeDashSvc.getExportRows({ ...req.query, company_id: req.user.company_id });
     if (!rows.length) {
       return res.status(404).json({ status: 'error', message: 'No machines match these filters' });
@@ -258,15 +263,6 @@ exports.exportOee = async (req, res) => {
         .setHeader('Content-Disposition', `attachment; filename=oee_${stamp}.csv`)
         .send(toCsv(rows));
     }
-    if (format === 'pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=oee_${stamp}.pdf`);
-      return tablePdf(res, 'OEE Report', rows,
-        ['Machine', 'Status', 'Availability', 'Performance', 'Quality', 'OEE', 'Band',
-         'Production', 'Good parts', 'Rejections', 'Downtime', 'Alarms'],
-        [85, 60, 70, 70, 55, 50, 50, 60, 60, 60, 60, 45]);
-    }
-    return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   } catch (err) {
     console.error('OEE export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });

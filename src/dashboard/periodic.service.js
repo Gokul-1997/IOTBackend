@@ -64,7 +64,7 @@ async function kpis(companyId, machineId) {
      SELECT
        COUNT(*)                                                             AS scheduled,
        COUNT(*) FILTER (WHERE status = ANY($3)
-                          AND due_date::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date)
+                          AND (due_date AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date)
                                                                             AS due_today,
        COUNT(*) FILTER (WHERE status = ANY($3)
                           AND due_date >= NOW()
@@ -282,7 +282,11 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
    * Postgres ("bind message supplies N parameters"), not ignored.
    */
   const dueFilter = String(due || '').toLowerCase();
-  if (dueFilter === 'overdue' || dueFilter === 'today') {
+  if (dueFilter === 'completed') {
+    // the Completed tile: done, by the tile's own definition
+    values.push(DONE_STATUSES);
+    where += ` AND t.status = ANY($${values.length})`;
+  } else if (dueFilter === 'overdue' || dueFilter === 'today') {
     values.push(LIVE_STATUSES);
     const liveParam = values.length;
     where += ` AND t.status = ANY($${liveParam})`;

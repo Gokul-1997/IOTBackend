@@ -193,6 +193,21 @@ function band(rows) {
   return out;
 }
 
+/*
+ * Clicking a band tile narrows Operator Performance Details to the operators
+ * in that band — the table and its export only; the tiles and rankings keep
+ * every operator. The band is the tiles' own (bandOf), so the table's total
+ * is the number on the tile.
+ */
+const SHOW_BANDS = { excellent: 'EXCELLENT', good: 'GOOD', average: 'AVERAGE', needs_help: 'NEEDS_HELP' };
+
+function parseShow(v) {
+  if (v === undefined || v === null || v === '' || v === 'all') return null;
+  const band = SHOW_BANDS[String(v).toLowerCase()];
+  if (!band) throw httpError(`show must be one of all, ${Object.keys(SHOW_BANDS).join(', ')}`, 400);
+  return band;
+}
+
 /** Fields the table can be sorted on, and what they sort by. */
 const SORTABLE = new Set([
   'operator_code', 'operator_name', 'shift_name', 'machine_names', 'score', 'run_seconds',
@@ -266,6 +281,7 @@ exports.getOperators = async (q = {}) => {
   const search     = (q.search || '').trim();
   const sort       = SORTABLE.has(q.sort) ? q.sort : 'score';
   const dir        = q.dir === 'asc' ? 'asc' : 'desc';
+  const showBand   = parseShow(q.show);          // checked before any query
 
   /* Every part, every page and every sort of the table rests on these three,
      so they are read once per company and filters and shared (cache.js):
@@ -300,7 +316,7 @@ exports.getOperators = async (q = {}) => {
   }
 
   const all = [...byOperator.values()].map(e => derive(e.op, e.machines));
-  const sorted = want.table ? sortRows(all, sort, dir) : [];
+  const sorted = want.table ? sortRows(showBand ? all.filter(r => r.band === showBand) : all, sort, dir) : [];
 
   // Fleet figures over the machines these operators hold, each counted once.
   const held = [...new Set(links.map(l => l.machine_id))].map(id => machinesById.get(id)).filter(Boolean);
@@ -315,7 +331,8 @@ exports.getOperators = async (q = {}) => {
     filters: {
       from: q.from || null, to: q.to || null,
       machine_id: machineId, shift_id: shiftId, operator_id: operatorId,
-      search: search || null, sort, dir
+      search: search || null, sort, dir,
+      show: showBand ? String(q.show).toLowerCase() : null
     },
     ...(want.kpis && {
       kpis: {

@@ -20,6 +20,27 @@ const SEVERITY_CLASS = severityClass('severity');
 const OPEN_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS'];
 const TREND_DAYS = 7;
 
+/*
+ * Clicking a ticket tile narrows the PM ticket list to the tickets behind its
+ * number: raised in the range (as every tile counts them), with the tile's
+ * own condition — so the list's total is the number on the tile. The list
+ * alone; the tiles and charts keep the whole picture. Without a tile the
+ * list is the backlog, as before (not bounded by the dates).
+ */
+const PM_SHOW = {
+  raised:    'TRUE',                                            // Compliance: completed over raised
+  open:      `t.status IN ('OPEN','ASSIGNED','IN_PROGRESS')`,    // Open PM Tickets
+  completed: `t.status IN ('RESOLVED','CLOSED')`,                // Completed PM Tickets
+  resolved:  `t.resolved_at IS NOT NULL`                         // Avg. Resolution Time
+};
+
+function parseShow(v) {
+  if (v === undefined || v === null || v === '' || v === 'all') return null;
+  const key = String(v).toLowerCase();
+  if (!PM_SHOW[key]) throw httpError(`show must be one of all, ${Object.keys(PM_SHOW).join(', ')}`, 400);
+  return key;
+}
+
 /** Page size is clamped so a caller cannot pull the whole ticket table. */
 function parsePaging({ page, limit }) {
   const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
@@ -40,6 +61,7 @@ exports.getPreventiveDashboard = async (req) => {
   const machineId = parseMachineId(req.query.machine_id);
   const search    = (req.query.search || '').trim();
   const { limit, page, offset } = parsePaging(req.query);
+  const show      = parseShow(req.query.show);
 
   /* A From–To range, as the design draws it ("18 Jun 2026 - 18 Jul 2026");
      it was a single day, which could not show a week or a month at all.
@@ -72,13 +94,18 @@ exports.getPreventiveDashboard = async (req) => {
      btree index; at ticket volumes this is fine, and the alternative
      (trigram index) is not worth adding until it measurably hurts. */
   const searchIdx = machineId ? 3 : 2;
-  const listWhere = `
+  let listWhere = `
     t.company_id = $1${plantSql('t.machine_id')}
     AND t.issue_type = 'PREVENTIVE'
     ${machineId ? 'AND t.machine_id = $2' : ''}
     ${search ? `AND (t.title ILIKE $${searchIdx} OR m.machine_serial_no ILIKE $${searchIdx}
                      OR COALESCE(al.alarm_type,'') ILIKE $${searchIdx})` : ''}`;
   const listParams = search ? [...listBase, `%${search}%`] : [...listBase];
+  if (show) {
+    listParams.push(from, to);
+    listWhere += ` AND t.created_at >= $${listParams.length - 1} AND t.created_at <= $${listParams.length}
+                   AND ${PM_SHOW[show]}`;
+  }
 
   const [
     alarmKpiRes, ticketKpiRes, resolutionRes, trendRes,
@@ -268,7 +295,7 @@ exports.getPreventiveDashboard = async (req) => {
     filters: {
       from: range.from, to: range.to, days: range.days,
       date: range.to,               // older clients read this
-      machine_id: machineId, search: search || null
+      machine_id: machineId, search: search || null, show
     },
     updated_at: new Date().toISOString(),
 

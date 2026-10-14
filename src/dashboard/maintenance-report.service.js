@@ -100,6 +100,26 @@ function buildFilter(q) {
   return { sql: where.join(' AND ') + plantSql('t.machine_id'), params, start, end, machineId, next: i };
 }
 
+/*
+ * Clicking a tile narrows Maintenance Tickets to the tickets behind its
+ * number — the table and its export only: the tiles and charts keep the
+ * whole period. Each clause is the tile's own definition (kpis query below),
+ * so the table's total is the number on the tile.
+ */
+const SHOW = {
+  open:     `NOT (t.status IN ('RESOLVED','CLOSED'))`,   // Still Open
+  settled:  `t.status IN ('RESOLVED','CLOSED')`,         // Resolved / Closed
+  repaired: `t.resolved_at IS NOT NULL`,                 // what Mean Time to Repair averages
+  downtime: `t.downtime_minutes IS NOT NULL`             // Recorded Downtime
+};
+
+function narrow(f, show) {
+  if (show === undefined || show === null || show === '' || show === 'all') return f;
+  const clause = SHOW[String(show).toLowerCase()];
+  if (!clause) throw httpError(`show must be one of all, ${Object.keys(SHOW).join(', ')}`, 400);
+  return { ...f, sql: `${f.sql} AND ${clause}` };
+}
+
 /* Repair hours, from raised to resolved. Written once and reused so the
    KPI and the per-machine table can never drift apart. */
 const REPAIR_HOURS = `EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600.0`;
@@ -152,6 +172,8 @@ async function listTickets(f, { page, limit }) {
 exports.getReport = async (q = {}) => {
   const want = parsePart(q.part);
   const f = buildFilter(q);
+  // checked before any query: a bad value costs nothing
+  const tableFilter = narrow(f, q.show);
 
   const [kpiRes, byMachineRes, byTypeRes, byStatusRes, trendRes, tickets] = await Promise.all([
     when(want.kpis, () => db.query(
@@ -204,7 +226,7 @@ exports.getReport = async (q = {}) => {
         WHERE ${f.sql}
         GROUP BY 1 ORDER BY 1`, f.params)),
 
-    when(want.table, () => listTickets(f, { page: q.page, limit: q.limit }))
+    when(want.table, () => listTickets(tableFilter, { page: q.page, limit: q.limit }))
   ]);
 
   const kpis = want.kpis ? kpiRes.rows[0] : null;
@@ -215,7 +237,8 @@ exports.getReport = async (q = {}) => {
     filters: {
       from: f.start.slice(0, 10),
       to:   f.end.slice(0, 10),
-      machine_id: f.machineId
+      machine_id: f.machineId,
+      show: q.show && q.show !== 'all' ? String(q.show).toLowerCase() : null
     },
     updated_at: new Date().toISOString(),
     ...(want.kpis && {
@@ -242,7 +265,8 @@ exports.getReport = async (q = {}) => {
 };
 
 exports.getExportRows = async (q = {}) => {
-  const f = buildFilter(q);
+  // the file matches the table on screen, a tile's narrowing included
+  const f = narrow(buildFilter(q), q.show);
   const rows = await listTickets(f, { page: 1, limit: 200 });
   const stamp = d => (d ? new Date(d).toISOString().replace('T', ' ').slice(0, 19) : '');
 

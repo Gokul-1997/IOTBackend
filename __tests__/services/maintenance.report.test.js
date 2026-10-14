@@ -173,7 +173,8 @@ describe('maintenance report — shaping', () => {
   test('the resolved filters come back so the UI can echo them', async () => {
     queueAll();
     const res = await svc.getReport(q({ machine_id: '7' }));
-    expect(res.filters).toEqual({ from: '2026-08-01', to: '2026-08-31', machine_id: 7 });
+    // show: the tile that narrowed the ticket list, if any
+    expect(res.filters).toEqual({ from: '2026-08-01', to: '2026-08-31', machine_id: 7, show: null });
   });
 
   test('pagination is bounded — a caller cannot ask for the whole table', async () => {
