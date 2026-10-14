@@ -105,7 +105,15 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   app.use('/api/master',require(path.join(repo,'src/master/master.routes')));
   app.use('/api/programs',require(path.join(repo,'src/programs/program.routes')));
   app.use((e,_req,res,_next)=>res.status(e.status||500).json({message:e.message}));
-  const placement=require(path.join(repo,'src/lib/machine-placement'));await placement.load(pool);
+  const placement=require(path.join(repo,'src/lib/machine-placement'));
+  // The startup regression must accept valid tenants while excluding legacy
+  // missing owners/unknown status. These rows exist only in this disposable DB.
+  await pool.query("INSERT INTO machines(id,company_id,plant_id,is_active)VALUES(888,NULL,8,TRUE),(889,4,8,NULL)");
+  const loaded=await placement.load(pool);assert.equal(loaded.excluded,2);
+  assert.equal(placement.resolve({machine_id:888,company_id:4}),null);
+  assert.equal(placement.resolve({machine_id:889,company_id:4}),null);
+  assert.equal(placement.resolve({machine_id:7,company_id:4}).plant_id,8);
+  await pool.query('DELETE FROM machines WHERE id IN (888,889)');
   server=http.createServer(app);io=new Server(server);const sockets=require(path.join(repo,'src/lib/socket-server'));sockets.attach(io,{db:pool});
   await new Promise((resolve,reject)=>{server.on('error',reject);server.listen(0,'127.0.0.1',resolve);});
   const url=`http://127.0.0.1:${server.address().port}`;

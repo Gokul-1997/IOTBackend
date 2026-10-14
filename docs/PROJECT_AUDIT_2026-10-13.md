@@ -2,6 +2,8 @@
 
 The development source has been improved across `Backend`, `pms-backend`, `FrontendIOT` and `MobileApp`. The implementation keeps the modular API, ordered collector, PostgreSQL/TimescaleDB, Redis, Socket.IO, Angular and Expo. It adds durable machine commands, stronger company/plant authorization, transactional maintenance and job rules, accurate historical measurement handling, fewer unnecessary requests and recovery safeguards.
 
+The subsequent Ubuntu log review fixed API startup compatibility with invalid legacy machine rows and moved collector transport validation ahead of runtime startup. See [server startup correction and exact deployment steps](SERVER_STARTUP_FIX_2026-10-14.md). Invalid machine rows are excluded and diagnosed without stopping valid tenants or modifying their data.
+
 This report distinguishes source verification from deployment verification. No configured application database, customer service or physical CNC was accessed for this work. No database was dropped, telemetry retention enabled, migration applied to the configured server, or release pushed/deployed. A complete blank-database installation, physical controller integration and Android/iOS release acceptance still require the evidence listed below. Earlier October 7 reports are historical results, not new benchmarks of this release.
 
 ## Architecture decision and scaling boundary
@@ -108,8 +110,8 @@ Nightly backups imply up to 24h recovery point. A tighter requirement needs WAL/
 
 All tests below use fixtures or newly created local services. PostgreSQL fixtures use temporary Unix-socket-only clusters and are removed afterward; they are not a full production schema or Timescale compatibility rehearsal. Browser API/socket fixtures prevent external application traffic. Python tests use mocked controller adapters and local folders.
 
-- Backend final integrated Jest: 90 suites / 1,762 tests passed. The earlier dependency/coverage run passed 85 suites / 1,696 tests with real coverage instrumentation; it is a separate earlier run, not the final suite count.
-- Collector: 17 suites / 318 tests passed, including actual disposable Mosquitto QoS1 acknowledgement/replay. The reconnect fixture now installs admission before CONNACK/PUBLISH can arrive in the same read.
+- Backend final integrated Jest after the server startup patch: 90 suites / 1,764 tests passed. The earlier dependency/coverage run passed 85 suites / 1,696 tests with real coverage instrumentation; it is a separate earlier run, not the final suite count.
+- Collector after the startup configuration patch: 18 suites / 337 tests passed, including actual disposable Mosquitto QoS1 acknowledgement/replay and 19 configuration/entry checks. The reconnect fixture installs admission before CONNACK/PUBLISH can arrive in the same read.
 - Program Transfer browser: 18 tests passed, including permissions, retries, current backup, errors, stale response cancellation, local freshness and 360/390/768/1440 layouts.
 - Device reference agent: 24 Python tests passed, covering lost replies, safety, replacement backup, checksum/read-back, POST-only transport, TLS/redirect protection and fixture path escape rejection.
 - Actual PostgreSQL program/measurement fixture passed migration replay, composite ownership, concurrent commands, idempotency, rollback bytes, fresh backups, error deadlines, historical cycle weighting and partial shift buckets.

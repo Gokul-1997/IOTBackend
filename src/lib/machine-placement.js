@@ -22,6 +22,13 @@ function canonical(row) {
   return Object.freeze({ id, company_id: companyId, plant_id: plantId, is_active: row.is_active });
 }
 
+function invalidReason(row) {
+  if (!positiveId(row?.id)) return 'invalid machine id';
+  if (!positiveId(row.company_id)) return 'missing or invalid company_id';
+  if (row.plant_id != null && !positiveId(row.plant_id)) return 'invalid plant_id';
+  return 'is_active must be a boolean';
+}
+
 async function load(db) {
   ready = false;
   placements = new Map();
@@ -29,13 +36,25 @@ async function load(db) {
   // Failure leaves routing closed and is propagated to startup.
   const { rows } = await db.query('SELECT id, company_id, plant_id, is_active FROM machines');
   const next = new Map();
+  let excluded = 0;
+  const sample = [];
   for (const row of rows) {
     const entry = canonical(row);
-    if (!entry) throw new Error('Machine placement contains an invalid owner or status');
+    // Legacy unowned/invalid records cannot receive a live route. Keep other
+    // tenants available without guessing ownership or changing stored data.
+    if (!entry) {
+      excluded++;
+      if (sample.length < 25) sample.push({ id: positiveId(row?.id), reason: invalidReason(row) });
+      continue;
+    }
     next.set(entry.id, entry);
   }
   placements = next;
   ready = true;
+  if (excluded) console.warn('Live routing excluded machines with invalid placement; review their company, plant and active status.', {
+    excluded, sample, sample_limit: 25
+  });
+  return { loaded: next.size, excluded };
 }
 
 function upsert(row) {
