@@ -17,7 +17,23 @@ Progress prints IDs and result codes only. Old source objects are never deleted.
 async function main(args = process.argv.slice(2)) {
   let options;
   try { options = importer.parseOptions(args); }
-  catch (error) { process.stderr.write(`Configuration error: ${error.code || 'INVALID_OPTIONS'}. Use --help.\n`); return 2; }
+  catch (error) {
+    const code = error.code || 'INVALID_OPTIONS';
+    const missing = ['--source-origin', '--source-prefix'].filter(flag => !args.includes(flag));
+    process.stderr.write(`Configuration error: ${code}.\n`);
+    if (missing.length && ['INVALID_SOURCE_ORIGIN', 'INVALID_SOURCE_PREFIX'].includes(code)) {
+      process.stderr.write(`Missing required option${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.\n`);
+      process.stderr.write('Use the origin from an old image URL (the part before /images/).\n');
+      process.stderr.write('Example preview; replace your-old-bucket with the real bucket:\n');
+      process.stderr.write('npm run migrate:images -- --source-origin https://your-old-bucket.s3.ap-south-1.amazonaws.com --source-prefix /images/ --dry-run\n');
+    } else if (code === 'INVALID_SOURCE_ORIGIN') {
+      process.stderr.write('--source-origin must be an HTTPS origin only, such as https://your-old-bucket.s3.ap-south-1.amazonaws.com, without an image path or query.\n');
+    } else if (code === 'INVALID_SOURCE_PREFIX') {
+      process.stderr.write('--source-prefix must be the approved folder path with leading and trailing slashes, such as /images/.\n');
+    }
+    process.stderr.write('Run npm run migrate:images -- --help for all options.\n');
+    return 2;
+  }
   if (options.help) { process.stdout.write(HELP); return 0; }
   // The executable explicitly loads its own server's configuration only after
   // validating CLI flags. The reusable module and its tests never load .env.

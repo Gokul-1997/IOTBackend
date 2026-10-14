@@ -58,6 +58,8 @@ Build and deploy the frontend with the customer's API URL; canonical local refer
 
 Run this from `IOTBackend` on the server which owns the database and `STORAGE_ROOT`, after migration 046 succeeds. It uses the backend database/TLS configuration from `.env`. Take the database and file backup first. Replace the example bucket origin with the exact origin from your old machine image URLs, and `4` with the company ID you intend to migrate.
 
+Running `npm run migrate:images` without options cannot choose an approved source. Supply both `--source-origin` and `--source-prefix`. For an old URL such as `https://my-bucket.s3.ap-south-1.amazonaws.com/images/file-123.jpg`, the origin is `https://my-bucket.s3.ap-south-1.amazonaws.com` and the prefix is `/images/`. The `--` after the npm script name passes these options to the importer. Missing/invalid options stop before loading `.env` or connecting to a database.
+
 First review the plan. This reads machine references and placement only; it does not download files or change the database/storage:
 
 ```sh
