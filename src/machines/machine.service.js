@@ -4,6 +4,7 @@ const { cleanHourRate } = require('./hour-rate');
 const { pagination } = require('../lib/pagination');
 const { idOrNull, resolvePlantId } = require('../lib/plant-scope');
 const placements = require('../lib/machine-placement');
+const { validateImageReference } = require('../files/media.service');
 
 const EDITABLE = ['machine_serial_no', 'line_id', 'plant_id', 'x_axis', 'y_axis', 'z_axis',
   'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table', 'atc_tool_capacity', 'model',
@@ -55,11 +56,12 @@ exports.createMachine = async (req) => {
     await lockCompany(client, req.user.company_id);
     await enforceQuota(client, req.user.company_id);
     const { plantId, lineId } = await placement(client, req.body, req.user);
+    const imageUrl = await validateImageReference({ user: req.user, imageUrl: req.body.image_url, plantId, client });
     const columns = ['plant_id', 'company_id', 'line_id', 'machine_serial_no',
       'x_axis', 'y_axis', 'z_axis', 'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table',
       'atc_tool_capacity', 'model', 'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'api_key'];
     const params = [plantId, req.user.company_id, lineId, serial,
-      ...columns.slice(4, 17).map(key => req.body[key] ?? null), hourRate, crypto.randomBytes(16).toString('hex')];
+      ...columns.slice(4, 17).map(key => key === 'image_url' ? imageUrl : req.body[key] ?? null), hourRate, crypto.randomBytes(16).toString('hex')];
     const { rows } = await client.query(
       `INSERT INTO machines (${columns.join(', ')}) VALUES (${params.map((_, i) => '$' + (i + 1)).join(', ')})
        RETURNING id, plant_id, machine_serial_no, api_key`, params
@@ -179,7 +181,7 @@ exports.getMachines = async (req) => {
 
 async function scopedMachine(client, req, lock = '') {
   const { rows } = await client.query(
-    `SELECT id, plant_id, line_id, is_active FROM machines
+    `SELECT id, plant_id, line_id, is_active, image_url FROM machines
       WHERE id = $1 AND company_id = $2 AND ($3::int IS NULL OR plant_id = $3) ${lock}`,
     [idOrNull(req.params.id, 'Machine'), req.user.company_id, req.user.plant_id ?? null]
   );
@@ -233,17 +235,24 @@ exports.updateMachine = async (req) => {
     if (!patch.machine_serial_no || patch.machine_serial_no.length > 100) throw { status: 400, message: 'Machine serial number is required (maximum 100 characters)' };
   }
   const needsPlacement = 'plant_id' in patch || 'line_id' in patch;
+  const needsTransaction = needsPlacement || 'image_url' in patch;
   const routingWrite = placements.begin(idOrNull(req.params.id, 'Machine'));
   let client;
   let previousPlantId;
   try {
-    client = needsPlacement ? await pool.connect() : pool;
-    if (needsPlacement) {
+    client = needsTransaction ? await pool.connect() : pool;
+    if (needsTransaction) {
       await client.query('BEGIN');
       const current = await scopedMachine(client, req, 'FOR UPDATE');
-      previousPlantId = current.plant_id;
-      const { plantId, lineId } = await placement(client, patch, req.user, current);
-      patch.plant_id = plantId; patch.line_id = lineId;
+      if (needsPlacement) {
+        previousPlantId = current.plant_id;
+        const { plantId, lineId } = await placement(client, patch, req.user, current);
+        patch.plant_id = plantId; patch.line_id = lineId;
+      }
+      if ('image_url' in patch) {
+        patch.image_url = await validateImageReference({ user: req.user, imageUrl: patch.image_url,
+          plantId: patch.plant_id ?? current.plant_id, existingImageUrl: current.image_url, client });
+      }
     }
     const keys = Object.keys(patch), values = Object.values(patch);
     values.push(idOrNull(req.params.id, 'Machine'), req.user.company_id, req.user.plant_id ?? null);
@@ -268,12 +277,12 @@ exports.updateMachine = async (req) => {
         [patch.plant_id, result.rows[0].id, req.user.company_id]);
       }
       await client.query('UPDATE machine_shift_config SET plant_id = $1 WHERE machine_id = $2', [patch.plant_id, result.rows[0].id]);
-      await client.query('COMMIT');
     }
+    if (needsTransaction) await client.query('COMMIT');
     const { ftp_pass, ftp_port, ftp_user, ftp_dir, ip_address, program_path, ...machine } = result.rows[0];
     return machine;
   } catch (err) {
-    if (needsPlacement && client) await client.query('ROLLBACK').catch(() => {});
+    if (needsTransaction && client) await client.query('ROLLBACK').catch(() => {});
     throw err;
-  } finally { if (needsPlacement) client?.release(); await placements.finish(routingWrite, pool); }
+  } finally { if (needsTransaction) client?.release(); await placements.finish(routingWrite, pool); }
 };

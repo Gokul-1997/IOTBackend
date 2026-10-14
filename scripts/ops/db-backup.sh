@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Logical backup plus integrity manifest. Includes the database only: back up
-# PROGRAM_TRANSFER_DIR and the collector journal separately at a consistent boundary.
+# STORAGE_ROOT, the legacy PROGRAM_TRANSFER_DIR and the collector journal
+# separately at a consistent boundary. S3_URI is an optional off-host copy;
+# application uploads never require S3.
 set -euo pipefail
 umask 077
 : "${PGDATABASE:?Set PGDATABASE to the database to back up}"

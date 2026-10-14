@@ -41,4 +41,5 @@ module.exports = app => {
 
   // ── File Upload ───────────────────────────────────────────────
   app.use('/api/upload',       require('./upload/upload.routes'));
+  app.use('/api/files',        require('./files/media.routes'));
 };

@@ -69,3 +69,34 @@ test('moving plants removes incompatible shifts and attaches the new timetable i
   expect(calls[6].params).toEqual([6, 7]);
   expect(calls.at(-1).text).toBe('COMMIT');
 });
+
+const imageName = '859963eb-8a1c-49ec-89a0-076f25b141cb.png';
+const imageUrl = company => `/api/files/companies/${company}/images/machines/${imageName}`;
+test('machine creation cannot attach another company\'s local image', async () => {
+  begin(); mockDb.queueResponse(response([{ id: 5 }]));
+  await expect(svc.createMachine(req({ plant_id: 5, image_url: imageUrl(6) }))).rejects.toMatchObject({ status: 404 });
+  expect(mockDb.calls().some(call => /INSERT INTO machines/.test(call.text))).toBe(false);
+  expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+});
+test('image-only machine edits also validate ownership before writing', async () => {
+  mockDb.queueResponse(response(), response([{ id: 7, plant_id: 5, image_url: null }]));
+  await expect(svc.updateMachine(req({ image_url: imageUrl(6) }))).rejects.toMatchObject({ status: 404 });
+  expect(mockDb.calls().some(call => /UPDATE machines/.test(call.text))).toBe(false);
+  expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+});
+test('machine edits cannot attach a fresh local image from a different plant', async () => {
+  mockDb.queueResponse(response(), response([{ id: 7, plant_id: 5, image_url: null }]),
+    response([{ company_id: 4, plant_id: 6, filename: imageName,
+      storage_key: `company-4/images/machines/${imageName}`, mime_type: 'image/png' }]));
+  await expect(svc.updateMachine(req({ image_url: imageUrl(4) }))).rejects.toMatchObject({ status: 400, code: 'IMAGE_PLANT_MISMATCH' });
+  expect(mockDb.calls().some(call => /UPDATE machines/.test(call.text))).toBe(false);
+  expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+});
+test('an ordinary machine edit can preserve its existing legacy image URL', async () => {
+  const legacy = 'https://legacy-bucket.s3.example.com/images/old.png';
+  mockDb.queueResponse(response(), response([{ id: 7, plant_id: 5, image_url: legacy }]),
+    response([{ id: 7, plant_id: 5, image_url: legacy }]), response());
+  await svc.updateMachine(req({ image_url: legacy }));
+  expect(mockDb.calls().find(call => /UPDATE machines/.test(call.text)).params).toContain(legacy);
+  expect(mockDb.calls().at(-1).text).toBe('COMMIT');
+});

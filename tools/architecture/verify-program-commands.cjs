@@ -39,6 +39,7 @@ async function main() {
       await pool.query(fs.readFileSync(path.join(__dirname, '../../src/migrations', file), 'utf8'));
     }
     process.env.PROGRAM_TRANSFER_DIR = path.join(root, 'files');
+    process.env.STORAGE_ROOT = path.join(root, 'unified-files');
     const stub = (relative, exports) => {
       const filename = require.resolve(relative);
       require.cache[filename] = { id: filename, filename, loaded: true, exports };
@@ -110,11 +111,12 @@ async function main() {
     assert.equal((await commands.status(req('view-timeout-001'))).jobs.find(j => j.action === 'BACKUP').error_code, 'DEVICE_TIMEOUT');
     // A failed SQL write removes only the new upload bytes, never earlier references.
     await pool.query("CREATE FUNCTION reject_new_command() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.request_key='rollback-upload-001' THEN RAISE EXCEPTION 'injected rollback'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_command BEFORE INSERT ON program_jobs FOR EACH ROW EXECUTE FUNCTION reject_new_command()");
-    const before = fs.readdirSync(path.join(storage.ROOT, 'company-1/192.168.1.7')).sort();
+    const uploadFolder = path.join(storage.ROOT, 'company-1/programs/machine-7/uploads');
+    const before = fs.readdirSync(uploadFolder).sort();
     const rowsBefore = (await pool.query('SELECT count(*)::int n FROM program_files')).rows[0].n;
     await assert.rejects(commands.transfer(req('rollback-upload-001')), /injected rollback/);
     assert.equal((await pool.query('SELECT count(*)::int n FROM program_files')).rows[0].n, rowsBefore);
-    assert.deepEqual(fs.readdirSync(path.join(storage.ROOT, 'company-1/192.168.1.7')).sort(), before);
+    assert.deepEqual(fs.readdirSync(uploadFolder).sort(), before);
     await assert.rejects(pool.query('INSERT INTO program_current(company_id,machine_id,file_id) VALUES(2,8,$1)', [referenceId]), { code: '23503' });
     await pool.query(`
       CREATE TABLE shifts(id int PRIMARY KEY,company_id int,start_time time,end_time time);

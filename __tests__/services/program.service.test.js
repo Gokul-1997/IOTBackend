@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-svc-'));
+process.env.STORAGE_ROOT = path.join(TMP, 'unified');
 process.env.PROGRAM_TRANSFER_DIR = path.join(TMP, 'ProgramTransfer');
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
@@ -36,7 +37,10 @@ const jobRow = (o = {}) => ({ id: '11', company_id: 5, machine_id: 7, machine_se
 
 const folderFiles = m => {
   const dir = path.join(storage.ROOT, storage.machineFolder(m));
-  return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  return ['uploads', 'backups', 'fetched'].flatMap(purpose => {
+    const folder = path.join(dir, purpose);
+    return fs.existsSync(folder) ? fs.readdirSync(folder) : [];
+  });
 };
 
 describe('uploading a program', () => {
@@ -183,7 +187,7 @@ describe('device tokens', () => {
     );
     const r = await svc.createDeviceToken(req({ params: { machineId: '7' } }));
     expect(r.token).toMatch(deviceToken.SHAPE);
-    expect(r.device.folder).toBe('company-5/192.168.200.3');
+    expect(r.device.folder).toBe('company-5/programs/machine-7');
 
     const calls = mockDb.calls();
     expect(calls.find(c => /UPDATE program_devices SET revoked_at/.test(c.text)).params).toEqual([7, 2]);
@@ -207,8 +211,8 @@ test('the machine list shows the IP the controller reports when none is set, and
     { id: 20, company_id: 4, machine_serial_no: 'VMC - 3', ip_address: null, controller_ip: null, program_path: null, online: false }
   ], rowCount: 2 });
   const [m19, m20] = await svc.listMachines(req());
-  expect(m19).toMatchObject({ ip_address: '192.168.200.1', folder: 'company-4/192.168.200.1' });
-  expect(m20).toMatchObject({ ip_address: null, folder: 'company-4/machine-20' });
+  expect(m19).toMatchObject({ ip_address: '192.168.200.1', folder: 'company-4/programs/machine-19' });
+  expect(m20).toMatchObject({ ip_address: null, folder: 'company-4/programs/machine-20' });
   expect(m19).not.toHaveProperty('controller_ip');
   expect(m19).not.toHaveProperty('company_id');
   expect(mockDb.calls()[0].text).toMatch(/m\.controller_ip/);

@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-dev-'));
+process.env.STORAGE_ROOT = path.join(TMP, 'unified');
 process.env.PROGRAM_TRANSFER_DIR = path.join(TMP, 'ProgramTransfer');
 process.env.PROGRAM_MAX_MB = '1';
 
@@ -252,7 +253,7 @@ describe('POST /files — one upload, tagged', () => {
     expect(res.status).toBe(201);
     expect(res.body.file).toMatchObject({ id: 41, kind: 'BACKUP' });
     const ins = mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text));
-    expect(ins.params.slice(0, 6)).toEqual([5, 7, 'company-5/192.168.200.3', expect.stringMatching(/_BACKUP_O1234\.nc$/), 'O1234.nc', 'BACKUP']);
+    expect(ins.params.slice(0, 6)).toEqual([5, 7, 'company-5/programs/machine-7/backups', expect.stringMatching(/_BACKUP_O1234\.nc$/), 'O1234.nc', 'BACKUP']);
     expect(fs.existsSync(path.join(storage.ROOT, ins.params[2], ins.params[3]))).toBe(true);
     expect(mockDb.calls().find(c => /SET backup_file_id/.test(c.text)).params).toEqual(['11', '41']);
   });

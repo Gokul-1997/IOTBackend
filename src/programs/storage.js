@@ -1,30 +1,21 @@
-/**
- * The ProgramTransfer folder: where every program file is kept on the server.
- *
- *   <PROGRAM_TRANSFER_DIR>/
- *     company-5/
- *       192.168.200.3/
- *         20261005-103012_NEW_O1234.nc
- *         20261005-103020_BACKUP_O1234.nc
- *         20261005-111502_FETCHED_O2001.nc
- *
- * One folder per machine IP, as asked, under a folder per company: two
- * companies on this one server can both have a machine at 192.168.1.10, and
- * their programs must never land in the same folder. A machine with no IP
- * set gets machine-<id> instead.
- *
- * Every name is built here, from parts that are checked here, so nothing a
- * user or a device sends can reach a path outside the root.
+/** Immutable programs in the unified company storage tree:
+ * <STORAGE_ROOT>/company-5/programs/machine-7/{uploads|backups|fetched}/...
+ * IP changes never change a machine's new storage location. Existing database
+ * folders company-N/<IP or machine-ID> remain in the legacy ProgramTransfer
+ * root and are read there; this module never moves files or rewrites history.
  */
-const fs = require('fs');
-const fsp = fs.promises;
 const path = require('path');
 const net = require('net');
 const crypto = require('crypto');
+const { Readable } = require('stream');
+const local = require('../files/local-storage');
 
-const ROOT = path.resolve(
+const ROOT = local.ROOT;
+const LEGACY_ROOT = path.resolve(
   process.env.PROGRAM_TRANSFER_DIR || path.join(__dirname, '..', '..', 'storage', 'ProgramTransfer')
 );
+const legacy = local.createStore(LEGACY_ROOT);
+const PURPOSES = Object.freeze({ NEW: 'uploads', BACKUP: 'backups', FETCHED: 'fetched' });
 
 /** NC programs are text; a mould-surface program can still run to many MB. */
 const MAX_BYTES = Math.max(1, Number(process.env.PROGRAM_MAX_MB) || 20) * 1024 * 1024;
@@ -79,11 +70,18 @@ function machineIp(machine) {
     .find(v => net.isIP(v)) || null;
 }
 
-/** The machine's folder, relative to the root: company-<id>/<ip>, or machine-<id> without one. */
+function positiveId(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^[1-9]\d*$/.test(value))) {
+    throw fail('A valid company and machine ID are required.', 'BAD_ID');
+  }
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) throw fail('A valid company and machine ID are required.', 'BAD_ID');
+  return id;
+}
+
+/** Stable base folder; save adds the purpose below this directory. */
 function machineFolder(machine) {
-  const ip = machineIp(machine);
-  const leaf = ip ? ip.replace(/:/g, '-') : `machine-${Number(machine.id)}`;   // ':' is not allowed in a Windows path
-  return `company-${Number(machine.company_id)}/${leaf}`;
+  return `company-${positiveId(machine?.company_id)}/programs/machine-${positiveId(machine?.id)}`;
 }
 
 /** 20261005-103012 — plant time (IST), so the folder reads like the shop's clock. */
@@ -93,13 +91,19 @@ function stamp(date = new Date()) {
   return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
 }
 
-/** A path inside the root, or an error — the last guard against traversal. */
-function resolveInside(folder, storedName) {
-  const full = path.resolve(ROOT, folder, storedName || '');
-  if (full !== ROOT && !full.startsWith(ROOT + path.sep)) {
-    throw fail('That file is outside the ProgramTransfer folder.', 'BAD_PATH', 400);
+/** The stored folder determines its format; new paths never fall back to old roots. */
+function storeFor(folder) {
+  if (typeof folder === 'string' && /^company-[1-9]\d*\/programs\/machine-[1-9]\d*(?:\/(?:uploads|backups|fetched))?$/.test(folder)) return local;
+  const match = typeof folder === 'string' && /^company-[1-9]\d*\/([^/\\]+)$/.exec(folder);
+  if (match && (/^machine-[1-9]\d*$/.test(match[1]) || net.isIP(match[1]) || net.isIP(match[1].replace(/-/g, ':')))) {
+    return legacy;
   }
-  return full;
+  throw fail('That file is outside the allowed program storage folder.', 'BAD_PATH');
+}
+
+/** Lexical path guard; file operations also reject directory/file symlinks. */
+function resolveInside(folder, storedName) {
+  return storeFor(folder).resolveInside(folder, storedName);
 }
 
 const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
@@ -118,54 +122,56 @@ function checkContent(buffer) {
 }
 
 /**
- * Keep a program in its machine's folder. Written to a temporary name first
- * and then linked to its final one, so a half-written file never carries a
- * real name, and an existing file is never replaced: a clash (two files in
- * the same second) takes the next free -2, -3 … instead.
+ * Keep a program under its machine and purpose, using the shared immutable
+ * fsynced writer. A same-second clash takes the next available name.
  */
 async function save({ machine, kind, programName, buffer, at = new Date() }) {
+  if (typeof kind !== 'string' || !Object.hasOwn(PURPOSES, kind)) throw fail('Unknown program file kind.', 'BAD_KIND');
   checkContent(buffer);
   const name = safeProgramName(programName);
-  const folder = machineFolder(machine);
-  const dir = resolveInside(folder);
-  await fsp.mkdir(dir, { recursive: true, mode: 0o750 });
-
-  const tmp = path.join(dir, `.upload-${crypto.randomBytes(8).toString('hex')}`);
-  await fsp.writeFile(tmp, buffer, { flag: 'wx', mode: 0o640 });
-  try {
-    const base = `${stamp(at)}_${kind}_`;
-    for (let n = 1; n < 100; n++) {
-      const storedName = n === 1 ? base + name : `${base}${n}_${name}`;
-      try {
-        await fsp.link(tmp, resolveInside(folder, storedName));
-        return { folder, storedName, programName: name, size: buffer.length, sha256: sha256(buffer) };
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
-      }
+  const folder = `${machineFolder(machine)}/${PURPOSES[kind]}`;
+  const base = `${stamp(at)}_${kind}_`;
+  for (let n = 1; n < 100; n++) {
+    const storedName = n === 1 ? base + name : `${base}${n}_${name}`;
+    try {
+      await local.write(folder, storedName, buffer);
+      return { folder, storedName, programName: name, size: buffer.length, sha256: sha256(buffer) };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
     }
-    throw fail('Could not find a free file name.', 'NAME_CLASH', 500);
-  } finally {
-    await fsp.unlink(tmp).catch(() => {});
   }
+  throw fail('Could not find a free file name.', 'NAME_CLASH', 500);
 }
 
 function open(folder, storedName) {
-  return fs.createReadStream(resolveInside(folder, storedName));
+  const store = storeFor(folder);
+  store.resolveInside(folder, storedName);
+  try {
+    const stream = store.openSync(folder, storedName);
+    // Existing download handlers await the read stream's `open` event.
+    // Its descriptor has already been opened safely, so preserve that event.
+    queueMicrotask(() => { if (!stream.destroyed) stream.emit('open', stream.fd); });
+    return stream;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+    // Preserve missing-file errors on the stream for existing HTTP mapping.
+    const stream = new Readable({ read() {} });
+    queueMicrotask(() => stream.destroy(err));
+    return stream;
+  }
 }
 
 async function read(folder, storedName) {
-  return fsp.readFile(resolveInside(folder, storedName));
+  return storeFor(folder).read(folder, storedName);
 }
 
 /** Delete a file; one that is already gone is not an error. */
 async function remove(folder, storedName) {
-  await fsp.unlink(resolveInside(folder, storedName)).catch(err => {
-    if (err.code !== 'ENOENT') throw err;
-  });
+  return storeFor(folder).remove(folder, storedName);
 }
 
 module.exports = {
-  ROOT, MAX_BYTES, ALLOWED_EXTENSIONS,
+  ROOT, LEGACY_ROOT, MAX_BYTES, ALLOWED_EXTENSIONS,
   safeProgramName, machineIp, machineFolder, stamp, checkContent, sha256,
   save, open, read, remove, resolveInside
 };

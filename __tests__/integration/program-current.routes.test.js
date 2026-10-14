@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-current-'));
+process.env.STORAGE_ROOT = path.join(TMP, 'unified');
 process.env.PROGRAM_TRANSFER_DIR = path.join(TMP, 'ProgramTransfer');
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);

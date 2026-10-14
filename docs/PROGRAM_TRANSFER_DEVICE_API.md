@@ -135,3 +135,7 @@ Existing telemetry can continue over its current MQTT connection. A device that 
 The same MQTT client could subscribe to a private command notification topic after broker ACLs and device support are configured, then collect the durable command through the POST API. Send small notifications over MQTT and file bytes over HTTPS; a notification does not prove delivery or CNC completion. The database command and verified device result remain authoritative.
 
 Legacy file/publication and SEND/FETCH APIs remain for existing integrations. The new operator screen uses the acknowledged command flow above. No Postman collection or environment files are shipped.
+
+## Server file storage
+
+New files use `STORAGE_ROOT/company-<company_id>/programs/machine-<machine_id>/uploads`, `backups` or `fetched`. Machine IDs keep paths stable when controller IPs change. Images use `STORAGE_ROOT/company-<company_id>/images/machines`. Historical program records continue reading their previous `PROGRAM_TRANSFER_DIR` (default `Backend/storage/ProgramTransfer`); retain that directory. These are private server locations, unrelated to the CNC's configured program path. Device APIs and MQTT telemetry are unchanged. Back up the database and matching file roots together. See `LOCAL_FILE_STORAGE.md` for deployment details.
