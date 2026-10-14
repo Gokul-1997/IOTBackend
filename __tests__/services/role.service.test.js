@@ -168,7 +168,7 @@ describe('assignPermissions()', () => {
       { rows: [{ permission_id: 1 }, { permission_id: 2 }] },                        // company grants
       { rows: [{ id: 1, permission_key: 'page:machines:view' },
                { id: 2, permission_key: 'page:machines:edit' }] },                  // the pages
-      {}, {}, {}                                                                     // DELETE, INSERT, COMMIT
+      {}, {}, { rows: [] }, {}                                                        // DELETE, INSERT, revision, COMMIT
     );
     const out = await svc.assignPermissions(10, [1, 2], companyA);
     expect(out.pages).toBe(2);

@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const { sslOptions, positiveInteger } = require('./config/database');
 require('dotenv').config();
 
 /*
@@ -15,9 +16,7 @@ require('dotenv').config();
  *   DB_STATEMENT_TIMEOUT_MS  longest a single query may run (default 60 s, as the server)
  *   DB_SSL                 'true' / 'false'; default: on when NODE_ENV=production
  */
-const ssl = process.env.DB_SSL != null
-  ? (process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false)
-  : (process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false);
+const ssl = sslOptions();
 
 const pool = new Pool({
   host: process.env.POSTGRESQL_HOST,
@@ -25,10 +24,10 @@ const pool = new Pool({
   database: process.env.POSTGRESQL_DATABASE,
   password: process.env.POSTGRESQL_PASSWORD,
   port: Number(process.env.POSTGRESQL_PORT),
-  max: Number(process.env.DB_POOL_MAX) || 20,
+  max: positiveInteger(process.env, 'DB_POOL_MAX', 20, 200),
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-  statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS) || 60000,
+  statement_timeout: positiveInteger(process.env, 'DB_STATEMENT_TIMEOUT_MS', 60000, 600000),
   idle_in_transaction_session_timeout: 60000,
   application_name: 'iot-api',
   ssl

@@ -33,6 +33,7 @@
  */
 
 const pool = require('../db');
+const { plantSql, nullablePlantSql, current } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 const cache = require('./cache');
 
@@ -140,7 +141,7 @@ const DAILY_ENERGY_CTE = `
 async function settingsFor(companyId) {
   const { rows } = await pool.query(
     `SELECT machine_id, cost_per_kwh, currency, overload_kw
-       FROM energy_settings WHERE company_id = $1`,
+       FROM energy_settings WHERE company_id = $1${nullablePlantSql('machine_id')}`,
     [companyId]
   );
   const byMachine = new Map();
@@ -172,7 +173,7 @@ async function machineFigures({ companyId, machineId, start, end }) {
               SUM(ph.produced_qty)::bigint AS produced
          FROM production_hourly ph
          JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
-        WHERE ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
+        WHERE TRUE${plantSql('ph.machine_id')} AND ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
           ${machineId ? `AND ph.machine_id = $${params.length}` : ''}
         GROUP BY ph.machine_id
      ),
@@ -186,7 +187,7 @@ async function machineFigures({ companyId, machineId, start, end }) {
               AVG(t.voltage) AS avg_voltage, AVG(t.current) AS avg_current,
               COUNT(t.voltage)::bigint AS voltage_readings, COUNT(t.current)::bigint AS current_readings
          FROM telemetry_raw t
-        WHERE t.company_id = $1
+        WHERE t.company_id = $1${plantSql('t.machine_id')}
           AND t.received_at >= $2::timestamptz AND t.received_at <= $3::timestamptz
           AND (t.power IS NOT NULL OR t.voltage IS NOT NULL OR t.current IS NOT NULL)
           ${mf}
@@ -199,7 +200,7 @@ async function machineFigures({ companyId, machineId, start, end }) {
        FROM machines m
        LEFT JOIN run r          ON r.machine_id = m.id
        LEFT JOIN peak pk        ON pk.machine_id = m.id
-      WHERE m.company_id = $1 AND m.is_active = TRUE
+      WHERE m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id')}
         ${machineId ? `AND m.id = $${params.length}` : ''}
       ORDER BY m.machine_serial_no`,
     params
@@ -219,7 +220,7 @@ async function consumption({ companyId, machineId, start, end }) {
   const mf = machineId ? (params.push(machineId), ` AND t.machine_id = $${params.length}`) : '';
 
   const { rows } = await pool.query(
-    `WITH ${DAILY_ENERGY_CTE.replace('%MACHINE%', mf)}
+    `WITH ${DAILY_ENERGY_CTE.replace('%MACHINE%', mf + plantSql('t.machine_id'))}
      SELECT CASE WHEN GROUPING(machine_id) = 0 THEN 'machine'
                  WHEN GROUPING(day) = 0        THEN 'day'
                  ELSE 'month' END               AS kind,
@@ -302,7 +303,7 @@ async function byShift({ companyId, machineId, start, end }) {
        FROM production_hourly ph
        JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
        LEFT JOIN shifts s ON s.id = ph.shift_id
-      WHERE ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
+      WHERE TRUE${plantSql('ph.machine_id')} AND ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
         ${mf}
       GROUP BY s.shift_name, ph.shift_id
       ORDER BY kwh DESC`,
@@ -471,7 +472,7 @@ exports.getSettings = async (companyId) => {
             m.machine_serial_no
        FROM energy_settings es
        LEFT JOIN machines m ON m.id = es.machine_id
-      WHERE es.company_id = $1
+      WHERE es.company_id = $1${nullablePlantSql('es.machine_id')}
       ORDER BY es.machine_id NULLS FIRST`,
     [companyId]
   );
@@ -480,6 +481,7 @@ exports.getSettings = async (companyId) => {
 
 exports.saveSettings = async ({ company_id, machine_id, cost_per_kwh, currency, overload_kw, user_id }) => {
   const machineId = parseId(machine_id, 'machine_id');
+  if (!machineId && current()?.plantId != null) throw httpError('Company-wide energy settings require company administration', 403);
 
   const numOrNull = (v, label) => {
     if (v === undefined || v === null || v === '') return null;
@@ -492,7 +494,7 @@ exports.saveSettings = async ({ company_id, machine_id, cost_per_kwh, currency, 
 
   if (machineId) {
     const { rowCount } = await pool.query(
-      `SELECT 1 FROM machines WHERE id = $1 AND company_id = $2`, [machineId, company_id]);
+      `SELECT 1 FROM machines WHERE id = $1 AND company_id = $2${plantSql('id')}`, [machineId, company_id]);
     if (!rowCount) throw httpError('Machine not found or access denied', 404);
   }
 

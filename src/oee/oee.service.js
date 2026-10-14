@@ -4,6 +4,7 @@
  */
 
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql, entityPlantSql: linePlantSql } = require('../lib/read-scope');
 
 /* ===============================================
    GET META (Machines, Shifts, Lines)
@@ -12,11 +13,11 @@ exports.getMeta = async (plantId, companyId) => {
 
   try {
 
-    if (!companyId && !plantId) {
+    if (!companyId) {
       throw new Error('Company ID is required');
     }
 
-    const filterVal = companyId || plantId;
+    const filterVal = companyId;
 
     // Get LINES
     const linesQuery = await db.query(`
@@ -24,7 +25,7 @@ exports.getMeta = async (plantId, companyId) => {
         l.id,
         l.name
       FROM line l
-      WHERE l.company_id = $1
+      WHERE l.company_id = $1${linePlantSql('l', plantId, companyId)}
       ORDER BY l.name ASC
     `, [filterVal]);
 
@@ -37,7 +38,7 @@ exports.getMeta = async (plantId, companyId) => {
         l.name as line_name
       FROM machines m
       LEFT JOIN line l ON l.id = m.line_id
-      WHERE m.company_id = $1 AND m.is_active = TRUE
+      WHERE m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id', plantId, companyId)}
       ORDER BY m.machine_serial_no ASC
     `, [filterVal]);
 
@@ -50,7 +51,7 @@ exports.getMeta = async (plantId, companyId) => {
         s.start_time,
         s.end_time
       FROM shifts s
-      WHERE s.company_id = $1 AND s.is_active = TRUE
+      WHERE s.company_id = $1 AND s.is_active = TRUE${sharedEntityPlantSql('s', plantId, companyId)}
       ORDER BY s.start_time ASC
     `, [filterVal]);
 
@@ -118,7 +119,7 @@ exports.getReports = async (query, plantId, companyId) => {
 
     // Company filter (ALWAYS)
     where.push(`m.company_id = $${paramIndex++}`);
-    params.push(companyId || plantId);
+    params.push(companyId);
 
     // Line filter (optional)
     if (line_id && line_id !== 'null' && line_id !== '') {
@@ -154,7 +155,7 @@ exports.getReports = async (query, plantId, companyId) => {
       params.push(searchTerm, searchTerm);
     }
 
-    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const whereClause = (where.length ? `WHERE ${where.join(' AND ')}` : '') + plantSql('m.id', plantId, companyId);
 
     /* ===============================
        COUNT TOTAL RECORDS
@@ -252,7 +253,7 @@ exports.exportCSV = async (query, plantId, companyId) => {
     let paramIndex = 1;
 
     where.push(`m.company_id = $${paramIndex++}`);
-    params.push(companyId || plantId);
+    params.push(companyId);
 
     if (line_id && line_id !== 'null') {
       where.push(`l.id = $${paramIndex++}`);
@@ -279,7 +280,7 @@ exports.exportCSV = async (query, plantId, companyId) => {
       params.push(`%${search}%`);
     }
 
-    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const whereClause = (where.length ? `WHERE ${where.join(' AND ')}` : '') + plantSql('m.id', plantId, companyId);
 
     const query_sql = `
       SELECT

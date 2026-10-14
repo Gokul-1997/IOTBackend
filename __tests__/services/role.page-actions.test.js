@@ -28,8 +28,8 @@ describe('Quality — recording rejects and rework needs Edit', () => {
     expect(guardsOf(router, 'post', '/entry')).toEqual(['page:quality:edit']);
   });
 
-  test('reading the Quality page is unchanged', () => {
-    expect(guardsOf(router, 'get', '/')).toEqual([]);
+  test('reading the Quality page requires its view permission', () => {
+    expect(guardsOf(router, 'get', '/')).toEqual(['page:quality:view']);
   });
 
   test('a role with Quality view only is refused; one with Edit gets through', async () => {

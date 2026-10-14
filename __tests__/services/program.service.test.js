@@ -17,7 +17,10 @@ const storage = require('../../src/programs/storage');
 const deviceToken = require('../../src/programs/device-token');
 
 afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
-beforeEach(() => resetDb());
+beforeEach(async () => {
+  resetDb();
+  await require('../../src/redis').set('company_grants:5', '[]', 'EX', 60);
+});
 
 const one = row => ({ rows: [row], rowCount: 1 });
 const none = { rows: [], rowCount: 0 };
@@ -102,10 +105,10 @@ describe('legacy queued jobs must have their program path', () => {
       .rejects.toMatchObject({ code: 'NO_PROGRAM_PATH' });
   });
 
-  test('a plain upload into the server folder does not need it', async () => {
+  test('a plain upload also requires the saved machine program path', async () => {
     mockDb.queueResponse(one(noPath), one({ id: '60', machine_id: 7, folder: 'f', stored_name: 's', program_name: 'O5.nc', kind: 'NEW' }));
-    const r = await svc.uploadFile(req({ body: { machine_id: '7' }, file: { originalname: 'O5.nc', buffer: program } }));
-    expect(r.job).toBeNull();
+    await expect(svc.uploadFile(req({ body: { machine_id: '7' }, file: { originalname: 'O5.nc', buffer: program } })))
+      .rejects.toMatchObject({ status: 409, code: 'NO_PROGRAM_PATH' });
   });
 });
 
@@ -238,9 +241,9 @@ describe('direct current program publication', () => {
     expect(folderFiles(machine7)).toEqual(before);
   });
 
-  test('saves the file and publishes its pointer in one transaction without a path or jobs', async () => {
+  test('compatibility publication uses configured path and does not claim machine delivery', async () => {
     mockDb.queueResponse(
-      one({ ...machine7, program_path: null }), none,
+      one(machine7), none,
       one({ id: '70', machine_id: 7, program_name: 'O7001.nc', kind: 'NEW' }), none, none
     );
     const result = await svc.publishCurrentProgram(publishRequest());

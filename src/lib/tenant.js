@@ -14,6 +14,7 @@
  * business either.
  */
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('./read-scope');
 
 const TABLES = {
   machine_id: 'machines', machine_ids: 'machines',
@@ -57,7 +58,7 @@ async function ownedOrThrow(companyId, refs, client = db) {
 
   const sql = checks
     .map((c, i) => `SELECT ${i} AS k, count(*)::int AS n FROM ${c.table} WHERE id = ANY($${i + 2}::int[])
-                    AND ${SHARED.has(c.table) ? '(company_id = $1 OR company_id IS NULL)' : 'company_id = $1'}`)
+                    AND ${SHARED.has(c.table) ? '(company_id = $1 OR company_id IS NULL)' : 'company_id = $1'}${c.table === 'machines' ? plantSql('id') : c.table === 'shifts' ? sharedEntityPlantSql('shifts') : ''}`)
     .join(' UNION ALL ');
   const { rows } = await client.query(sql, [companyId, ...checks.map(c => c.ids)]);
   for (const r of rows) {

@@ -1,4 +1,5 @@
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { fleetPage } = require('./fleet-page');
 
 /** Return a Date whose .getFullYear/.getHours/… reflect IST, regardless of server TZ */
@@ -41,7 +42,7 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
   const { rows: shiftRows } = await db.query(`
     SELECT id,shift_code,start_time,end_time,break_minutes
     FROM shifts
-    WHERE company_id=$1
+    WHERE company_id=$1${sharedEntityPlantSql('shifts', plant_id, company_id)}
       AND (
         (start_time<=end_time AND
          (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time
@@ -103,11 +104,11 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
 
   /* ================= MACHINES ================= */
 
-  const pageResult = pageOptions ? await fleetPage(company_id, pageOptions) : null;
+  const pageResult = pageOptions ? await fleetPage(company_id, pageOptions, plant_id) : null;
   const { rows: machines } = pageResult ? { rows: pageResult.machines } : await db.query(`
     SELECT id,machine_serial_no,image_url
     FROM machines
-    WHERE company_id=$1
+    WHERE company_id=$1${plantSql('id', plant_id, company_id)}
     AND is_active=TRUE
     ORDER BY id
   `, [company_id]);
@@ -433,7 +434,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const { rows: machineRows } = await db.query(`
       SELECT id, machine_serial_no, image_url
       FROM machines
-      WHERE id = $1 AND company_id = $2
+      WHERE id = $1 AND company_id = $2${plantSql('id', plantId, companyId)}
     `, [machineId, companyId]);
  
     if (!machineRows.length) return null;
@@ -445,7 +446,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const { rows: shiftRows } = await db.query(`
       SELECT id, shift_code, start_time, end_time
       FROM shifts
-      WHERE company_id = $1
+      WHERE company_id = $1${sharedEntityPlantSql('shifts', plantId, companyId)}
       AND is_active = true
       AND (
         (start_time <= end_time AND

@@ -64,6 +64,7 @@ describe('assignCompanyPermissions — input is checked before anything is touch
       { rows: [{ id: 1 }, { id: 2 }] },          // both are page permissions
       { rows: [] },                              // no current grants
       {},                                        // INSERT
+      { rows: [] },                              // advance user authorization revision
       {}                                         // COMMIT
     );
     const out = await svc.assignCompanyPermissions(4, ['1', 2, 2, '1'], 1);
@@ -104,6 +105,7 @@ describe('assignCompanyPermissions — a diff, scoped to page permissions', () =
       {},                                                   // DELETE company_permissions (removes 1)
       {},                                                   // INSERT (adds 3)
       { rowCount: 0, rows: [] },                            // cascade: no role held 1
+      { rows: [] },                                         // revision
       {}                                                    // COMMIT
     );
     const out = await svc.assignCompanyPermissions(4, [2, 3], 7);
@@ -126,7 +128,7 @@ describe('assignCompanyPermissions — a diff, scoped to page permissions', () =
   });
 
   test('the current-grants read is limited to page permissions, so legacy keys are never deleted', async () => {
-    mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 1 }] }, { rows: [] }, {}, {});
+    mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 1 }] }, { rows: [] }, {}, { rows: [] }, {});
     await svc.assignCompanyPermissions(4, [1], 1);
     const read = mockDb.calls().find(c => /FROM company_permissions cp/.test(c.text));
     expect(read.text).toMatch(/permission_key LIKE 'page:%'/);
@@ -146,7 +148,7 @@ describe('assignCompanyPermissions — a revoke has to bite at once', () => {
 
   test('the cached grants are cleared after a save, so the API stops honouring a revoked page immediately', async () => {
     mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] },
-      { rows: [{ permission_id: 1 }, { permission_id: 2 }] }, {}, { rowCount: 0, rows: [] }, {});
+      { rows: [{ permission_id: 1 }, { permission_id: 2 }] }, {}, { rowCount: 0, rows: [] }, { rows: [] }, {});
     await svc.assignCompanyPermissions(4, [2], 1);
     expect(mockRedis.del).toHaveBeenCalledWith('company_grants:4');
   });
@@ -158,7 +160,7 @@ describe('assignCompanyPermissions — a revoke has to bite at once', () => {
 
   test('a cache failure does not undo or fail a save that already committed', async () => {
     mockRedis.del.mockRejectedValueOnce(new Error('redis down'));
-    mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] }, { rows: [] }, {}, {});
+    mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 2 }] }, { rows: [] }, {}, { rows: [] }, {});
     await expect(svc.assignCompanyPermissions(4, [2], 1)).resolves.toMatchObject({ granted: 1 });
   });
 });
@@ -174,6 +176,7 @@ describe('assignCompanyPermissions — revoking cascades to the company\'s own r
     { rows: [{ id: 2, permission_key: 'page:machines:view' }] }, {}, {},
     // role 11 has no pages left, so no API keys either
     { rows: [] }, { rows: [] }, {}, {},
+    { rows: [] },                                              // revision
     {}                                                         // COMMIT
   );
 
@@ -210,7 +213,7 @@ describe('assignCompanyPermissions — revoking cascades to the company\'s own r
 
   test('granting alone never touches role_permissions', async () => {
     mockDb.queueResponse({}, { rows: [{ id: 4 }] }, { rows: [{ id: 1 }, { id: 2 }] },
-      { rows: [{ permission_id: 1 }] }, {}, {});
+      { rows: [{ permission_id: 1 }] }, {}, { rows: [] }, {});
     await svc.assignCompanyPermissions(4, [1, 2], 1);
     expect(texts().some(t => /role_permissions/.test(t))).toBe(false);
   });

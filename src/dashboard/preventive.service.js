@@ -9,6 +9,7 @@
  * exists at all.
  */
 const db = require('../db');
+const { plantSql, nullablePlantSql, current } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 const { severityClass } = require('./severity');
 const { parseRange, parseMachineId, httpError } = require('./window');
@@ -72,7 +73,7 @@ exports.getPreventiveDashboard = async (req) => {
      (trigram index) is not worth adding until it measurably hurts. */
   const searchIdx = machineId ? 3 : 2;
   const listWhere = `
-    t.company_id = $1
+    t.company_id = $1${plantSql('t.machine_id')}
     AND t.issue_type = 'PREVENTIVE'
     ${machineId ? 'AND t.machine_id = $2' : ''}
     ${search ? `AND (t.title ILIKE $${searchIdx} OR m.machine_serial_no ILIKE $${searchIdx}
@@ -90,7 +91,7 @@ exports.getPreventiveDashboard = async (req) => {
       SELECT COUNT(*)::int AS total,
              COUNT(*) FILTER (WHERE a.is_resolved IS NOT TRUE)::int AS open
       FROM machine_alarms a
-      WHERE a.company_id = $1 AND a.started_at >= $2 AND a.started_at < $3
+      WHERE a.company_id = $1${plantSql('a.machine_id')} AND a.started_at >= $2 AND a.started_at < $3
         AND a.severity = 'CRITICAL' ${alarmScope}`, alarmParams
     )),
 
@@ -104,9 +105,9 @@ exports.getPreventiveDashboard = async (req) => {
                            AND t.due_date IS NOT NULL AND t.due_date < NOW())::int AS overdue,
         -- the company's alarm rules: none at all is a setup gap the page says
         -- in words, without loading the rules to know
-        (SELECT COUNT(*) FROM alarm_thresholds th WHERE th.company_id = $1)::int AS rules
+        (SELECT COUNT(*) FROM alarm_thresholds th WHERE th.company_id = $1${nullablePlantSql('th.machine_id')})::int AS rules
       FROM maintenance_tickets t
-      WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
+      WHERE t.company_id = $1${plantSql('t.machine_id')} AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
       [...ticketParams, OPEN_STATUSES]
     )),
 
@@ -116,7 +117,7 @@ exports.getPreventiveDashboard = async (req) => {
                AS avg_resolution_hours,
              COUNT(*)::int AS resolved_count
       FROM maintenance_tickets t
-      WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE'
+      WHERE t.company_id = $1${plantSql('t.machine_id')} AND t.issue_type = 'PREVENTIVE'
         AND t.resolved_at IS NOT NULL ${ticketScope}`, ticketParams
     )),
 
@@ -133,7 +134,7 @@ exports.getPreventiveDashboard = async (req) => {
              COUNT(a.id)::int AS critical
       FROM days
       LEFT JOIN machine_alarms a
-        ON a.company_id = $1
+        ON a.company_id = $1${plantSql('a.machine_id')}
        AND a.severity = 'CRITICAL'
        AND a.started_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata')
        AND a.started_at <  (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
@@ -147,7 +148,7 @@ exports.getPreventiveDashboard = async (req) => {
     when(want.charts, () => db.query(`
       SELECT ${SEVERITY_CLASS} AS class, COUNT(*)::int AS total
       FROM machine_alarms a
-      WHERE a.company_id = $1 AND a.started_at >= $2 AND a.started_at < $3 ${alarmScope}
+      WHERE a.company_id = $1${plantSql('a.machine_id')} AND a.started_at >= $2 AND a.started_at < $3 ${alarmScope}
       GROUP BY 1`, alarmParams
     )),
 
@@ -156,7 +157,7 @@ exports.getPreventiveDashboard = async (req) => {
       SELECT m.machine_serial_no, COUNT(a.id)::int AS critical
       FROM machine_alarms a
       JOIN machines m ON m.id = a.machine_id
-      WHERE a.company_id = $1 AND a.started_at >= $2 AND a.started_at < $3
+      WHERE a.company_id = $1${plantSql('a.machine_id')} AND a.started_at >= $2 AND a.started_at < $3
         AND a.severity = 'CRITICAL' ${alarmScope}
       GROUP BY m.machine_serial_no
       ORDER BY critical DESC, m.machine_serial_no
@@ -168,7 +169,7 @@ exports.getPreventiveDashboard = async (req) => {
       SELECT a.alarm_type, COUNT(*)::int AS occurrences,
              COUNT(*) FILTER (WHERE a.severity = 'CRITICAL')::int AS critical
       FROM machine_alarms a
-      WHERE a.company_id = $1 AND a.started_at >= $2 AND a.started_at < $3 ${alarmScope}
+      WHERE a.company_id = $1${plantSql('a.machine_id')} AND a.started_at >= $2 AND a.started_at < $3 ${alarmScope}
       GROUP BY a.alarm_type
       ORDER BY occurrences DESC
       LIMIT 10`, alarmParams
@@ -183,7 +184,7 @@ exports.getPreventiveDashboard = async (req) => {
         COUNT(*) FILTER (WHERE t.status IN ('ASSIGNED','IN_PROGRESS'))::int AS in_progress,
         COUNT(*) FILTER (WHERE t.status IN ('RESOLVED','CLOSED'))::int    AS completed
       FROM maintenance_tickets t
-      WHERE t.company_id = $1 AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
+      WHERE t.company_id = $1${plantSql('t.machine_id')} AND t.issue_type = 'PREVENTIVE' ${ticketScope}`,
       ticketParams
     )),
 
@@ -237,7 +238,7 @@ exports.getPreventiveDashboard = async (req) => {
       LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS occurrences
         FROM machine_alarms a
-        WHERE a.company_id = th.company_id
+        WHERE a.company_id = th.company_id${plantSql('a.machine_id')}
           AND a.alarm_type = th.alarm_type
           AND (th.machine_id IS NULL OR a.machine_id = th.machine_id)
           AND a.started_at >= $2 AND a.started_at < $3
@@ -245,10 +246,10 @@ exports.getPreventiveDashboard = async (req) => {
       LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS tickets
         FROM maintenance_tickets t2
-        WHERE t2.threshold_id = th.id
+        WHERE t2.threshold_id = th.id${plantSql('t2.machine_id')}
           AND t2.created_at >= $2 AND t2.created_at <= $3
       ) tk ON TRUE
-      WHERE th.company_id = $1
+      WHERE th.company_id = $1${nullablePlantSql('th.machine_id')}
       ORDER BY occurrences DESC, th.alarm_type`,
       [companyId, from, to]
     ))
@@ -315,7 +316,7 @@ exports.listThresholds = async (companyId) => {
     `SELECT th.*, m.machine_serial_no
      FROM alarm_thresholds th
      LEFT JOIN machines m ON m.id = th.machine_id
-     WHERE th.company_id = $1
+     WHERE th.company_id = $1${nullablePlantSql('th.machine_id')}
      ORDER BY th.alarm_type`, [companyId]
   );
   return rows;
@@ -326,6 +327,7 @@ exports.upsertThreshold = async (companyId, body, userId) => {
   if (!alarmType) throw httpError('alarm_type is required', 400);
 
   const machineId = parseMachineId(body.machine_id);
+  if (!machineId && current()?.plantId != null) throw httpError('Company-wide rules require company administration', 403);
   const nums = {
     threshold_count: parseInt(body.threshold_count, 10) || 3,
     window_hours:    parseInt(body.window_hours, 10)    || 24,
@@ -344,7 +346,7 @@ exports.upsertThreshold = async (companyId, body, userId) => {
      comes straight from the client. */
   if (machineId) {
     const { rowCount } = await db.query(
-      `SELECT 1 FROM machines WHERE id = $1 AND company_id = $2`, [machineId, companyId]
+      `SELECT 1 FROM machines WHERE id = $1 AND company_id = $2${plantSql('id')}`, [machineId, companyId]
     );
     if (!rowCount) throw httpError('Machine not found or access denied', 404);
   }
@@ -376,7 +378,7 @@ exports.upsertThreshold = async (companyId, body, userId) => {
 
 exports.deleteThreshold = async (companyId, id) => {
   const { rowCount } = await db.query(
-    `DELETE FROM alarm_thresholds WHERE id = $1 AND company_id = $2`,
+    `DELETE FROM alarm_thresholds WHERE id = $1 AND company_id = $2${plantSql('machine_id')}`,
     [parseMachineId(id), companyId]
   );
   if (!rowCount) throw httpError('Threshold not found or access denied', 404);

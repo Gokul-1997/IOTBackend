@@ -30,7 +30,8 @@
 const db = require('../db');
 
 const TTL_SECONDS = 60;
-const cacheKey = id => `company_grants:${id}`;
+const cacheKey = (id, revision, userId) => revision == null || userId == null
+  ? `company_grants:${id}` : `company_grants:${id}:user:${userId}:revision:${revision}`;
 
 /**
  * Every permission key the company has been granted.
@@ -40,13 +41,13 @@ const cacheKey = id => `company_grants:${id}`;
  * unavailable must never take a page down, so both cache calls are best
  * effort and the database is the fallback.
  */
-async function loadCompanyGrants(company_id) {
+async function loadCompanyGrants(company_id, authRevision, userId) {
   let redis = null;
   try { redis = require('../redis'); } catch { /* no cache configured */ }
 
   if (redis) {
     try {
-      const hit = await redis.get(cacheKey(company_id));
+      const hit = await redis.get(cacheKey(company_id, authRevision, userId));
       if (hit) return new Set(JSON.parse(hit));
     } catch { /* fall through to the database */ }
   }
@@ -61,7 +62,7 @@ async function loadCompanyGrants(company_id) {
   const keys = rows.map(r => r.permission_key);
 
   if (redis) {
-    try { await redis.set(cacheKey(company_id), JSON.stringify(keys), 'EX', TTL_SECONDS); }
+    try { await redis.set(cacheKey(company_id, authRevision, userId), JSON.stringify(keys), 'EX', TTL_SECONDS); }
     catch { /* best effort */ }
   }
   return new Set(keys);
@@ -79,23 +80,32 @@ async function invalidateCompanyGrants(company_id) {
  * Returns null when it does, otherwise the reason it does not.
  */
 async function denialFor(user, key) {
+  return denialForAny(user, [key]);
+}
+
+/** A shared endpoint can serve several screens; one complete role+company
+ * grant must match. A role grant for one screen cannot be paired with a
+ * company grant for a different screen. */
+async function denialForAny(user, keys) {
   if (!user) return 'NO_USER';
   if (user.is_snt_super) return null;
 
   const roles = user.roles || [];
   const isCompanyAdmin = roles.includes('COMPANY_ADMIN') || roles.includes('ADMIN');
 
-  if (!isCompanyAdmin) {
-    const permissions = Array.isArray(user.permissions) ? user.permissions : [];
-    if (!permissions.includes(key)) return 'ROLE';
-  }
+  const permissions = Array.isArray(user.permissions) ? user.permissions : [];
+  const allowed = isCompanyAdmin ? keys : keys.filter(key => permissions.includes(key));
+  if (!allowed.length) return 'ROLE';
 
   // A caller with no company has nothing to be granted, and "no grants
   // means unrestricted" must not be reachable by simply having no company.
   if (!user.company_id) return 'NO_COMPANY';
 
-  const grants = await loadCompanyGrants(user.company_id);
-  if (grants.size > 0 && !grants.has(key)) return 'COMPANY';
+  // A successful Manage Access change advances every company user's
+  // revision. Fresh tokens can never reuse a cache entry from before it,
+  // even if an in-flight read fills that old entry after invalidation.
+  const grants = await loadCompanyGrants(user.company_id, user.auth_revision, user.id);
+  if (grants.size > 0 && !allowed.some(key => grants.has(key))) return 'COMPANY';
   return null;
 }
 
@@ -126,3 +136,19 @@ module.exports = function requireAccess(key) {
 module.exports.denialFor = denialFor;
 module.exports.loadCompanyGrants = loadCompanyGrants;
 module.exports.invalidateCompanyGrants = invalidateCompanyGrants;
+module.exports.denialForAny = denialForAny;
+module.exports.any = (...keys) => {
+  const guard = async (req, res, next) => {
+    try {
+      const why = await denialForAny(req.user, keys);
+      if (!why) return next();
+      return res.status(req.user ? 403 : 401).json({
+        message: why === 'COMPANY' ? 'Your plan does not include this page. Contact S&T to add it.' : 'Permission denied',
+        code: why === 'COMPANY' ? 'NOT_IN_PLAN' : 'PERMISSION_DENIED',
+        required: keys
+      });
+    } catch (err) { next(err); }
+  };
+  guard.requiredPermissions = keys;
+  return guard;
+};

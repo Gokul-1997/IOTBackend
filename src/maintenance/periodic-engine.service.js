@@ -71,6 +71,7 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
   const client = await pool.connect();
   let created = 0;
   let advanced = 0;
+  const raised = [];
 
   try {
     await client.query('BEGIN');
@@ -117,7 +118,7 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
       let steps = 0;
 
       while (dueAt <= new Date() && steps < MAX_CATCHUP_PER_PASS) {
-        const { rowCount } = await client.query(
+        const { rowCount, rows } = await client.query(
           `INSERT INTO maintenance_tickets
              (company_id, machine_id, schedule_id, title, description,
               issue_type, priority, status, due_date, assigned_to, created_by)
@@ -127,7 +128,7 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
                WHERE mt.schedule_id = $3
                  AND mt.due_date    = $8
                  AND mt.status      = ANY($11)
-            )`,
+            ) RETURNING id, status`,
           [
             companyId,
             schedule.machine_id,
@@ -143,6 +144,7 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
           ]
         );
         created += rowCount;
+        raised.push(...rows);
 
         dueAt = await addStep(client, dueAt, step);
         steps += 1;
@@ -157,6 +159,14 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
       advanced += 1;
     }
 
+    if (raised.length) {
+      await client.query(
+        `INSERT INTO ticket_status_history (ticket_id, from_status, to_status, note, changed_by)
+         SELECT n.id, NULL, n.status, 'Raised automatically by the periodic maintenance engine', $3
+           FROM unnest($1::bigint[], $2::ticket_status[]) AS n(id, status)`,
+        [raised.map(t => t.id), raised.map(t => t.status), createdBy]
+      );
+    }
     await client.query('COMMIT');
     return { created, advanced };
   } catch (err) {

@@ -22,6 +22,7 @@
  */
 
 const pool = require('../db');
+const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 
 function httpError(message, status) {
@@ -74,7 +75,7 @@ async function measuredTime({ companyId, machineId, shiftId, start, end }) {
             COUNT(DISTINCT ph.machine_id) FILTER (WHERE m.hour_rate IS NOT NULL)::int  AS priced_machines
        FROM production_hourly ph
        LEFT JOIN machines m ON m.id = ph.machine_id
-      WHERE ph.company_id = $1
+      WHERE ph.company_id = $1${plantSql('ph.machine_id')}
         AND ph.hour_start >= $2::timestamptz
         AND ph.hour_start <= $3::timestamptz
         AND ($4::int IS NULL OR ph.machine_id = $4)
@@ -109,7 +110,7 @@ async function alarmTime({ companyId, machineId, start, end }) {
               EXTRACT(EPOCH FROM (LEAST(COALESCE(a.ended_at, NOW()), $3::timestamptz)
                                 - GREATEST(a.started_at, $2::timestamptz))) AS seconds
          FROM machine_alarms a
-        WHERE a.company_id = $1
+        WHERE a.company_id = $1${plantSql('a.machine_id')}
           AND a.started_at <= $3::timestamptz
           AND COALESCE(a.ended_at, NOW()) >= $2::timestamptz
           AND ($4::int IS NULL OR a.machine_id = $4)
@@ -135,7 +136,7 @@ async function alarmTime({ companyId, machineId, start, end }) {
 /** Shared WHERE for every downtime_events query, with its own parameters. */
 function eventFilter({ companyId, machineId, shiftId, operatorId, category, reasonId, search, start, end }) {
   const params = [companyId, start, end];
-  let sql = `WHERE e.company_id = $1
+  let sql = `WHERE e.company_id = $1${plantSql('e.machine_id')}
                AND e.started_at <= $3::timestamptz
                AND COALESCE(e.ended_at, NOW()) >= $2::timestamptz`;
 

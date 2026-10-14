@@ -1,6 +1,8 @@
 const jwt   = require('jsonwebtoken');
 const db    = require('../db');
 const redis = require('../redis');
+const readScope = require('../lib/read-scope');
+const { matches, revisionOf } = require('../lib/auth-revision');
 
 /* Everyone in a company S&T has disabled is shut out — every request, not
    just the next sign-in. 401 rather than 403 so the app tries its refresh,
@@ -26,44 +28,20 @@ module.exports = async (req, res, next) => {
       return res.status(401).json({ message: 'Access token expired or invalid' });
     }
 
-    // roles/permissions always come from the JWT token (not the cache)
+    if (!/^[1-9]\d*$/.test(String(decoded.user_id))) {
+      return res.status(401).json({ message: 'Access token expired or invalid' });
+    }
+
+    // Grants stay in the signed token. One indexed account lookup checks the
+    // authorization revision and trusted scope on every request; a Redis
+    // outage or stale cache cannot extend a revoked role or plant assignment.
     const roles        = decoded.roles       || [];
     const permissions  = decoded.permissions || [];
     const is_snt_super = roles.includes('SNT_SUPER') || decoded.is_snt_super === true;
 
-    // Check Redis cache before hitting DB. The cache is best effort: a slow
-    // or unreachable Redis used to throw here, and the catch below answered
-    // 401 — the web app then signed every user out. Now it is a cache miss.
-    const cacheKey = `user:${decoded.user_id}`;
-    let cached = null;
-    try { cached = await redis.get(cacheKey); }
-    catch (err) { console.warn('AUTH cache read skipped:', err.message); }
-
-    if (cached) {
-      const user = JSON.parse(cached);
-      if (!user.is_active) return res.status(403).json({ message: 'Account inactive' });
-      // an entry cached before this field existed reads as active
-      if (user.company_active === false) return companyDisabled(res);
-
-      req.user = {
-        id:          user.id,
-        username:    user.username,
-        plant_id:    user.plant_id,
-        company_id:  user.company_id  || decoded.company_id  || null,
-        user_type:   user.user_type   || decoded.user_type   || 'company_user',
-        is_snt_super,
-        role:        roles[0] || 'USER',
-        roles,
-        permissions,
-        plan:        decoded.plan || null
-      };
-      return next();
-    }
-
-    // Cache miss — query DB
     // S&T belongs to no company, so it has no company to be disabled
     const { rows } = await db.query(
-      `SELECT u.id, u.username, u.plant_id, u.company_id, u.user_type, u.is_active,
+      `SELECT u.id, u.username, u.plant_id, u.company_id, u.user_type, u.is_active, u.auth_revision,
               COALESCE(c.is_active, true) AS company_active
        FROM users u
        LEFT JOIN companies c ON c.id = u.company_id
@@ -76,27 +54,19 @@ module.exports = async (req, res, next) => {
     const user = rows[0];
     if (!user.is_active) return res.status(403).json({ message: 'Account inactive' });
 
-    // Cache the DB record for 60 seconds (best effort, as the read above)
-    try {
-      await redis.setex(cacheKey, 60, JSON.stringify({
-        id:        user.id,
-        username:  user.username,
-        plant_id:  user.plant_id,
-        company_id: user.company_id,
-        user_type: user.user_type,
-        is_active: user.is_active,
-        company_active: user.company_active
-      }));
-    } catch (err) { console.warn('AUTH cache write skipped:', err.message); }
-
     if (user.company_active === false) return companyDisabled(res);
+    if (!matches(decoded, user)) return res.status(401).json({
+      message: 'Your access changed. Refresh your session to continue.',
+      code: 'AUTH_REVISION_CHANGED'
+    });
 
     req.user = {
       id:          user.id,
       username:    user.username,
       plant_id:    user.plant_id,
-      company_id:  user.company_id  || decoded.company_id  || null,
-      user_type:   user.user_type   || decoded.user_type   || 'company_user',
+      company_id:  user.company_id ?? null,
+      user_type:   user.user_type || 'company_user',
+      auth_revision: revisionOf(user.auth_revision),
       is_snt_super,
       role:        roles[0] || 'USER',
       roles,
@@ -104,7 +74,7 @@ module.exports = async (req, res, next) => {
       plan:        decoded.plan || null
     };
 
-    next();
+    readScope.run(req.user, next);
   } catch (err) {
     /* The token was valid (a bad one is answered above); what failed is the
        look-up of the account — the database out of reach for a moment.
@@ -118,10 +88,10 @@ module.exports = async (req, res, next) => {
   }
 };
 
-/** Drop the cached copies of these users, so a change to their company's
- *  status applies on their next request instead of up to a minute later. */
+/** Remove legacy cached records after account changes. Authentication itself
+ * always reads PostgreSQL; failed cache cleanup cannot preserve access. */
 module.exports.forgetUsers = async (userIds = []) => {
   if (!userIds.length) return;
   try { await redis.del(...userIds.map(id => `user:${id}`)); }
-  catch { /* each entry expires within 60 seconds anyway */ }
+  catch { /* obsolete records are never authoritative */ }
 };

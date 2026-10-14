@@ -1,3 +1,4 @@
+const { effectivePlantId } = require('../lib/plant-scope');
 const svc = require('./dashboard.service');
 const { parseFleetPage } = require('./fleet-page');
 const timelineSvc = require('./timeline.service');
@@ -18,6 +19,7 @@ const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
 const { toCsv, tablePdf } = require('../utils/export.util');
 const dashCache     = require('./cache');
+const { current: readAuthorization } = require('../lib/read-scope');
 
 /**
  * A dashboard's answer, shared by everyone in the company who asks for the
@@ -39,7 +41,7 @@ async function sendShared(res, name, req, compute, { live = false } = {}) {
 exports.dashboard = async (req, res) => {
   try {
 
-    const data = await svc.dashboard(req.user.plant_id, req.user.company_id, parseFleetPage(req.query));
+    const data = await svc.dashboard(effectivePlantId(req.user), req.user.company_id, parseFleetPage(req.query));
 
     return res.json({
       status: "success",
@@ -127,10 +129,11 @@ exports.machineDetail = async (req, res) => {
     }
 
     const data = await svc.machineDetail(
-      req.user.plant_id,
+      effectivePlantId(req.user),
       machineId,
       req.user.company_id
     );
+    if (!data) return res.status(404).json({ status: 'error', message: 'Machine not found' });
 
     return res.json({
       status: "success",
@@ -197,7 +200,7 @@ exports.exportEnergy = async (req, res) => {
     const headers = Object.keys(rows[0]);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('Energy', rows);
+      const file = await excel.createExcel('Energy', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=energy_${stamp}.xlsx`);
       return res.send(file);
@@ -245,7 +248,7 @@ exports.exportOee = async (req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('OEE', rows);
+      const file = await excel.createExcel('OEE', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=oee_${stamp}.xlsx`);
       return res.send(file);
@@ -293,7 +296,7 @@ exports.exportOperators = async (req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('Operator Performance', rows);
+      const file = await excel.createExcel('Operator Performance', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=operator_performance_${stamp}.xlsx`);
       return res.send(file);
@@ -341,7 +344,7 @@ exports.exportDowntime = async (req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('Downtime', rows);
+      const file = await excel.createExcel('Downtime', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=downtime_${stamp}.xlsx`);
       return res.send(file);
@@ -390,7 +393,7 @@ exports.exportAlarms = async (req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('Alarms', rows);
+      const file = await excel.createExcel('Alarms', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=alarms_${stamp}.xlsx`);
       return res.send(file);
@@ -475,6 +478,7 @@ exports.deletePeriodicSchedule = async (req, res) => {
 /* Raise the occurrences that are due now instead of waiting for the cron. */
 exports.runPeriodicEngine = async (req, res) => {
   try {
+    if (readAuthorization()?.plantId != null) throw Object.assign(new Error('Company-wide maintenance evaluation requires company administration'), { status: 403 });
     const result = await periodicEngine.evaluateCompany(req.user.company_id, { createdBy: req.user.id });
     return res.json({
       status: 'success', data: result,
@@ -507,7 +511,7 @@ exports.exportPeriodic = async (req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('Periodic Maintenance', rows);
+      const file = await excel.createExcel('Periodic Maintenance', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=periodic_maintenance_${stamp}.xlsx`);
       return res.send(file);
@@ -577,6 +581,7 @@ exports.deleteThreshold = async (req, res) => {
 /* Run the engine now rather than waiting for the next cron tick. */
 exports.runPmEngine = async (req, res) => {
   try {
+    if (readAuthorization()?.plantId != null) throw Object.assign(new Error('Company-wide maintenance evaluation requires company administration'), { status: 403 });
     const result = await pmEngine.evaluateCompany(req.user.company_id, { createdBy: req.user.id });
     return res.json({ status: 'success', data: result,
       message: `${result.created} preventive ticket(s) raised` });
@@ -630,7 +635,7 @@ exports.exportMaintenanceReport = async (req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
 
     if (format === 'xlsx') {
-      const file = excel.createExcel('Maintenance', rows);
+      const file = await excel.createExcel('Maintenance', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=maintenance_${stamp}.xlsx`);
       return res.send(file);

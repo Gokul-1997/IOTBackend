@@ -1,4 +1,5 @@
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 
 /* ─── helpers ─── */
 
@@ -34,7 +35,7 @@ exports.getMachines = async (company_id) => {
   const { rows } = await db.query(
     `SELECT id, machine_serial_no AS name
      FROM machines
-     WHERE company_id = $1 AND is_active = TRUE
+     WHERE company_id = $1 AND is_active = TRUE${plantSql('id')}
      ORDER BY machine_serial_no`,
     [company_id]
   );
@@ -45,7 +46,7 @@ exports.getShifts = async (company_id) => {
   const { rows } = await db.query(
     `SELECT id, shift_code AS name
      FROM shifts
-     WHERE company_id = $1 AND is_active = TRUE
+     WHERE company_id = $1 AND is_active = TRUE${sharedEntityPlantSql('shifts')}
      ORDER BY start_time`,
     [company_id]
   );
@@ -62,7 +63,7 @@ exports.getOperators = async (company_id, machine_id) => {
     `SELECT DISTINCT o.id, o.operator_name AS name
      FROM operators o
      JOIN operator_machine_assignments oma ON oma.operator_id = o.id AND oma.is_active = TRUE
-     JOIN machines m ON m.id = oma.machine_id AND m.company_id = $1 AND m.is_active = TRUE
+     JOIN machines m ON m.id = oma.machine_id AND m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id')}
      WHERE o.is_active = TRUE
      ${machineFilter}
      ORDER BY o.operator_name`,
@@ -102,7 +103,7 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
     JOIN machines m ON m.id = p.machine_id
     LEFT JOIN shifts   s    ON s.id = p.shift_id
     LEFT JOIN op_map   op   ON op.machine_id = p.machine_id
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1${plantSql('m.id')}
       AND (
         s.start_time IS NULL
         OR (
@@ -170,7 +171,7 @@ exports.oeeHourlyData = async (company_id, date_from, date_to, machine_id, shift
     JOIN machines m ON m.id = o.machine_id
     LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1${plantSql('m.id')}
       AND (
         s.start_time IS NULL
         OR (
@@ -231,7 +232,7 @@ exports.shiftOeeData = async (company_id, date_from, date_to, machine_id, shift_
     JOIN machines m ON m.id = o.machine_id
     JOIN shifts   s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1${plantSql('m.id')}
       AND o.shift_date BETWEEN $2 AND $3
       ${extra}
     ORDER BY o.shift_date DESC, s.shift_code, m.machine_serial_no
@@ -271,7 +272,7 @@ exports.hourlyOee = async (company_id, date) => {
     JOIN machines m ON m.id = o.machine_id
     LEFT JOIN shifts s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1${plantSql('m.id')}
       AND (
         s.start_time IS NULL
         OR (
@@ -305,7 +306,7 @@ exports.shiftOee = async (company_id, date) => {
     JOIN machines m ON m.id = o.machine_id
     JOIN shifts   s ON s.id = o.shift_id
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1${plantSql('m.id')}
       AND o.shift_date = $2
     ORDER BY s.shift_code, m.machine_serial_no
   `, [company_id, date]);
@@ -330,7 +331,7 @@ exports.production = async (company_id, date) => {
     JOIN machines m ON m.id = p.machine_id
     LEFT JOIN shifts   s  ON s.id = p.shift_id
     LEFT JOIN op_map   op ON op.machine_id = p.machine_id
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1${plantSql('m.id')}
       AND (
         s.start_time IS NULL
         OR (
@@ -390,7 +391,7 @@ exports.emailReport = async ({ company_id, type, filters, columns, to, requested
 
   const name = REPORT_NAMES[type];
   const file = `${type}_${filters.date_from}_to_${filters.date_to}.xlsx`;
-  const buffer = createExcel(name.slice(0, 31), shaped);
+  const buffer = await createExcel(name.slice(0, 31), shaped);
 
   const filterLines = [];
   if (filters.machine_id)  filterLines.push(`Machine: ${labelFor.machine  || filters.machine_id}`);

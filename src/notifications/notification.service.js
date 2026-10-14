@@ -1,4 +1,5 @@
 const db = require('../db');
+const { pagination } = require('../lib/pagination');
 const realtime = require('../lib/realtime');
 
 exports.getNotifications = async ({ user_id, company_id, page = 1, limit = 20, unread_only }) => {
@@ -9,9 +10,7 @@ exports.getNotifications = async ({ user_id, company_id, page = 1, limit = 20, u
   if (unread_only === 'true') { conditions.push(`n.is_read = false`); }
 
   const where = `WHERE ${conditions.join(' AND ')}`;
-  const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, parseInt(limit) || 20);
-  const offset = (pageNum - 1) * limitNum;
+  const { pageNum, limitNum, offset } = pagination(page, limit);
 
   const [countRes, dataRes, unreadRes] = await Promise.all([
     db.query(`SELECT COUNT(*) FROM notifications n ${where}`, params),

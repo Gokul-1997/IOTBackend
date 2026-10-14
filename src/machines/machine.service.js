@@ -1,134 +1,81 @@
 const pool = require('../db');
 const crypto = require('crypto');
-const { cleanProgramPath } = require('../programs/program-path');
 const { cleanHourRate } = require('./hour-rate');
+const { pagination } = require('../lib/pagination');
+const { idOrNull, resolvePlantId } = require('../lib/plant-scope');
+const placements = require('../lib/machine-placement');
 
-/* CREATE MACHINE (ADMIN) */
-exports.createMachine = async (req) => {
-  const {
-    machine_serial_no,
-    line_id,
-    x_axis,
-    y_axis,
-    z_axis,
-    fourth_axis,
-    fifth_axis,
-    twin_spindle,
-    twin_table,
-    atc_tool_capacity,
-    model,
-    mmc_no,
-    controller,
-    spindle_rpm,
-    image_url,
-    ip_address,
-    program_path,
-    hour_rate
-  } = req.body;
-
-  if (!machine_serial_no) {
-    throw new Error("Machine serial number is required");
-  }
-
-  // ── Plan enforcement: max_machines per company ──
-  const limitRes = await pool.query(
+const EDITABLE = ['machine_serial_no', 'line_id', 'plant_id', 'x_axis', 'y_axis', 'z_axis',
+  'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table', 'atc_tool_capacity', 'model',
+  'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate'];
+async function lockCompany(client, companyId) {
+  if (!companyId) throw { status: 403, message: 'No company on this account' };
+  const { rows } = await client.query('SELECT id FROM companies WHERE id = $1 AND is_active = TRUE FOR UPDATE', [companyId]);
+  if (!rows.length) throw { status: 404, message: 'Company not found' };
+}
+async function enforceQuota(client, companyId) {
+  const { rows } = await client.query(
     `SELECT COALESCE(cp.max_machines, p.max_machines) AS max_machines
-     FROM company_plans cp
-     LEFT JOIN plans p ON p.id = cp.plan_id
-     WHERE cp.company_id = $1 AND cp.is_active = true
-     LIMIT 1`,
-    [req.user.company_id]
+       FROM company_plans cp LEFT JOIN plans p ON p.id = cp.plan_id
+      WHERE cp.company_id = $1 AND cp.is_active = TRUE LIMIT 1`, [companyId]
   );
-
-  const maxMachines = limitRes.rows[0]?.max_machines ?? null;
-
-  if (maxMachines != null) {
-    const countRes = await pool.query(
-      `SELECT COUNT(*)::int AS n
-       FROM machines
-       WHERE company_id = $1 AND is_active = true`,
-      [req.user.company_id]
-    );
-    if (countRes.rows[0].n >= maxMachines) {
-      const err = new Error(
-        `Machine limit reached for this plan (${countRes.rows[0].n}/${maxMachines}). Upgrade plan to add more.`
-      );
-      err.status = 402;
-      throw err;
-    }
+  const max = rows[0]?.max_machines;
+  if (max == null) return;
+  const count = await client.query('SELECT COUNT(*)::int AS n FROM machines WHERE company_id = $1 AND is_active = TRUE', [companyId]);
+  if (count.rows[0].n >= Number(max)) throw { status: 402, message: `Machine limit reached for this plan (${count.rows[0].n}/${max}). Upgrade plan to add more.` };
+}
+async function placement(client, data, user, current = {}) {
+  const company = user.company_id;
+  let plantId = idOrNull(data.plant_id !== undefined ? data.plant_id : current.plant_id, 'Plant');
+  const ownPlant = idOrNull(user.plant_id, 'Plant');
+  if (ownPlant && plantId && ownPlant !== plantId) throw { status: 403, message: 'You can only manage machines in your own plant' };
+  plantId = ownPlant || plantId;
+  const lineId = idOrNull(data.line_id !== undefined ? data.line_id : current.line_id, 'Line');
+  if (lineId) {
+    const { rows } = await client.query('SELECT id, plant_id FROM line WHERE id = $1 AND company_id = $2 FOR SHARE', [lineId, company]);
+    if (!rows.length) throw { status: 404, message: 'Line not found' };
+    const linePlant = idOrNull(rows[0].plant_id, 'Plant');
+    if (!linePlant) throw { status: 400, message: 'Assign a plant to the selected line first' };
+    if (linePlant && plantId && linePlant !== plantId) throw { status: 400, message: 'The selected line belongs to a different plant' };
+    plantId ||= linePlant;
   }
+  plantId = await resolvePlantId(client, user, plantId);
+  return { plantId, lineId };
+}
 
-  const apiKey = crypto.randomBytes(16).toString("hex");
-
-  const result = await pool.query(
-    `
-    INSERT INTO machines (
-      plant_id,
-      company_id,
-      line_id,
-      machine_serial_no,
-      x_axis,
-      y_axis,
-      z_axis,
-      fourth_axis,
-      fifth_axis,
-      twin_spindle,
-      twin_table,
-      atc_tool_capacity,
-      model,
-      mmc_no,
-      controller,
-      spindle_rpm,
-      image_url,
-      ip_address,
-      program_path,
-      hour_rate,
-      api_key
-    )
-    VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
-    )
-    RETURNING id, machine_serial_no, api_key
-    `,
-    [
-      null,                  // plant_id — nullable; COMPANY_ADMIN has no plant scope
-      req.user.company_id,
-      line_id || null,
-      machine_serial_no,
-      x_axis,
-      y_axis,
-      z_axis,
-      fourth_axis,
-      fifth_axis,
-      twin_spindle,
-      twin_table,
-      atc_tool_capacity,
-      model,
-      mmc_no,
-      controller,
-      spindle_rpm,
-      image_url,
-      ip_address ? String(ip_address).trim() : null,
-      cleanProgramPath(program_path),
-      cleanHourRate(hour_rate),
-      apiKey
-    ]
-  );
-
-  const newMachineId = result.rows[0].id;
-
-  // Auto link machine to all shifts in same company
-  await pool.query(
-    `
-    INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
-    SELECT NULL, $1, id
-    FROM shifts
-    WHERE company_id = $2
-    `,
-    [newMachineId, req.user.company_id]
-  );
-
-  return result.rows[0];
+/* Quota, placement, machine and its shift links are one atomic change. */
+exports.createMachine = async (req) => {
+  const serial = String(req.body.machine_serial_no || '').trim();
+  if (!serial || serial.length > 100) throw { status: 400, message: 'Machine serial number is required (maximum 100 characters)' };
+  const hourRate = cleanHourRate(req.body.hour_rate);
+  const client = await pool.connect();
+  let routingWrite;
+  try {
+    await client.query('BEGIN');
+    await lockCompany(client, req.user.company_id);
+    await enforceQuota(client, req.user.company_id);
+    const { plantId, lineId } = await placement(client, req.body, req.user);
+    const columns = ['plant_id', 'company_id', 'line_id', 'machine_serial_no',
+      'x_axis', 'y_axis', 'z_axis', 'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table',
+      'atc_tool_capacity', 'model', 'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'api_key'];
+    const params = [plantId, req.user.company_id, lineId, serial,
+      ...columns.slice(4, 17).map(key => req.body[key] ?? null), hourRate, crypto.randomBytes(16).toString('hex')];
+    const { rows } = await client.query(
+      `INSERT INTO machines (${columns.join(', ')}) VALUES (${params.map((_, i) => '$' + (i + 1)).join(', ')})
+       RETURNING id, plant_id, machine_serial_no, api_key`, params
+    );
+    routingWrite = placements.begin(rows[0].id);
+    await client.query(
+      `INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
+       SELECT $1, $2, id FROM shifts WHERE company_id = $3 AND is_active = TRUE
+         AND (plant_id IS NULL OR plant_id = $1)`, [plantId, rows[0].id, req.user.company_id]
+    );
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally { client.release(); await placements.finish(routingWrite, pool); }
 };
 
 /* LIST MACHINES */
@@ -143,7 +90,7 @@ exports.getMachines = async (req) => {
   } = req.query;
 
   const companyId = req.user.company_id;
-  const offset = (page - 1) * limit;
+  const { limitNum, offset } = pagination(page, limit);
 
   const sortableColumns = [
     'm.id',
@@ -160,10 +107,12 @@ exports.getMachines = async (req) => {
     : 'm.id';
 
   const orderDirection =
-    sortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    String(sortDir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
   let whereSQL = `WHERE m.company_id = $1`;
   const values = [companyId];
+  const plantId = req.user.plant_id || idOrNull(req.query.plant_id, 'Plant');
+  if (plantId) { values.push(plantId); whereSQL += ` AND m.plant_id = $${values.length}`; }
 
   if (search) {
     values.push(`%${search}%`);
@@ -182,6 +131,7 @@ exports.getMachines = async (req) => {
     SELECT 
       m.id,
       m.machine_serial_no,
+      m.plant_id,
       m.line_id,
       l.name,
       m.image_url,
@@ -197,8 +147,6 @@ exports.getMachines = async (req) => {
       m.mmc_no,
       m.controller,
       m.spindle_rpm,
-      m.ip_address,
-      m.program_path,
       m.hour_rate,
       m.api_key,
       m.is_active,
@@ -219,123 +167,113 @@ exports.getMachines = async (req) => {
   `;
 
   const [dataRes, countRes] = await Promise.all([
-    pool.query(dataQuery, [...values, limit, offset]),
+    pool.query(dataQuery, [...values, limitNum, offset]),
     pool.query(countQuery, values)
   ]);
 
   return {
     data: dataRes.rows,
-    total: countRes.rows[0].total
+    total: countRes.rows[0]?.total || 0
   };
 };
 
-/* ENABLE / DISABLE MACHINE */
-exports.toggleMachineStatus = async (req) => {
-  const { id } = req.params;
-
-  await pool.query(
-    `UPDATE machines
-     SET is_active = NOT is_active
-     WHERE id = $1 AND company_id = $2`,
-    [id, req.user.company_id]
+async function scopedMachine(client, req, lock = '') {
+  const { rows } = await client.query(
+    `SELECT id, plant_id, line_id, is_active FROM machines
+      WHERE id = $1 AND company_id = $2 AND ($3::int IS NULL OR plant_id = $3) ${lock}`,
+    [idOrNull(req.params.id, 'Machine'), req.user.company_id, req.user.plant_id ?? null]
   );
+  if (!rows.length) throw { status: 404, message: 'Machine not found' };
+  return rows[0];
+}
+
+exports.toggleMachineStatus = async (req) => {
+  const routingWrite = placements.begin(idOrNull(req.params.id, 'Machine'));
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await lockCompany(client, req.user.company_id);
+    const machine = await scopedMachine(client, req, 'FOR UPDATE');
+    if (!machine.is_active) await enforceQuota(client, req.user.company_id);
+    await client.query('UPDATE machines SET is_active = $1 WHERE id = $2 AND company_id = $3', [!machine.is_active, machine.id, req.user.company_id]);
+    await client.query('COMMIT');
+  } catch (err) { if (client) await client.query('ROLLBACK').catch(() => {}); throw err; }
+  finally { client?.release(); await placements.finish(routingWrite, pool); }
 };
 
-/* REGENERATE API KEY */
 exports.regenerateApiKey = async (req) => {
-  const { id } = req.params;
   const newKey = crypto.randomBytes(16).toString('hex');
-
-  await pool.query(
-    `UPDATE machines
-     SET api_key = $1
-     WHERE id = $2 AND company_id = $3`,
-    [newKey, id, req.user.company_id]
+  const result = await pool.query(
+    `UPDATE machines SET api_key = $1
+      WHERE id = $2 AND company_id = $3 AND ($4::int IS NULL OR plant_id = $4) RETURNING id`,
+    [newKey, idOrNull(req.params.id, 'Machine'), req.user.company_id, req.user.plant_id ?? null]
   );
-
+  if (!result.rowCount) throw { status: 404, message: 'Machine not found' };
   return newKey;
 };
 
-
-/* DELETE MACHINE */
 exports.deleteMachine = async (req) => {
-  const { id } = req.params;
-
+  const routingWrite = placements.begin(idOrNull(req.params.id, 'Machine'));
+  try {
   const result = await pool.query(
-    `DELETE FROM machines
-     WHERE id = $1 AND company_id = $2
-     RETURNING id`,
-    [id, req.user.company_id]
+    `DELETE FROM machines WHERE id = $1 AND company_id = $2 AND ($3::int IS NULL OR plant_id = $3) RETURNING id`,
+    [idOrNull(req.params.id, 'Machine'), req.user.company_id, req.user.plant_id ?? null]
   );
-
-  if (result.rowCount === 0) {
-    throw new Error('Machine not found or access denied');
-  }
+  if (!result.rowCount) throw { status: 404, message: 'Machine not found' };
+  } finally { await placements.finish(routingWrite, pool); }
 };
 
-/* UPDATE MACHINE (ADMIN) */
 exports.updateMachine = async (req) => {
-
-  const { id } = req.params;
-  const companyId = req.user.company_id;
-
-  const allowedFields = [
-    'machine_serial_no',
-    'line_id',
-    'x_axis',
-    'y_axis',
-    'z_axis',
-    'fourth_axis',
-    'fifth_axis',
-    'twin_spindle',
-    'twin_table',
-    'atc_tool_capacity',
-    'model',
-    'mmc_no',
-    'controller',
-    'spindle_rpm',
-    'image_url',
-    'ip_address',
-    'program_path',
-    'hour_rate'
-  ];
-
-  const fields = [];
-  const values = [];
-  let index = 1;
-
-  for (const key of allowedFields) {
-    if (req.body[key] !== undefined) {
-      fields.push(`${key} = $${index}`);
-      // checked, and empty = not set: where the device saves programs; what an hour costs
-      values.push(key === 'program_path' ? cleanProgramPath(req.body[key])
-                : key === 'hour_rate'    ? cleanHourRate(req.body[key])
-                : req.body[key]);
-      index++;
+  const patch = Object.fromEntries(EDITABLE.filter(key => req.body[key] !== undefined).map(key => [key, req.body[key]]));
+  if ('hour_rate' in patch) patch.hour_rate = cleanHourRate(patch.hour_rate);
+  if (!Object.keys(patch).length) throw { status: 400, message: 'No fields provided for update' };
+  if ('machine_serial_no' in patch) {
+    patch.machine_serial_no = String(patch.machine_serial_no || '').trim();
+    if (!patch.machine_serial_no || patch.machine_serial_no.length > 100) throw { status: 400, message: 'Machine serial number is required (maximum 100 characters)' };
+  }
+  const needsPlacement = 'plant_id' in patch || 'line_id' in patch;
+  const routingWrite = placements.begin(idOrNull(req.params.id, 'Machine'));
+  let client;
+  let previousPlantId;
+  try {
+    client = needsPlacement ? await pool.connect() : pool;
+    if (needsPlacement) {
+      await client.query('BEGIN');
+      const current = await scopedMachine(client, req, 'FOR UPDATE');
+      previousPlantId = current.plant_id;
+      const { plantId, lineId } = await placement(client, patch, req.user, current);
+      patch.plant_id = plantId; patch.line_id = lineId;
     }
-  }
-
-  if (fields.length === 0) {
-    throw new Error('No fields provided for update');
-  }
-
-  const query = `
-    UPDATE machines
-    SET ${fields.join(', ')}
-    WHERE id = $${index}
-      AND company_id = $${index + 1}
-    RETURNING *
-  `;
-
-  values.push(id, companyId);
-
-  const result = await pool.query(query, values);
-
-  if (result.rowCount === 0) {
-    throw new Error('Machine not found or access denied');
-  }
-
-  // the old Program Transfer's FTP settings are no longer used (migration 030)
-  const { ftp_pass: _p, ftp_port: _o, ftp_user: _u, ftp_dir: _d, ...machine } = result.rows[0];
-  return machine;
+    const keys = Object.keys(patch), values = Object.values(patch);
+    values.push(idOrNull(req.params.id, 'Machine'), req.user.company_id, req.user.plant_id ?? null);
+    const result = await client.query(
+      `UPDATE machines SET ${keys.map((key, i) => `${key} = $${i + 1}`).join(', ')}
+        WHERE id = $${keys.length + 1} AND company_id = $${keys.length + 2}
+          AND ($${keys.length + 3}::int IS NULL OR plant_id = $${keys.length + 3}) RETURNING *`, values
+    );
+    if (!result.rowCount) throw { status: 404, message: 'Machine not found' };
+    if (needsPlacement) {
+      if (Number(previousPlantId) !== patch.plant_id) {
+        // Keep explicit settings for shared/current-plant shifts. A move
+        // must not leave the machine running its former plant's timetable.
+        await client.query(`DELETE FROM machine_shift_config configured
+          WHERE configured.machine_id=$1 AND NOT EXISTS (
+            SELECT 1 FROM shifts s WHERE s.id=configured.shift_id AND s.company_id=$2
+              AND (s.plant_id IS NULL OR s.plant_id=$3))`, [result.rows[0].id, req.user.company_id, patch.plant_id]);
+        await client.query(`INSERT INTO machine_shift_config (plant_id, machine_id, shift_id)
+          SELECT $1,$2,s.id FROM shifts s WHERE s.company_id=$3 AND s.is_active=TRUE
+            AND (s.plant_id IS NULL OR s.plant_id=$1)
+            AND NOT EXISTS (SELECT 1 FROM machine_shift_config configured WHERE configured.machine_id=$2 AND configured.shift_id=s.id)`,
+        [patch.plant_id, result.rows[0].id, req.user.company_id]);
+      }
+      await client.query('UPDATE machine_shift_config SET plant_id = $1 WHERE machine_id = $2', [patch.plant_id, result.rows[0].id]);
+      await client.query('COMMIT');
+    }
+    const { ftp_pass, ftp_port, ftp_user, ftp_dir, ip_address, program_path, ...machine } = result.rows[0];
+    return machine;
+  } catch (err) {
+    if (needsPlacement && client) await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally { if (needsPlacement) client?.release(); await placements.finish(routingWrite, pool); }
 };

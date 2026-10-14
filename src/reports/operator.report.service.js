@@ -1,7 +1,8 @@
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 
 exports.getOperatorPerformance = async ({ company_id, shift_id, from_date, to_date, page = 1, limit = 20 }) => {
-  const conditions = [`o.company_id = $1`];
+  const conditions = [`o.company_id = $1${plantSql('oma.machine_id')}`];
   const params = [company_id];
   let i = 2;
 

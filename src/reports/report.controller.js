@@ -84,7 +84,7 @@ exports.shiftOeeData = async (req, res, next) => {
 exports.hourlyOeeExcel = async (req, res, next) => {
   try {
     const data = await svc.hourlyOee(req.user.company_id, req.query.date);
-    const file = excel.createExcel('Hourly OEE', data);
+    const file = await excel.createExcel('Hourly OEE', data);
     res.setHeader('Content-Disposition', `attachment; filename=hourly_oee_${req.query.date}.xlsx`);
     res.send(file);
   } catch (err) { next(err); }
@@ -93,7 +93,7 @@ exports.hourlyOeeExcel = async (req, res, next) => {
 exports.shiftOeeExcel = async (req, res, next) => {
   try {
     const data = await svc.shiftOee(req.user.company_id, req.query.date);
-    const file = excel.createExcel('Shift OEE', data);
+    const file = await excel.createExcel('Shift OEE', data);
     res.setHeader('Content-Disposition', `attachment; filename=shift_oee_${req.query.date}.xlsx`);
     res.send(file);
   } catch (err) { next(err); }
@@ -102,7 +102,7 @@ exports.shiftOeeExcel = async (req, res, next) => {
 exports.productionExcel = async (req, res, next) => {
   try {
     const data = await svc.production(req.user.company_id, req.query.date);
-    const file = excel.createExcel('Production', data);
+    const file = await excel.createExcel('Production', data);
     res.setHeader('Content-Disposition', `attachment; filename=production_${req.query.date}.xlsx`);
     res.send(file);
   } catch (err) { next(err); }

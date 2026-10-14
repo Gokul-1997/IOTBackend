@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# Nightly logical backup of the IoT database (TimescaleDB), kept locally and
-# optionally copied to S3.
-#
-#   PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE   the database (libpq variables)
-#   BACKUP_DIR        where dumps are kept          (default /var/backups/iot)
-#   KEEP_DAYS         local retention               (default 14)
-#   S3_URI            e.g. s3://bucket/iot-db/      (optional; needs the aws CLI)
-#
-# A custom-format dump (-Fc) is compressed and restorable table by table.
-# TimescaleDB: restore with db-restore-test.sh's steps (timescaledb_pre_restore /
-# post_restore, same extension version). Run from cron, e.g.
-#   30 1 * * *  /opt/iot/Backend/scripts/ops/db-backup.sh >> /var/log/iot-backup.log 2>&1
+# Logical backup plus integrity manifest. Includes the database only: back up
+# PROGRAM_TRANSFER_DIR and the collector journal separately at a consistent boundary.
 set -euo pipefail
+umask 077
+: "${PGDATABASE:?Set PGDATABASE to the database to back up}"
+[[ "$PGDATABASE" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo 'Invalid database name' >&2; exit 2; }
 BACKUP_DIR=${BACKUP_DIR:-/var/backups/iot}
 KEEP_DAYS=${KEEP_DAYS:-14}
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-FILE="$BACKUP_DIR/${PGDATABASE}_${STAMP}.dump"
+[[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] && (( KEEP_DAYS >= 1 )) || { echo 'KEEP_DAYS must be a positive integer' >&2; exit 2; }
 mkdir -p "$BACKUP_DIR"
-
-echo "$(date -u +%FT%TZ) backup start → $FILE"
-pg_dump --format=custom --compress=6 --no-owner --file="$FILE.part"
-mv "$FILE.part" "$FILE"
-# the table of contents must be readable, or the dump is not a backup
-pg_restore --list "$FILE" > /dev/null
-echo "$(date -u +%FT%TZ) backup ok: $(du -h "$FILE" | cut -f1)"
-
-if [ -n "${S3_URI:-}" ]; then
-  aws s3 cp --only-show-errors "$FILE" "$S3_URI"
-  echo "$(date -u +%FT%TZ) copied to $S3_URI"
+LOCK_DIR="$BACKUP_DIR/.${PGDATABASE}.backup-lock"
+mkdir "$LOCK_DIR" 2>/dev/null || { echo 'Another backup is running, or a stale lock needs inspection' >&2; exit 1; }
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+NAME="${PGDATABASE}_${STAMP}.dump"
+FILE="$BACKUP_DIR/$NAME"
+PART=$(mktemp "$BACKUP_DIR/.${PGDATABASE}.XXXXXX.part")
+cleanup() { rm -f "$PART"; rmdir "$LOCK_DIR" 2>/dev/null || true; }
+trap cleanup EXIT
+[[ ! -e "$FILE" ]] || { echo 'Backup destination already exists' >&2; exit 1; }
+pg_dump --format=custom --compress=6 --no-owner --file="$PART"
+pg_restore --list "$PART" > /dev/null
+mv "$PART" "$FILE"
+(
+  cd "$BACKUP_DIR"
+  if command -v sha256sum >/dev/null; then sha256sum "$NAME"; else shasum -a 256 "$NAME"; fi
+) > "$FILE.sha256"
+if [[ -n "${S3_URI:-}" ]]; then
+  # Treat the configured URI as a prefix, even without its trailing slash.
+  # Otherwise the manifest could replace the dump at the same object key.
+  REMOTE_PREFIX="${S3_URI%/}/"
+  aws s3 cp --only-show-errors --sse AES256 "$FILE" "$REMOTE_PREFIX"
+  aws s3 cp --only-show-errors --sse AES256 "$FILE.sha256" "$REMOTE_PREFIX"
 fi
-
-find "$BACKUP_DIR" -name "${PGDATABASE}_*.dump" -mtime +"$KEEP_DAYS" -delete
+# Only prune after the new dump, manifest and optional remote upload succeed.
+find "$BACKUP_DIR" -maxdepth 1 -name "${PGDATABASE}_*.dump" -mtime +"$KEEP_DAYS" -type f -exec sh -c 'rm -f "$1" "$1.sha256"' _ {} \;
+echo "$(date -u +%FT%TZ) verified backup: $FILE (restore rehearsal still required)"

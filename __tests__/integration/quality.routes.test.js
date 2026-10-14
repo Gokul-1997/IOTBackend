@@ -46,7 +46,7 @@ beforeEach(() => resetDb());
  * the handler. These tests used to pass only when the production Redis
  * happened to hold company 4's real grants.
  */
-function makeApp(user = fakeUser(), grants = ['page:quality', 'page:quality:edit']) {
+function makeApp(user = fakeUser(), grants = ['page:quality', 'page:quality:view', 'page:quality:edit']) {
   jest.resetModules();
   jest.doMock('../../src/middleware/auth.middleware', () =>
     (req, _res, next) => { req.user = user; next(); });
@@ -79,17 +79,17 @@ function queueDashboard({ produced = 10, runSec = 1800, reject = 0, rework = 0 }
   mockDb.queueResponse(
     { rows: [MACHINE_ROW] },
     { rows: [SHIFT_ROW] },
-    { rows: [{ produced, run_seconds: runSec }] },
-    { rows: [{ reject, rework }] },
-    { rows: [] },          // oee upsert
-    { rows: [] }           // hourly
+    { rows: [{ hour_start: '2026-05-06T02:30:00Z', produced_qty: produced, run_seconds: runSec, idle_seconds: 0, cycle_time_seconds: 60, planned_seconds: 3600 }] },
+    { rows: [{ reject, rework }] }
   );
 }
 
 function queueUpsert({ produced = 10, existingId = null } = {}) {
+  mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }], rowCount: 1 }); // BEGIN + authorized machine lock
   mockDb.queueResponse({ rows: [{ produced }] });
   mockDb.queueResponse(existingId ? { rows: [{ id: existingId }] } : { rows: [] });
   mockDb.queueResponse({ rows: [], rowCount: 1 });
+  mockDb.queueResponse({ rows: [] }); // COMMIT
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,7 +225,7 @@ describe('POST /api/quality/entry', () => {
   });
 
   test('TC-QE-04 422 when reject+rework > produced', async () => {
-    mockDb.queueResponse({ rows: [{ produced: 5 }] }); // produced = 5
+    mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }], rowCount: 1 }, { rows: [{ produced: 5 }] }); // produced = 5
 
     const res = await request(makeApp())
       .post('/api/quality/entry')
@@ -332,5 +332,21 @@ describe('POST /api/quality/entry', () => {
 
     expect(res.status).toBe(403);
     expect(mockDb.calls().some(c => /quality_entries/.test(c.text))).toBe(false);
+  });
+
+  test('duplicate legacy totals return a clear 409 and leave both rows untouched', async () => {
+    mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }] }, { rows: [{ produced: 10 }] }, { rows: [{ id: 1 }, { id: 2 }] });
+    const res=await request(makeApp()).post('/api/quality/entry').send(VALID_BODY);
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/administrator must review/i);
+    expect(mockDb.calls().some(call=>/INSERT INTO quality_entries|UPDATE quality_entries/.test(call.text))).toBe(false);
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+  });
+
+  test('an impossible calendar date is a 400 before opening a transaction', async () => {
+    const res=await request(makeApp()).post('/api/quality/entry').send({...VALID_BODY,date:'2026-02-31'});
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/calendar date/i);
+    expect(mockDb.connect).not.toHaveBeenCalled();
   });
 });

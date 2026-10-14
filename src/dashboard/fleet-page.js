@@ -1,4 +1,5 @@
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 
 function parseFleetPage(query = {}) {
   if (query.paged === undefined) return null; // legacy app contract
@@ -20,7 +21,7 @@ function parseFleetPage(query = {}) {
   return { page, perPage, status, search: search.trim() };
 }
 
-async function fleetPage(companyId, options) {
+async function fleetPage(companyId, options, plantId = null) {
   if (!companyId) throw Object.assign(new Error('No company assigned'), { status: 403 });
   const { page, perPage, status, search } = options;
   // The latest-reading lookup is indexed and time bounded. Full production,
@@ -40,7 +41,7 @@ async function fleetPage(companyId, options) {
              AND received_at > NOW() - INTERVAL '1 hour'
            ORDER BY received_at DESC LIMIT 1
         ) t ON true
-       WHERE m.company_id = $1 AND m.is_active = true
+       WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}
     ), filtered AS (
       SELECT * FROM fleet
        WHERE ($4 = 'all' OR ($4 = 'alarm' AND alarm) OR status = UPPER($4))

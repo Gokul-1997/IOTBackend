@@ -5,10 +5,10 @@ exports.login = async (req, res) => {
     const result = await service.login(req.body, req);
     res.json(result);
   } catch (e) {
-    res.status(e.status || 401).json({
+    res.status(e.status || 503).json({
       success: false,
-      message: e.message || 'Login failed',
-      ...(e.code && { code: e.code })
+      message: e.status ? e.message : 'The server could not check your session just now. Try again in a moment.',
+      ...(!e.status ? { code: 'AUTH_UNAVAILABLE' } : e.code ? { code: e.code } : {})
     });
   }
 };
@@ -26,10 +26,10 @@ exports.refresh = async (req, res) => {
     const result = await service.refresh(refreshToken, req);
     res.json({ success: true, ...result });
   } catch (e) {
-    res.status(e.status || 401).json({
+    res.status(e.status || 503).json({
       success: false,
-      message: e.message || 'Unable to refresh token',
-      ...(e.code && { code: e.code })
+      message: e.status ? e.message : 'The server could not check your session just now. Try again in a moment.',
+      ...(!e.status ? { code: 'AUTH_UNAVAILABLE' } : e.code ? { code: e.code } : {})
     });
   }
 };

@@ -20,6 +20,7 @@ const OPEN = ['QUEUED', 'DELIVERED'];
 const JOB_COLUMNS = `
   j.id, j.machine_id, j.machine_serial, j.action, j.program_name, j.program_path, j.overwrite, j.status, j.message,
   j.file_id, j.backup_file_id, j.requested_by, j.requested_at, j.delivered_at, j.finished_at,
+  j.protocol_version, j.controller_ip, j.device_id, j.error_code, j.expires_at,
   u.username AS requested_by_name,
   f.size_bytes AS file_size, f.sha256 AS file_sha256, f.stored_name AS file_stored_name,
   b.stored_name AS backup_stored_name`;
@@ -38,7 +39,7 @@ async function getJob(jobId, db = pool) {
 function view(job) {
   if (!job) return null;
   const { company_id, file_stored_name, backup_stored_name, ...rest } = job;
-  return { ...rest, target_file: targetFile(job.program_path, job.program_name),
+  return { ...rest, target_file: job.program_name ? targetFile(job.program_path, job.program_name) : null,
            file_name: file_stored_name || null, backup_name: backup_stored_name || null };
 }
 
@@ -99,12 +100,16 @@ async function failStale() {
               WHEN 'DELIVERED' THEN 'The machine''s device took this job but did not report back within ${DELIVERED_TIMEOUT_MIN} minutes.'
               ELSE 'No device collected this job within ${QUEUED_TIMEOUT_HOURS} hours — check that the machine''s device is on and online.'
             END
-      WHERE (status = 'DELIVERED' AND delivered_at < NOW() - INTERVAL '${DELIVERED_TIMEOUT_MIN} minutes')
-         OR (status = 'QUEUED'    AND requested_at < NOW() - INTERVAL '${QUEUED_TIMEOUT_HOURS} hours')
+      WHERE protocol_version=1 AND ((status = 'DELIVERED' AND delivered_at < NOW() - INTERVAL '${DELIVERED_TIMEOUT_MIN} minutes')
+         OR (status = 'QUEUED'    AND requested_at < NOW() - INTERVAL '${QUEUED_TIMEOUT_HOURS} hours'))
       RETURNING id`
   );
-  for (const { id } of rows) await announce(await getJob(id));
-  return rows.length;
+  const commands = await pool.query(`UPDATE program_jobs SET status='FAILED',finished_at=NOW(),error_code='DEVICE_TIMEOUT',
+    message=CASE status WHEN 'QUEUED' THEN 'The device did not collect the command within 5 minutes. Check its command connection.'
+      ELSE 'The device did not confirm completion. Check the controller before retrying.' END
+    WHERE protocol_version=2 AND status=ANY($1) AND expires_at<=NOW() RETURNING id`, [OPEN]);
+  for (const { id } of [...rows, ...commands.rows]) await announce(await getJob(id));
+  return rows.length + commands.rows.length;
 }
 
 module.exports = {

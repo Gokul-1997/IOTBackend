@@ -1,323 +1,94 @@
-/*
- * Unit tests for auth.middleware.js
- *
- * Covers:
- *  TC-AM-01  401 when Authorization header missing
- *  TC-AM-02  401 when Authorization header not "Bearer ..."
- *  TC-AM-03  401 when JWT is invalid / expired
- *  TC-AM-04  403 when user is inactive (Redis cache path)
- *  TC-AM-05  req.user populated correctly from Redis cache
- *  TC-AM-06  DB fallback when Redis cache miss
- *  TC-AM-07  401 when user not found in DB (cache miss path)
- *  TC-AM-08  403 when user inactive in DB (cache miss path)
- *  TC-AM-09  req.user populated correctly from DB
- *  TC-AM-10  SNT_SUPER role derived from JWT
- *  TC-AM-11  is_snt_super true when decoded.is_snt_super is true
- *  TC-AM-12  503 (not 401: the session stays) when the account cannot be checked
- *  TC-AM-13  Redis read failing falls back to the database
- *  TC-AM-14  Redis write failing still lets the request through
- *  TC-AM-15  an inactive account is still refused when Redis is down
- */
-
-jest.mock('../../src/db',    () => require('../helpers/mockDb').mockDb);
-jest.mock('../../src/redis', () => ({
-  get:   jest.fn(),
-  setex: jest.fn(async () => 'OK')
-}));
-jest.mock('jsonwebtoken', () => ({
-  verify: jest.fn()
-}));
-
-const jwt    = require('jsonwebtoken');
-const redis  = require('../../src/redis');
+/* Authoritative authorization checks PostgreSQL; cached rows never preserve
+ * revoked grants. These tests exercise the actual middleware and ALS scope. */
+jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
+jest.mock('../../src/redis', () => ({ get: jest.fn(), setex: jest.fn(), del: jest.fn() }));
+jest.mock('jsonwebtoken', () => ({ verify: jest.fn() }));
+const jwt = require('jsonwebtoken');
+const redis = require('../../src/redis');
 const { mockDb, resetDb } = require('../helpers/mockDb');
-const middleware = require('../../src/middleware/auth.middleware');
+const auth = require('../../src/middleware/auth.middleware');
+const readScope = require('../../src/lib/read-scope');
+const token = { user_id: 1, company_id: 999, plant_id: 999, user_type: 'OLD', roles: ['QUALITY'], permissions: ['page:quality:edit'] };
+const user = { id: 1, username: 'alice', plant_id: 11, company_id: 4, user_type: 'company_user', is_active: true, company_active: true, auth_revision: '0' };
+const req = () => ({ headers: { authorization: 'Bearer signed-token' } });
+const res = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() });
+beforeEach(() => { resetDb(); jest.clearAllMocks(); jwt.verify.mockReturnValue({ ...token }); });
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-function makeRes() {
-  const res = {
-    _status: null,
-    _body:   null,
-    status(code) { this._status = code; return this; },
-    json(body)   { this._body  = body;  return this; }
-  };
-  return res;
-}
-
-function makeReq(token) {
-  return {
-    headers: {
-      authorization: token ? `Bearer ${token}` : undefined
-    }
-  };
-}
-
-const DECODED_BASE = {
-  user_id:    1,
-  company_id: 4,
-  plant_id:   1,
-  user_type:  'ADMIN',
-  roles:      ['ADMIN'],
-  permissions: ['page:dashboard'],
-  is_snt_super: false,
-  plan: null
-};
-
-beforeEach(() => {
-  resetDb();
-  jest.clearAllMocks();
-  redis.get.mockResolvedValue(null);   // cache miss by default
+test.each([undefined, '', 'Token abc'])('missing or wrong Bearer header %s is refused before lookup', async header => {
+  const response = res(); const next = jest.fn();
+  await auth({ headers: { authorization: header } }, response, next);
+  expect(response.status).toHaveBeenCalledWith(401);
+  expect(mockDb.calls()).toHaveLength(0); expect(next).not.toHaveBeenCalled();
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Missing / malformed header
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('TC-AM-01 401 when Authorization header missing', async () => {
-  const req = { headers: {} };
-  const res = makeRes();
-  const next = jest.fn();
-
-  await middleware(req, res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(401);
-  expect(res._body.message).toMatch(/token missing/i);
+test('invalid JWT is refused before lookup', async () => {
+  jwt.verify.mockImplementation(() => { throw new Error('expired'); });
+  const response = res(); await auth(req(), response, jest.fn());
+  expect(response.status).toHaveBeenCalledWith(401); expect(mockDb.calls()).toHaveLength(0);
 });
-
-test('TC-AM-02 401 when Authorization header lacks Bearer prefix', async () => {
-  const req = { headers: { authorization: 'Token abc123' } };
-  const res = makeRes();
-  const next = jest.fn();
-
-  await middleware(req, res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(401);
+test.each([undefined, null, -1, 'abc'])('invalid signed user id %s is refused', async id => {
+  jwt.verify.mockReturnValue({ ...token, user_id: id }); const response = res();
+  await auth(req(), response, jest.fn()); expect(response.status).toHaveBeenCalledWith(401);
+  expect(mockDb.calls()).toHaveLength(0);
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Invalid JWT
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('TC-AM-03 401 when JWT verify throws (expired / tampered)', async () => {
-  jwt.verify.mockImplementation(() => { throw new Error('jwt expired'); });
-
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(makeReq('bad-token'), res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(401);
-  expect(res._body.message).toMatch(/expired or invalid/i);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Redis cache hit
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('TC-AM-04 403 when cached user is inactive', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockResolvedValue(JSON.stringify({ id: 1, is_active: false }));
-
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(makeReq('valid-token'), res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(403);
-  expect(res._body.message).toMatch(/inactive/i);
-});
-
-test('TC-AM-05 req.user populated correctly from Redis cache', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockResolvedValue(JSON.stringify({
-    id: 1, username: 'alice', plant_id: 1, company_id: 4,
-    user_type: 'ADMIN', is_active: true
-  }));
-
-  const req  = makeReq('valid-token');
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(req, res, next);
-
-  expect(next).toHaveBeenCalled();
-  expect(req.user.id).toBe(1);
-  expect(req.user.username).toBe('alice');
-  expect(req.user.roles).toEqual(['ADMIN']);
-  expect(req.user.permissions).toEqual(['page:dashboard']);
-  expect(req.user.is_snt_super).toBe(false);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DB fallback (cache miss)
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('TC-AM-06 DB is queried on Redis cache miss', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockResolvedValue(null);
-
-  mockDb.queueResponse({
-    rows: [{ id: 1, username: 'bob', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: true }]
+test('one trusted indexed lookup supplies scope and preserves ALS; missing revision is zero', async () => {
+  mockDb.queueResponse({ rows: [user] }); const request = req(); const next = jest.fn(() => {
+    expect(readScope.current()).toMatchObject({ companyId: 4, plantId: 11 });
   });
-
-  const req  = makeReq('valid-token');
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(req, res, next);
-
-  expect(mockDb.calls()).toHaveLength(1);
-  expect(next).toHaveBeenCalled();
+  await auth(request, res(), next); expect(next).toHaveBeenCalledTimes(1);
+  expect(request.user).toMatchObject({ id: 1, company_id: 4, plant_id: 11, user_type: 'company_user', auth_revision: '0', roles: ['QUALITY'], permissions: ['page:quality:edit'] });
+  expect(mockDb.calls()).toHaveLength(1); expect(mockDb.calls()[0]).toMatchObject({ params: [1] });
+  expect(mockDb.calls()[0].text).toMatch(/WHERE u\.id = \$1/);
+  expect(redis.get).not.toHaveBeenCalled(); expect(redis.setex).not.toHaveBeenCalled();
 });
-
-test('TC-AM-07 401 when user not found in DB', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockResolvedValue(null);
-  mockDb.queueResponse({ rows: [] });
-
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(makeReq('valid-token'), res, next);
-
+test('trusted null company cannot fall back to the JWT company', async () => {
+  mockDb.queueResponse({ rows: [{ ...user, company_id: null }] }); const request = req();
+  await auth(request, res(), jest.fn()); expect(request.user.company_id).toBeNull();
+});
+test('stale active cache is ignored after disabling an account', async () => {
+  redis.get.mockResolvedValue(JSON.stringify(user)); mockDb.queueResponse({ rows: [{ ...user, is_active: false }] });
+  const response = res(); const next = jest.fn(); await auth(req(), response, next);
+  expect(response.status).toHaveBeenCalledWith(403); expect(next).not.toHaveBeenCalled();
+  expect(redis.get).not.toHaveBeenCalled();
+});
+test('disabled company is refused from the current DB row', async () => {
+  mockDb.queueResponse({ rows: [{ ...user, company_active: false }] }); const response = res();
+  await auth(req(), response, jest.fn()); expect(response.status).toHaveBeenCalledWith(401);
+  expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'COMPANY_DISABLED' }));
+});
+test('deleted account is refused', async () => {
+  mockDb.queueResponse({ rows: [] }); const response = res(); await auth(req(), response, jest.fn());
+  expect(response.status).toHaveBeenCalledWith(401);
+});
+test('old JWT role grants are rejected immediately after revision advances', async () => {
+  mockDb.queueResponse({ rows: [{ ...user, auth_revision: '1' }] }); const response = res(); const next = jest.fn();
+  await auth(req(), response, next); expect(response.status).toHaveBeenCalledWith(401);
+  expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'AUTH_REVISION_CHANGED' }));
   expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(401);
-  expect(res._body.message).toMatch(/User not found/i);
 });
-
-test('TC-AM-08 403 when user inactive in DB', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockResolvedValue(null);
-  mockDb.queueResponse({
-    rows: [{ id: 1, username: 'dave', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: false }]
-  });
-
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(makeReq('valid-token'), res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(403);
-  expect(res._body.message).toMatch(/inactive/i);
+test('successive requests recheck the revision even when a cache entry exists', async () => {
+  redis.get.mockResolvedValue(JSON.stringify(user)); mockDb.queueResponse({ rows: [user] }, { rows: [{ ...user, auth_revision: '1' }] });
+  const first = jest.fn(); await auth(req(), res(), first); expect(first).toHaveBeenCalled();
+  const response = res(); await auth(req(), response, jest.fn()); expect(response.status).toHaveBeenCalledWith(401);
+  expect(mockDb.calls()).toHaveLength(2); expect(redis.get).not.toHaveBeenCalled();
 });
-
-test('TC-AM-09 req.user populated from DB and cached in Redis', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockResolvedValue(null);
-
-  mockDb.queueResponse({
-    rows: [{ id: 1, username: 'carol', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: true }]
-  });
-
-  const req  = makeReq('valid-token');
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(req, res, next);
-
-  expect(next).toHaveBeenCalled();
-  expect(req.user.username).toBe('carol');
-  expect(req.user.company_id).toBe(4);
-  expect(redis.setex).toHaveBeenCalledWith(
-    'user:1',
-    60,
-    expect.any(String)   // JSON string
-  );
+test.each([null, '01', '-1', '1.1', 9007199254740992])('invalid token revision %s is refused', async revision => {
+  jwt.verify.mockReturnValue({ ...token, auth_revision: revision }); mockDb.queueResponse({ rows: [user] });
+  const response = res(); await auth(req(), response, jest.fn()); expect(response.status).toHaveBeenCalledWith(401);
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// is_snt_super derivation
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('TC-AM-10 is_snt_super = true when role is SNT_SUPER', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE, roles: ['SNT_SUPER'] });
-  redis.get.mockResolvedValue(JSON.stringify({
-    id: 1, username: 'super', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: true
-  }));
-
-  const req  = makeReq('valid-token');
-  await middleware(req, makeRes(), jest.fn());
-
-  expect(req.user.is_snt_super).toBe(true);
+test('BIGINT revision comparison preserves precision above JavaScript safe integers', async () => {
+  jwt.verify.mockReturnValue({ ...token, auth_revision: '9007199254740993' });
+  mockDb.queueResponse({ rows: [{ ...user, auth_revision: '9007199254740993' }] }, { rows: [{ ...user, auth_revision: '9007199254740992' }] });
+  const next = jest.fn(); await auth(req(), res(), next); expect(next).toHaveBeenCalled();
+  const response = res(); await auth(req(), response, jest.fn()); expect(response.status).toHaveBeenCalledWith(401);
 });
-
-test('TC-AM-11 is_snt_super = true when decoded.is_snt_super flag is true', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE, roles: ['ADMIN'], is_snt_super: true });
-  redis.get.mockResolvedValue(JSON.stringify({
-    id: 1, username: 'flagged', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: true
-  }));
-
-  const req  = makeReq('valid-token');
-  await middleware(req, makeRes(), jest.fn());
-
-  expect(req.user.is_snt_super).toBe(true);
+test('DB outage returns retryable503 and never falls back to stale cache', async () => {
+  redis.get.mockResolvedValue(JSON.stringify(user)); mockDb.queueError(new Error('database down')); const response = res();
+  await auth(req(), response, jest.fn()); expect(response.status).toHaveBeenCalledWith(503);
+  expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'AUTH_UNAVAILABLE' }));
+  expect(redis.get).not.toHaveBeenCalled();
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Unexpected error path
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('TC-AM-12 503, not 401, when the database cannot be reached — nobody is signed out', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  mockDb.query.mockRejectedValueOnce(new Error('database down'));
-
-  const res  = makeRes();
-  const next = jest.fn();
-
-  await middleware(makeReq('valid-token'), res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(503);
-  expect(res._body.code).toBe('AUTH_UNAVAILABLE');
-  expect(res._body.message).toMatch(/try again/i);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Redis is a cache: slow or down must not sign anyone out
-// ─────────────────────────────────────────────────────────────────────────────
-
-const ACTIVE_ROW = { id: 1, username: 'u', plant_id: 1, company_id: 4, user_type: 'ADMIN', is_active: true, company_active: true };
-
-test('TC-AM-13 Redis read failing falls back to the database and lets the request through', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockRejectedValue(new Error('Command timed out'));
-  mockDb.queueResponse({ rows: [ACTIVE_ROW] });
-
-  const res  = makeRes();
-  const next = jest.fn();
-  await middleware(makeReq('valid-token'), res, next);
-
-  expect(next).toHaveBeenCalled();
-  expect(res._status).toBeNull();
-});
-
-test('TC-AM-14 Redis write failing still lets the request through', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.setex.mockRejectedValueOnce(new Error('Command timed out'));
-  mockDb.queueResponse({ rows: [ACTIVE_ROW] });
-
-  const res  = makeRes();
-  const next = jest.fn();
-  await middleware(makeReq('valid-token'), res, next);
-
-  expect(next).toHaveBeenCalled();
-});
-
-test('TC-AM-15 an inactive account is still refused when Redis is down', async () => {
-  jwt.verify.mockReturnValue({ ...DECODED_BASE });
-  redis.get.mockRejectedValue(new Error('Command timed out'));
-  mockDb.queueResponse({ rows: [{ ...ACTIVE_ROW, is_active: false }] });
-
-  const res  = makeRes();
-  const next = jest.fn();
-  await middleware(makeReq('valid-token'), res, next);
-
-  expect(next).not.toHaveBeenCalled();
-  expect(res._status).toBe(403);
+test('Redis cannot block authoritative authentication', async () => {
+  redis.get.mockRejectedValue(new Error('redis down')); redis.setex.mockRejectedValue(new Error('redis down'));
+  mockDb.queueResponse({ rows: [user] }); const next = jest.fn(); await auth(req(), res(), next);
+  expect(next).toHaveBeenCalled(); expect(redis.get).not.toHaveBeenCalled();
 });

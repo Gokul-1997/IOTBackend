@@ -183,15 +183,16 @@ exports.getById = async (id) => {
   return company;
 };
 
-/* Turning a company off — or back on — applies straight away. The login and
-   refresh checks alone would leave it working for a while: the auth
-   middleware caches each user for a minute, and an open socket keeps
-   streaming live data until it reconnects. */
+/* HTTP always reads the current company status. Open sockets also need to
+   close when access is disabled; obsolete user cache records are cleaned up. */
 async function applyCompanyStatus(companyId, isActive) {
   const { rows } = await db.query(`SELECT id FROM users WHERE company_id = $1`, [companyId]);
   const ids = rows.map(r => r.id);
   await require('../middleware/auth.middleware').forgetUsers(ids);
-  if (!isActive) require('../lib/realtime').disconnectUsers(ids);
+  if (!isActive) {
+    try { require('../lib/realtime').disconnectUsers(ids); }
+    catch (error) { console.warn('AUTH socket teardown skipped:', error.message); }
+  }
 }
 
 /**
@@ -567,7 +568,11 @@ exports.assignCompanyPermissions = async (company_id, permission_ids, granted_by
       }
     }
 
+    const { rows: affectedUsers } = added.length || removed.length
+      ? await client.query('UPDATE users SET auth_revision = auth_revision + 1 WHERE company_id = $1 RETURNING id', [company_id])
+      : { rows: [] };
     await client.query('COMMIT');
+    await require('../lib/auth-revision').invalidateUsers(affectedUsers.map(user => user.id));
 
     // access.middleware caches a company's grants for up to a minute; without
     // this a revoke would keep working until it expired.
@@ -649,6 +654,7 @@ exports.permanentDelete = async (id) => {
     }
 
     await client.query('COMMIT');
+    await require('../lib/auth-revision').invalidateUsers(userIds);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

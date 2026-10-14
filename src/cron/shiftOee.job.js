@@ -1,4 +1,5 @@
 const db = require('../db');
+const historical = require('../lib/historical-production');
 
 /*
  * Runs every 10 minutes.
@@ -51,24 +52,13 @@ async function runShiftOee({ fromMs, toMs }) {
         const shiftDurationMinutes = getShiftDurationMinutes(shift);
         const plannedSeconds = shiftDurationMinutes * 60;
 
-        // Production totals scoped by exact shift window — works for overnight shifts.
-        const { rows: allProdRows } = await db.query(
-          `SELECT
-             ph.machine_id,
-             SUM(ph.run_seconds)::int  AS total_run_seconds,
-             SUM(ph.produced_qty)::int AS total_produced_qty,
-             EXTRACT(EPOCH FROM COALESCE(c.cycle_time, '0 seconds'))::int AS cycle_time_seconds
-           FROM production_hourly ph
-           LEFT JOIN machine_current_job mcj
-             ON mcj.machine_id = ph.machine_id AND mcj.is_active = TRUE
-           LEFT JOIN components c ON c.id = mcj.component_id
-           WHERE ph.machine_id = ANY($1)
-             AND ph.shift_id   = $2
-             AND ph.hour_start >= $3
-             AND ph.hour_start <  $4
-           GROUP BY ph.machine_id, c.cycle_time`,
-          [machineIds, shift.id, windowStart, windowEnd]
-        );
+        // Historical snapshots, including partial clock-hour shift buckets.
+        const { rows: observedHours } = await db.query(historical.rowsSQL, [company.id, machineIds, shift.id, shiftDate]);
+        const byMachine = new Map();
+        for (const hour of observedHours) {
+          if (!byMachine.has(hour.machine_id)) byMachine.set(hour.machine_id, []);
+          byMachine.get(hour.machine_id).push(hour);
+        }
 
         const { rows: allQRows } = await db.query(
           `SELECT
@@ -78,7 +68,7 @@ async function runShiftOee({ fromMs, toMs }) {
            FROM quality_entries
            WHERE machine_id = ANY($1)
              AND shift_id   = $2
-             AND COALESCE(shift_date, created_at::date) = $3::date
+             AND COALESCE(shift_date, (created_at AT TIME ZONE 'Asia/Kolkata')::date) = $3::date
            GROUP BY machine_id`,
           [machineIds, shift.id, shiftDate]
         );
@@ -90,45 +80,27 @@ async function runShiftOee({ fromMs, toMs }) {
         const upsertParams = [];
         let   paramIdx     = 1;
 
-        for (const prod of allProdRows) {
-          if (prod.total_run_seconds === null) continue;
+        for (const [machineId, hours] of byMachine) {
 
-          const totalRun     = Number(prod.total_run_seconds || 0);
-          const totalQty     = Number(prod.total_produced_qty || 0);
-          const cycleTimeSec = Number(prod.cycle_time_seconds || 0);
-          const q            = qualityMap[prod.machine_id] || {};
-          const reject       = Number(q.reject || 0);
-          const rework       = Number(q.rework || 0);
-          const accepted     = Math.max(0, totalQty - reject - rework);
-
-          const availability = plannedSeconds > 0
-            ? Math.min(100, (totalRun / plannedSeconds) * 100) : 0;
-          const idealQty     = cycleTimeSec > 0 ? totalRun / cycleTimeSec : 0;
-          const performance  = idealQty > 0
-            ? Math.min(100, (totalQty / idealQty) * 100) : 0;
-          const quality      = totalQty > 0
-            ? Math.min(100, (accepted / totalQty) * 100) : 0;
-          const oee          = (availability / 100) * (performance / 100) * (quality / 100) * 100;
+          const totalQty = hours.reduce((sum, row) => sum + Number(row.produced_qty || 0), 0);
+          const q = qualityMap[machineId] || {};
+          const accepted = Math.max(0, totalQty - Number(q.reject || 0) - Number(q.rework || 0));
+          const { availability, performance, quality, oee } = historical.metrics(hours, plannedSeconds, accepted);
 
           upsertValues.push(
-            `($${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++})`
+            `($${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++},$${paramIdx++})`
           );
-          upsertParams.push(
-            prod.machine_id, shift.id, shiftDate,
-            Number(availability.toFixed(2)),
-            Number(performance.toFixed(2)),
-            Number(quality.toFixed(2)),
-            Number(oee.toFixed(2))
-          );
+          upsertParams.push(machineId, shift.id, shiftDate, availability, performance, quality, oee, company.id);
         }
 
         if (upsertValues.length > 0) {
           await db.query(
             `INSERT INTO oee_shift_summary
-               (machine_id, shift_id, shift_date, availability, performance, quality, oee)
+               (machine_id, shift_id, shift_date, availability, performance, quality, oee, company_id)
              VALUES ${upsertValues.join(',')}
              ON CONFLICT (machine_id, shift_id, shift_date)
              DO UPDATE SET
+               company_id = EXCLUDED.company_id,
                availability = EXCLUDED.availability,
                performance  = EXCLUDED.performance,
                quality      = EXCLUDED.quality,

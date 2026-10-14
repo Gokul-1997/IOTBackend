@@ -21,15 +21,16 @@ app.use(express.json());
 app.use('/api/programs', require('../../src/programs/program.routes'));
 const one = row => ({ rows: [row], rowCount: 1 });
 const none = { rows: [], rowCount: 0 };
-const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', program_path: null };
+const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.1.7', program_path: '//CNC_MEM/USER/PATH1/' };
 
-beforeEach(() => {
+beforeEach(async () => {
   resetDb();
   mockUser = { id: 2, company_id: 5, permissions: ['page:programs:view', 'page:programs:upload', 'page:programs:transfer'] };
+  await require('../../src/redis').set('company_grants:5', '[]', 'EX', 60);
 });
 afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
-test('upload publishes directly as multipart, without send=true, a device token or a program path', async () => {
+test('compatibility publication saves a reference using the saved machine connection', async () => {
   mockDb.queueResponse(one(machine), none,
     one({ id: '101', machine_id: 7, program_name: 'O1001.nc', kind: 'NEW' }), none, none);
   const res = await request(app).post('/api/programs/machines/7/current-program')
@@ -72,4 +73,45 @@ test('the multipart file is required, and anonymous publication is refused', asy
   res = await request(app).post('/api/programs/machines/7/current-program').attach('file', Buffer.from('M30'), 'O1.nc');
   expect(res.status).toBe(401);
   expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('company grant denial blocks reads even when the role allows Program Transfer', async () => {
+  await require('../../src/redis').set('company_grants:5', JSON.stringify(['page:dashboard:view']), 'EX', 60);
+  const res=await request(app).get('/api/programs/machines');
+  expect(res.status).toBe(403);
+  expect(res.body.code).toBe('NOT_IN_PLAN');
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('a company view grant alone cannot authorize uploading controller programs', async () => {
+  await require('../../src/redis').set('company_grants:5', JSON.stringify(['page:programs:view']), 'EX', 60);
+  const res=await request(app).post('/api/programs/machines/7/current-program').attach('file',Buffer.from('M30'),'O1.nc');
+  expect(res.status).toBe(403);
+  expect(res.body.code).toBe('NOT_IN_PLAN');
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('a legacy JSON transfer also requires the company transfer grant', async () => {
+  await require('../../src/redis').set('company_grants:5', JSON.stringify(['page:programs:view']), 'EX', 60);
+  const res=await request(app).post('/api/programs/jobs').send({action:'SEND',file_ids:[1],machine_ids:[7]});
+  expect(res.status).toBe(403);
+  expect(res.body.code).toBe('NOT_IN_PLAN');
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('legacy upload-and-send cannot use the company upload grant as a transfer grant', async () => {
+  await require('../../src/redis').set('company_grants:5', JSON.stringify(['page:programs:view','page:programs:upload']), 'EX', 60);
+  const res=await request(app).post('/api/programs/files').field('send','true').field('machine_id','7').attach('file',Buffer.from('M30'),'O1.nc');
+  expect(res.status).toBe(403);
+  expect(res.body.code).toBe('NOT_IN_PLAN');
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('cancelling a queued send requires the company transfer action grant', async () => {
+  await require('../../src/redis').set('company_grants:5', JSON.stringify(['page:programs:view']), 'EX', 60);
+  mockDb.queueResponse(one({id:'11',company_id:5,machine_id:7,action:'SEND',status:'QUEUED'}));
+  const res=await request(app).post('/api/programs/jobs/11/cancel').send({});
+  expect(res.status).toBe(403);
+  expect(res.body.code).toBe('NOT_IN_PLAN');
+  expect(mockDb.calls().some(call=>/^\s*UPDATE program_jobs/.test(call.text))).toBe(false);
 });

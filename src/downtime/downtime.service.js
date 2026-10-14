@@ -1,5 +1,8 @@
 const db = require('../db');
+const { pagination } = require('../lib/pagination');
+const valid = require('../lib/work-validation');
 const { ownedOrThrow } = require('../lib/tenant');
+const { addMachinePlantScope } = require('../lib/plant-scope');
 
 // One row per code per owner. The built-in codes (no company) are in the
 // table twice — migration 007 ran twice, and its unique index treats every
@@ -43,19 +46,21 @@ exports.updateReason = async (id, company_id, { code, name, category, is_active 
   return res.rows[0];
 };
 
-exports.logEvent = async ({ company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by }) => {
+exports.logEvent = async ({ company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by, plant_id = null }) => {
   if (!machine_id) throw { status: 400, message: 'machine_id is required' };
+  const { from, to } = valid.window(started_at || new Date(), ended_at, 'started_at', 'ended_at');
   await ownedOrThrow(company_id, { machine_id, shift_id, downtime_reason_id });
   const res = await db.query(
     `INSERT INTO downtime_events (company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+     ${plant_id == null ? 'VALUES ($1,$2,$3,$4,$5,$6,$7,$8)' : 'SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM machines WHERE id=$2 AND company_id=$1 AND plant_id=$9)'} RETURNING *`,
     [company_id, machine_id, shift_id || null, downtime_reason_id || null,
-     started_at || new Date(), ended_at || null, notes || null, entered_by]
+     from, to, notes || null, entered_by, ...(plant_id == null ? [] : [plant_id])]
   );
+  if (!res.rowCount) throw { status: 404, message: 'Machine not found in your plant' };
   return res.rows[0];
 };
 
-exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 1, limit = 20 }) => {
+exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 1, limit = 20, plant_id = null }) => {
   const conditions = [`e.company_id = $1`];
   const params = [company_id];
   let i = 2;
@@ -63,11 +68,11 @@ exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 
   if (machine_id) { conditions.push(`e.machine_id = $${i++}`); params.push(machine_id); }
   if (from_date)  { conditions.push(`e.started_at >= $${i++}`); params.push(from_date); }
   if (to_date)    { conditions.push(`e.started_at <= $${i++}`); params.push(to_date); }
+  addMachinePlantScope(conditions, params, 'e', plant_id);
+  i = params.length + 1;
 
   const where = `WHERE ${conditions.join(' AND ')}`;
-  const pageNum = Math.max(1, parseInt(page) || 1);
-  const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 20));
-  const offset = (pageNum - 1) * limitNum;
+  const { pageNum, limitNum, offset } = pagination(page, limit);
 
   const [countRes, dataRes] = await Promise.all([
     db.query(`SELECT COUNT(*) FROM downtime_events e ${where}`, params),
@@ -94,7 +99,7 @@ exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 
 // The last 7 days unless the caller names dates. The defaults are SQL, not
 // bind values: "NOW() - INTERVAL '7 days'" sent as a value is not a time, and
 // every summary without dates (the Downtime page's Summary tab) was a 500.
-exports.getDowntimeSummary = async ({ company_id, from_date, to_date }) => {
+exports.getDowntimeSummary = async ({ company_id, from_date, to_date, plant_id = null }) => {
   for (const [label, v] of [['from_date', from_date], ['to_date', to_date]]) {
     if (v && Number.isNaN(Date.parse(v))) throw { status: 400, message: `${label} is not a date` };
   }
@@ -105,12 +110,13 @@ exports.getDowntimeSummary = async ({ company_id, from_date, to_date }) => {
      FROM downtime_events e
      LEFT JOIN downtime_reasons dr ON dr.id = e.downtime_reason_id
      WHERE e.company_id = $1
+       ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=e.machine_id AND scoped_machine.company_id=$1 AND scoped_machine.plant_id=$4)'}
        AND e.started_at >= COALESCE($2::timestamptz, NOW() - INTERVAL '7 days')
        AND e.started_at <= COALESCE($3::timestamptz, NOW())
        AND e.ended_at IS NOT NULL
      GROUP BY dr.category, dr.name, dr.code
      ORDER BY total_seconds DESC`,
-    [company_id, from_date || null, to_date || null]
+    [company_id, from_date || null, to_date || null, ...(plant_id == null ? [] : [plant_id])]
   );
   return res.rows;
 };

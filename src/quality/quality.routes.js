@@ -6,7 +6,7 @@ const access = require('../middleware/access.middleware');
 const validate = require('../middleware/validate.middleware');
 const controller = require('./quality.controller');
 
-router.get("/", auth, controller.getQualityDashboard);
+router.get("/", auth, access('page:quality:view'), controller.getQualityDashboard);
 /* Recording rejects and rework changes the figures OEE is computed from, so
    it needs Quality → Edit. It had no check at all: SUPERVISOR, set up as
    Quality view-only, could change them. */

@@ -1,5 +1,8 @@
 const db = require('../db');
+const { pagination } = require('../lib/pagination');
+const valid = require('../lib/work-validation');
 const { ownedOrThrow } = require('../lib/tenant');
+const { addMachinePlantScope } = require('../lib/plant-scope');
 
 const VALID_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
 const VALID_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -39,7 +42,7 @@ function toIssueType(value, fallback = 'BREAKDOWN') {
 
 exports.toPriority = toPriority;
 
-exports.getTickets = async ({ company_id, machine_id, status, priority, assigned_to, page = 1, limit = 20 }) => {
+exports.getTickets = async ({ company_id, machine_id, status, priority, assigned_to, page = 1, limit = 20, plant_id = null }) => {
   const conditions = [`t.company_id = $1`];
   const params = [company_id];
   let i = 2;
@@ -48,11 +51,11 @@ exports.getTickets = async ({ company_id, machine_id, status, priority, assigned
   if (status)       { conditions.push(`t.status = $${i++}`);       params.push(status); }
   if (priority)     { conditions.push(`t.priority = $${i++}`);     params.push(priority); }
   if (assigned_to)  { conditions.push(`t.assigned_to = $${i++}`);  params.push(assigned_to); }
+  addMachinePlantScope(conditions, params, 't', plant_id);
+  i = params.length + 1;
 
   const where = `WHERE ${conditions.join(' AND ')}`;
-  const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, parseInt(limit) || 20);
-  const offset = (pageNum - 1) * limitNum;
+  const { pageNum, limitNum, offset } = pagination(page, limit);
 
   const [countRes, dataRes] = await Promise.all([
     db.query(`SELECT COUNT(*) FROM maintenance_tickets t ${where}`, params),
@@ -84,7 +87,7 @@ exports.getTickets = async ({ company_id, machine_id, status, priority, assigned
   };
 };
 
-exports.getTicketById = async (id, company_id) => {
+exports.getTicketById = async (id, company_id, plant_id = null) => {
   const ticketRes = await db.query(
     `SELECT t.*, m.machine_serial_no,
             u.username AS assigned_to_name,
@@ -95,8 +98,8 @@ exports.getTicketById = async (id, company_id) => {
      LEFT JOIN users u ON u.id = t.assigned_to
      LEFT JOIN users c ON c.id = t.created_by
      LEFT JOIN machine_alarms a ON a.id = t.alarm_id
-     WHERE t.id = $1 AND t.company_id = $2`,
-    [id, company_id]
+     WHERE t.id = $1 AND t.company_id = $2 ${plant_id == null ? '' : 'AND m.company_id=$2 AND m.plant_id=$3'}`,
+    [id, company_id, ...(plant_id == null ? [] : [plant_id])]
   );
   if (!ticketRes.rowCount) throw { status: 404, message: 'Ticket not found' };
 
@@ -112,7 +115,7 @@ exports.getTicketById = async (id, company_id) => {
   return { ...ticketRes.rows[0], history: historyRes.rows };
 };
 
-exports.createTicket = async ({ company_id, machine_id, alarm_id, title, description, issue_type, priority, assigned_to, created_by }) => {
+exports.createTicket = async ({ company_id, machine_id, alarm_id, title, description, issue_type, priority, assigned_to, created_by, plant_id = null }) => {
   if (!machine_id || !title) throw { status: 400, message: 'machine_id and title are required' };
   await ownedOrThrow(company_id, { machine_id, alarm_id, assigned_to });
 
@@ -124,10 +127,13 @@ exports.createTicket = async ({ company_id, machine_id, alarm_id, title, descrip
     const res = await client.query(
       `INSERT INTO maintenance_tickets
          (company_id, machine_id, alarm_id, title, description, issue_type, priority, status, assigned_to, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       ${plant_id == null ? 'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)' : `SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10 WHERE EXISTS
+         (SELECT 1 FROM machines WHERE id=$2 AND company_id=$1 AND plant_id=$11)
+         AND ($9::int IS NULL OR EXISTS (SELECT 1 FROM users WHERE id=$9 AND company_id=$1 AND is_active=TRUE AND (plant_id=$11 OR plant_id IS NULL)))`} RETURNING *`,
       [company_id, machine_id, alarm_id || null, title, description || null,
-       toIssueType(issue_type), toPriority(priority), status, assigned_to || null, created_by]
+       toIssueType(issue_type), toPriority(priority), status, assigned_to || null, created_by, ...(plant_id == null ? [] : [plant_id])]
     );
+    if (!res.rows.length) throw { status: 404, message: 'Machine not found in your plant' };
     const ticket = res.rows[0];
 
     await client.query(
@@ -146,8 +152,9 @@ exports.createTicket = async ({ company_id, machine_id, alarm_id, title, descrip
   }
 };
 
-exports.updateTicket = async (id, company_id, fields) => {
+exports.updateTicket = async (id, company_id, fields, plant_id = null) => {
   const { title, description, issue_type, priority, parts_used, downtime_minutes } = fields;
+  const minutes = valid.nonnegative(downtime_minutes, 'downtime_minutes', { integer: true });
   /* null leaves the column as it is (COALESCE below); anything given is
      checked here rather than by the enum, which answers with a 500. */
   const unset = v => v === undefined || v === null || v === '';
@@ -163,8 +170,9 @@ exports.updateTicket = async (id, company_id, fields) => {
          downtime_minutes = COALESCE($6, downtime_minutes),
          updated_at = NOW()
      WHERE id = $7 AND company_id = $8
+       ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=maintenance_tickets.machine_id AND scoped_machine.company_id=$8 AND scoped_machine.plant_id=$9)'}
      RETURNING *`,
-    [title, description, newIssueType, newPriority, parts_used, downtime_minutes, id, company_id]
+    [title, description, newIssueType, newPriority, parts_used, minutes, id, company_id, ...(plant_id == null ? [] : [plant_id])]
   );
   if (!res.rowCount) throw { status: 404, message: 'Ticket not found' };
   return res.rows[0];
@@ -177,7 +185,7 @@ exports.updateTicket = async (id, company_id, fields) => {
  * — those timestamps are a downstream *effect* of a status change, not a
  * fact the caller supplies).
  */
-exports.updateTicketStatus = async (id, company_id, { status, note, changed_by }) => {
+exports.updateTicketStatus = async (id, company_id, { status, note, changed_by, plant_id = null }) => {
   if (!VALID_STATUSES.includes(status)) {
     throw { status: 400, message: `status must be one of ${VALID_STATUSES.join(', ')}` };
   }
@@ -187,11 +195,16 @@ exports.updateTicketStatus = async (id, company_id, { status, note, changed_by }
     await client.query('BEGIN');
 
     const currentRes = await client.query(
-      `SELECT status FROM maintenance_tickets WHERE id = $1 AND company_id = $2 FOR UPDATE`,
-      [id, company_id]
+      `SELECT * FROM maintenance_tickets WHERE id = $1 AND company_id = $2
+        ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=maintenance_tickets.machine_id AND scoped_machine.company_id=$2 AND scoped_machine.plant_id=$3)'} FOR UPDATE`,
+      [id, company_id, ...(plant_id == null ? [] : [plant_id])]
     );
     if (!currentRes.rowCount) throw { status: 404, message: 'Ticket not found' };
     const fromStatus = currentRes.rows[0].status;
+    if (fromStatus === status) {
+      await client.query('COMMIT');
+      return currentRes.rows[0];
+    }
 
     // Keyed on the TARGET status only, not the source: resolved_at is NOW()
     // on entering RESOLVED, preserved on RESOLVED->CLOSED (closing keeps the
@@ -207,9 +220,11 @@ exports.updateTicketStatus = async (id, company_id, { status, note, changed_by }
       `UPDATE maintenance_tickets
        SET status = $1, resolved_at = ${resolvedAtSql}, closed_at = ${closedAtSql}, updated_at = NOW()
        WHERE id = $2 AND company_id = $3
+         ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=maintenance_tickets.machine_id AND scoped_machine.company_id=$3 AND scoped_machine.plant_id=$4)'}
        RETURNING *`,
-      [status, id, company_id]
+      [status, id, company_id, ...(plant_id == null ? [] : [plant_id])]
     );
+    if (!updateRes.rowCount) throw { status: 404, message: 'Ticket not found in your plant' };
 
     await client.query(
       `INSERT INTO ticket_status_history (ticket_id, from_status, to_status, note, changed_by)
@@ -230,16 +245,16 @@ exports.updateTicketStatus = async (id, company_id, { status, note, changed_by }
 /** Who a ticket can be assigned to: the company's active users. The page
  *  used the admin-only user list, which every other role was refused — so a
  *  MAINTENANCE user could never pick an assignee. Names only. */
-exports.getAssignees = async (company_id) => {
+exports.getAssignees = async (company_id, plant_id = null) => {
   if (!company_id) return [];
   const { rows } = await db.query(
-    `SELECT id, username FROM users WHERE company_id = $1 AND is_active = true ORDER BY username`,
-    [company_id]
+    `SELECT id, username FROM users WHERE company_id = $1 AND is_active = true ${plant_id == null ? '' : 'AND (plant_id=$2 OR plant_id IS NULL)'} ORDER BY username`,
+    [company_id, ...(plant_id == null ? [] : [plant_id])]
   );
   return rows;
 };
 
-exports.assignTicket = async (id, company_id, { assigned_to, changed_by }) => {
+exports.assignTicket = async (id, company_id, { assigned_to, changed_by, plant_id = null }) => {
   if (!assigned_to) throw { status: 400, message: 'assigned_to is required' };
   await ownedOrThrow(company_id, { assigned_to });
 
@@ -248,8 +263,9 @@ exports.assignTicket = async (id, company_id, { assigned_to, changed_by }) => {
     await client.query('BEGIN');
 
     const currentRes = await client.query(
-      `SELECT status FROM maintenance_tickets WHERE id = $1 AND company_id = $2 FOR UPDATE`,
-      [id, company_id]
+      `SELECT status FROM maintenance_tickets WHERE id = $1 AND company_id = $2
+        ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=maintenance_tickets.machine_id AND scoped_machine.company_id=$2 AND scoped_machine.plant_id=$3)'} FOR UPDATE`,
+      [id, company_id, ...(plant_id == null ? [] : [plant_id])]
     );
     if (!currentRes.rowCount) throw { status: 404, message: 'Ticket not found' };
     const fromStatus = currentRes.rows[0].status;
@@ -259,9 +275,12 @@ exports.assignTicket = async (id, company_id, { assigned_to, changed_by }) => {
 
     const updateRes = await client.query(
       `UPDATE maintenance_tickets SET assigned_to = $1, status = $2, updated_at = NOW()
-       WHERE id = $3 AND company_id = $4 RETURNING *`,
-      [assigned_to, toStatus, id, company_id]
+       WHERE id = $3 AND company_id = $4
+         ${plant_id == null ? '' : `AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=maintenance_tickets.machine_id AND scoped_machine.company_id=$4 AND scoped_machine.plant_id=$5)
+           AND EXISTS (SELECT 1 FROM users WHERE id=$1 AND company_id=$4 AND is_active=TRUE AND (plant_id=$5 OR plant_id IS NULL))`} RETURNING *`,
+      [assigned_to, toStatus, id, company_id, ...(plant_id == null ? [] : [plant_id])]
     );
+    if (!updateRes.rowCount) throw { status: 404, message: 'Ticket not found in your plant' };
 
     if (toStatus !== fromStatus) {
       await client.query(
@@ -281,13 +300,14 @@ exports.assignTicket = async (id, company_id, { assigned_to, changed_by }) => {
   }
 };
 
-exports.getSummary = async (company_id) => {
+exports.getSummary = async (company_id, plant_id = null) => {
   const res = await db.query(
     `SELECT status, priority, COUNT(*)::int AS count
-     FROM maintenance_tickets
+     FROM maintenance_tickets t
      WHERE company_id = $1 AND status NOT IN ('RESOLVED', 'CLOSED')
+       ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines scoped_machine WHERE scoped_machine.id=t.machine_id AND scoped_machine.company_id=$1 AND scoped_machine.plant_id=$2)'}
      GROUP BY status, priority`,
-    [company_id]
+    [company_id, ...(plant_id == null ? [] : [plant_id])]
   );
   return res.rows;
 };

@@ -51,12 +51,12 @@ function guardedRoutes() {
     for (const layer of router.stack || []) {
       if (!layer.route) continue;
       for (const h of layer.route.stack) {
-        if (h.handle && h.handle.requiredPermission) {
+        for (const key of (h.handle?.requiredPermissions || (h.handle?.requiredPermission ? [h.handle.requiredPermission] : []))) {
           found.push({
             file: path.relative(path.join(__dirname, '../..'), file),
             method: Object.keys(layer.route.methods)[0].toUpperCase(),
             path: layer.route.path,
-            key: h.handle.requiredPermission
+            key
           });
         }
       }

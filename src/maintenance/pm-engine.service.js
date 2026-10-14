@@ -28,6 +28,9 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    // Manual runs and the cron must share a lock inside this transaction.
+    // NOT EXISTS alone sees the same empty snapshot in concurrent runs.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('pm-engine'), $1::int)", [companyId]);
 
     /*
      * candidates  — every (rule, machine) pair whose alarm count within the
@@ -61,6 +64,13 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
           AND a.started_at > NOW() - make_interval(hours => t.window_hours)
          WHERE t.company_id = $1
            AND t.is_active
+           AND (t.machine_id IS NOT NULL OR NOT EXISTS (
+             SELECT 1 FROM alarm_thresholds override
+              WHERE override.company_id = t.company_id
+                AND override.machine_id = m.id
+                AND override.alarm_type = t.alarm_type
+                AND override.is_active
+           ))
          GROUP BY t.id, m.id, m.machine_serial_no
          HAVING COUNT(a.id) >= t.threshold_count
        ),
@@ -90,6 +100,7 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
          NOW() + make_interval(hours => r.due_hours),
          $3
        FROM to_raise r
+       ON CONFLICT DO NOTHING
        RETURNING id, machine_id, threshold_id, priority, due_date, title`,
       [companyId, LIVE_STATUSES, createdBy]
     );

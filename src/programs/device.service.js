@@ -86,7 +86,7 @@ exports.nextJob = async (device) => {
     `UPDATE program_jobs
         SET status = 'DELIVERED', delivered_at = NOW(), device_id = $2
       WHERE id = (SELECT id FROM program_jobs
-                   WHERE machine_id = $1 AND company_id = $3 AND status = 'QUEUED'
+                   WHERE machine_id = $1 AND company_id = $3 AND status = 'QUEUED' AND protocol_version=1
                    ORDER BY requested_at, id
                    LIMIT 1
                    FOR UPDATE SKIP LOCKED)
@@ -130,6 +130,7 @@ exports.uploadFile = async (device, { file, type, job_id, program_name, sha256, 
     job = await ownJob(device, job_id, { action: 'SEND' });
   }
 
+  if (job?.protocol_version === 2 && kind === 'BACKUP') return require('./commands').storeReplacementBackup(device, { job_id, program_name: program_name || file.originalname, sha256, note }, file);
   const name = program_name || (kind === 'FETCHED' ? job.program_name : file.originalname);
   if (sha256 && String(sha256).toLowerCase() !== storage.sha256(file.buffer)) {
     throw fail('The file arrived changed: its SHA-256 does not match the one sent. Send it again.', 'CHECKSUM_MISMATCH', 422);
@@ -163,12 +164,14 @@ exports.uploadFile = async (device, { file, type, job_id, program_name, sha256, 
 };
 
 /** The device's report on a job: DONE, or FAILED with what went wrong. */
-exports.reportResult = async (device, jobId, { status, message }) => {
+exports.reportResult = async (device, jobId, body) => {
+  const { status, message } = body;
   const s = String(status || '').toUpperCase();
   if (!['DONE', 'FAILED'].includes(s)) throw fail('status must be DONE or FAILED.', 'BAD_STATUS');
   if (s === 'FAILED' && !String(message || '').trim()) throw fail('Say what went wrong in "message".', 'NO_MESSAGE');
 
   const job = await ownJob(device, jobId, { status: ['DELIVERED', 'DONE', 'FAILED'] });
+  if (job.protocol_version === 2) return require('./commands').result(device, jobId, body);
   if (job.status !== 'DELIVERED') {
     // the same report twice (a retry after a timeout) is fine; a different one is not
     if (job.status === s) return jobs.view(job);

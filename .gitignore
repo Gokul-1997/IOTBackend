@@ -4,3 +4,7 @@
 
 # Program Transfer files (PROGRAM_TRANSFER_DIR defaults here); they belong to the server, not the repo
 /storage/
+
+# Local Python agent verification artifacts
+__pycache__/
+*.pyc

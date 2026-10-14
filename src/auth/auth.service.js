@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../db');
 const crypto = require('crypto');
+const { revisionOf, invalidateUsers } = require('../lib/auth-revision');
 const { sendBulkEmails } = require('../utils/nodemailer');
 const { generateResetPasswordTemplate } = require('../utils/nodemailer/emailTemplates/generateResetPasswordTemplate');
 
@@ -51,7 +52,7 @@ exports.login = async ({ email, password }, req) => {
   // Step 1: Get user WITHOUT lock first (read-only)
   const userRes = await db.query(
     `SELECT u.id, u.email, u.username, u.password_hash, u.plant_id, u.company_id, u.user_type,
-            u.is_active, u.failed_login_attempts, u.lock_until,
+            u.is_active, u.auth_revision, u.failed_login_attempts, u.lock_until,
             c.company_name, COALESCE(c.is_active, true) AS company_active
      FROM users u
      LEFT JOIN companies c ON c.id = u.company_id
@@ -194,6 +195,7 @@ exports.login = async ({ email, password }, req) => {
       plant_id:   user.plant_id,
       company_id: user.company_id,
       user_type:  user.user_type,
+      auth_revision: revisionOf(user.auth_revision),
       is_snt_super,
       roles,
       permissions,
@@ -236,7 +238,7 @@ exports.refresh = async (refreshToken, req) => {
 
   const sessionRes = await db.query(
     `SELECT s.user_id, s.expires_at, s.revoked,
-            u.email, u.username, u.plant_id, u.is_active,
+            u.email, u.username, u.plant_id, u.is_active, u.auth_revision,
             COALESCE(c.is_active, true) AS company_active
      FROM user_sessions s
      JOIN users u ON u.id = s.user_id
@@ -302,12 +304,18 @@ exports.refresh = async (refreshToken, req) => {
     plant_id:   s.plant_id,
     company_id: su.company_id,
     user_type:  su.user_type,
+    // This snapshot precedes the role/permission reads. If a concurrent
+    // mutation commits while refreshing, its revision rejects this token;
+    // never pair a newer revision with grants read before that mutation.
+    auth_revision: revisionOf(s.auth_revision),
     is_snt_super: is_snt_super_refresh,
     roles,
     permissions
   });
 
-  return { accessToken, permissions, company_permissions };
+  return { accessToken, roles, permissions, company_permissions,
+    company_id: su.company_id, plant_id: s.plant_id, user_type: su.user_type,
+    is_snt_super: is_snt_super_refresh, auth_revision: revisionOf(s.auth_revision) };
 };
 
 /* =========================================================
@@ -359,30 +367,25 @@ exports.resetPassword = async (token, password) => {
   // Hash the incoming raw token before DB lookup
   const hashedToken = hashToken(token);
 
-  const result = await db.query(
-    `SELECT user_id
-     FROM password_reset_tokens
-     WHERE token = $1 AND expires_at > NOW() AND used = false`,
-    [hashedToken]
-  );
-
-  if (result.rowCount === 0) throw { status: 400, message: 'Invalid or expired token' };
-
-  const userId = result.rows[0].user_id;
   const hash = await bcrypt.hash(password, 10);
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-
-    await client.query(
-      'UPDATE users SET password_hash = $1 WHERE id = $2',
-      [hash, userId]
-    );
-
-    await client.query(
-      'UPDATE password_reset_tokens SET used = true WHERE token = $1',
+    // Claim the token atomically. Two requests can no longer both read it
+    // as unused and set two different passwords from the same reset link.
+    const result = await client.query(
+      `UPDATE password_reset_tokens SET used = true
+        WHERE token = $1 AND expires_at > NOW() AND used = false
+        RETURNING user_id`,
       [hashedToken]
+    );
+    if (!result.rowCount) throw { status: 400, message: 'Invalid or expired token' };
+    const userId = result.rows[0].user_id;
+
+    await client.query(
+      'UPDATE users SET password_hash = $1, auth_revision = auth_revision + 1 WHERE id = $2',
+      [hash, userId]
     );
 
     // revoke all sessions after password change
@@ -392,6 +395,7 @@ exports.resetPassword = async (token, password) => {
     );
 
     await client.query('COMMIT');
+    await invalidateUsers([userId]);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -494,5 +498,6 @@ exports.changeMyPassword = async (userId, currentPassword, newPassword) => {
   if (sameAsOld) throw { status: 400, message: 'New password must be different from the current one' };
 
   const hash = await bcrypt.hash(newPassword, 10);
-  await db.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, userId]);
+  await db.query('UPDATE users SET password_hash = $1, auth_revision = auth_revision + 1, updated_at = NOW() WHERE id = $2', [hash, userId]);
+  await invalidateUsers([userId]);
 };

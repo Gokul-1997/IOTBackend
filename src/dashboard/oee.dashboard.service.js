@@ -32,6 +32,7 @@
  */
 
 const pool = require('../db');
+const { plantSql } = require('../lib/read-scope');
 const { costOf } = require('../machines/hour-rate');
 
 /* Classification bands, world-class OEE being 85%. Overridable per request
@@ -99,7 +100,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               COUNT(*)::int                AS hours
          FROM production_hourly ph
          JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
-        WHERE ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
+        WHERE TRUE${plantSql('ph.machine_id')} AND ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
           ${mf ? `AND ph.machine_id = ${mf}` : ''}
           ${sf ? `AND ph.shift_id = ${sf}` : ''}
         GROUP BY ph.machine_id
@@ -113,7 +114,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               MAX(COALESCE(c.multiplication_factor, 1))::numeric AS mult
          FROM machine_current_job mcj
          JOIN components c ON c.id = mcj.component_id
-        WHERE mcj.is_active = TRUE
+        WHERE mcj.is_active = TRUE${plantSql('mcj.machine_id')}
         GROUP BY mcj.machine_id
      ),
      qual AS (
@@ -124,14 +125,14 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               SUM(COALESCE(q.rework_qty,0))::bigint AS rework
          FROM quality_entries q
          JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
-        WHERE q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
+        WHERE TRUE${plantSql('q.machine_id')} AND q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
           ${sf ? `AND q.shift_id = ${sf}` : ''}
         GROUP BY q.machine_id
      ),
      alarms AS (
        SELECT a.machine_id, COUNT(*)::int AS alarm_count
          FROM machine_alarms a
-        WHERE a.company_id = $1
+        WHERE a.company_id = $1${plantSql('a.machine_id')}
           AND a.started_at >= $2::timestamptz AND a.started_at <= $3::timestamptz
         GROUP BY a.machine_id
      ),
@@ -141,7 +142,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
                 LEAST(COALESCE(d.ended_at, NOW()), $3::timestamptz)
               - GREATEST(d.started_at, $2::timestamptz)))), 0)::bigint AS downtime_seconds
          FROM downtime_events d
-        WHERE d.company_id = $1
+        WHERE d.company_id = $1${plantSql('d.machine_id')}
           AND d.started_at <= $3::timestamptz
           AND COALESCE(d.ended_at, NOW()) >= $2::timestamptz
         GROUP BY d.machine_id
@@ -154,7 +155,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
        SELECT DISTINCT ON (t.machine_id)
               t.machine_id, t.machine_status, t.alarm
          FROM telemetry_raw t
-        WHERE t.company_id = $1
+        WHERE t.company_id = $1${plantSql('t.machine_id')}
           AND t.received_at > NOW() - INTERVAL '1 hour'
         ORDER BY t.machine_id, t.received_at DESC
      )
@@ -176,7 +177,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
        LEFT JOIN alarms al   ON al.machine_id = m.id
        LEFT JOIN downtime dt ON dt.machine_id = m.id
        LEFT JOIN live lv     ON lv.machine_id = m.id
-      WHERE m.company_id = $1 AND m.is_active = TRUE
+      WHERE m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id')}
         ${mf ? `AND m.id = ${mf}` : ''}
       ORDER BY m.machine_serial_no`,
     params
@@ -342,7 +343,7 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
               COUNT(*)::int                AS hours
          FROM production_hourly ph
          JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
-        WHERE ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
+        WHERE TRUE${plantSql('ph.machine_id')} AND ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
           ${mf ? `AND ph.machine_id = ${mf}` : ''}
           ${sf ? `AND ph.shift_id = ${sf}` : ''}
         GROUP BY 1, 2
@@ -353,7 +354,7 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
               MAX(COALESCE(c.multiplication_factor, 1))::numeric AS mult
          FROM machine_current_job mcj
          JOIN components c ON c.id = mcj.component_id
-        WHERE mcj.is_active = TRUE
+        WHERE mcj.is_active = TRUE${plantSql('mcj.machine_id')}
         GROUP BY mcj.machine_id
      ),
      qual AS (
@@ -361,7 +362,7 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
               SUM(COALESCE(q.reject_qty,0) + COALESCE(q.rework_qty,0))::bigint AS rejected
          FROM quality_entries q
          JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
-        WHERE q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
+        WHERE TRUE${plantSql('q.machine_id')} AND q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
           ${sf ? `AND q.shift_id = ${sf}` : ''}
         GROUP BY 1, 2
      )

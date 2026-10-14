@@ -1,5 +1,6 @@
 const db = require('../db');
 const pwd = require('../utils/password');
+const { invalidateUsers } = require('../lib/auth-revision');
 
 exports.create = async (data, reqUser) => {
   /* A company's admin is made with the company, and that admin adds
@@ -147,13 +148,17 @@ exports.list = async (reqUser) => {
 
   const { rows } = await db.query(query, params);
 
-  // Fetch roles for each user
-  for (const user of rows) {
-    const roleRes = await db.query(
-      `SELECT r.id, r.role_name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = $1`,
-      [user.id]
+  // One role lookup for the whole result, independent of company user count.
+  if (rows.length) {
+    const { rows: roles } = await db.query(
+      `SELECT ur.user_id, r.id, r.role_name FROM user_roles ur
+         JOIN roles r ON r.id = ur.role_id
+        WHERE ur.user_id = ANY($1::int[]) ORDER BY r.role_name`,
+      [rows.map(user => user.id)]
     );
-    user.roles = roleRes.rows;
+    const byUser = new Map(rows.map(user => [Number(user.id), []]));
+    for (const { user_id, ...role } of roles) byUser.get(Number(user_id))?.push(role);
+    for (const user of rows) user.roles = byUser.get(Number(user.id));
   }
 
   return rows;
@@ -236,7 +241,7 @@ exports.update = async (userId, reqUser, data) => {
       throw { status: 400, message: 'No fields to update' };
     }
 
-    query += updates.join(', ');
+    query += updates.join(', ') + ', auth_revision = auth_revision + 1';
 
     if (reqUser.is_snt_super) {
       query += ` WHERE id = $${paramIndex++} AND ${isTheCompanyAdmin('users')}`;
@@ -262,6 +267,7 @@ exports.update = async (userId, reqUser, data) => {
     user.roles = roleRes.rows;
 
     await client.query('COMMIT');
+    await invalidateUsers([userId]);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -298,6 +304,7 @@ exports.remove = async (userId, reqUser) => {
     await client.query(`DELETE FROM users WHERE id = $1`, [userId]);
 
     await client.query('COMMIT');
+    await invalidateUsers([userId]);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

@@ -1,94 +1,79 @@
 const pool = require('../db');
-
-/* CREATE LINE */
-exports.createLine = async (req) => {
-  const { name, is_active } = req.body;
-  const company_id = req.user.company_id;
-
-  if (!name) throw new Error('Line name required');
-
-  const result = await pool.query(
-    `INSERT INTO line (plant_id, company_id, name, is_active)
-     VALUES (NULL, $1, $2, $3)
-     RETURNING *`,
-    [company_id, name, is_active !== false]
+const { idOrNull, resolvePlantId } = require('../lib/plant-scope');
+function name(value) {
+  const n = String(value || '').trim();
+  if (!n || n.length > 100) throw { status: 400, message: 'Line name must be 1 to 100 characters' };
+  return n;
+}
+function active(value) {
+  if (value === undefined) return true;
+  if (typeof value !== 'boolean') throw { status: 400, message: 'is_active must be true or false' };
+  return value;
+}
+async function currentLine(client, req) {
+  const { rows } = await client.query(
+    `SELECT id, plant_id FROM line WHERE id = $1 AND company_id = $2
+       AND ($3::int IS NULL OR plant_id = $3) FOR UPDATE`,
+    [idOrNull(req.params.id, 'Line'), req.user.company_id, req.user.plant_id ?? null]
   );
-
-  return result.rows[0];
+  if (!rows.length) throw { status: 404, message: 'Line not found' };
+  return rows[0];
+}
+exports.createLine = async req => {
+  const lineName = name(req.body.name), enabled = active(req.body.is_active);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const plant = await resolvePlantId(client, req.user, req.body.plant_id);
+    const { rows } = await client.query(
+      'INSERT INTO line (plant_id, company_id, name, is_active) VALUES ($1,$2,$3,$4) RETURNING *',
+      [plant, req.user.company_id, lineName, enabled]
+    );
+    await client.query('COMMIT'); return rows[0];
+  } catch (err) { await client.query('ROLLBACK').catch(() => {}); throw err; }
+  finally { client.release(); }
 };
-
-/* LIST LINES */
-exports.getLines = async (req) => {
-  const company_id = req.user.company_id;
-
-  const result = await pool.query(
-    `SELECT id, name, is_active
-     FROM line
-     WHERE company_id = $1
-     ORDER BY name`,
-    [company_id]
+exports.getLines = async req => {
+  const plant = req.user.plant_id || idOrNull(req.query?.plant_id, 'Plant');
+  const { rows } = await pool.query(
+    `SELECT id, name, is_active, plant_id FROM line WHERE company_id = $1
+       AND ($2::int IS NULL OR plant_id = $2) ORDER BY name`, [req.user.company_id, plant ?? null]
   );
-
-  return result.rows;
+  return rows;
 };
-
-/* UPDATE LINE */
-exports.updateLine = async (req) => {
-  const { id } = req.params;
-  const { name, is_active } = req.body;
-  const company_id = req.user.company_id;
-
-  const updates = [];
-  const values = [];
-  let paramCount = 1;
-
-  if (name !== undefined) {
-    updates.push(`name = $${paramCount++}`);
-    values.push(name);
-  }
-
-  if (is_active !== undefined) {
-    updates.push(`is_active = $${paramCount++}`);
-    values.push(is_active);
-  }
-
-  if (updates.length === 0) {
-    throw new Error('No fields to update');
-  }
-
-  values.push(id);
-  values.push(company_id);
-
-  const result = await pool.query(
-    `UPDATE line
-     SET ${updates.join(', ')}
-     WHERE id = $${paramCount++} AND company_id = $${paramCount++}
-     RETURNING *`,
-    values
-  );
-
-  if (result.rowCount === 0) {
-    throw new Error('Line not found');
-  }
-
-  return result.rows[0];
+exports.updateLine = async req => {
+  const patch = {};
+  if (req.body.name !== undefined) patch.name = name(req.body.name);
+  if (req.body.is_active !== undefined) patch.is_active = active(req.body.is_active);
+  if (!Object.keys(patch).length && req.body.plant_id === undefined) throw { status: 400, message: 'No fields to update' };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await currentLine(client, req);
+    const plant = await resolvePlantId(client, req.user, req.body.plant_id !== undefined ? req.body.plant_id : current.plant_id);
+    if (plant !== Number(current.plant_id)) {
+      const { rows } = await client.query('SELECT id FROM machines WHERE line_id = $1 AND company_id = $2 AND plant_id IS DISTINCT FROM $3 LIMIT 1', [current.id, req.user.company_id, plant]);
+      if (rows.length) throw { status: 409, message: 'Reassign the machines on this line before changing its plant' };
+    }
+    patch.plant_id = plant;
+    const values = Object.values(patch); values.push(current.id, req.user.company_id);
+    const { rows } = await client.query(
+      `UPDATE line SET ${Object.keys(patch).map((key, i) => `${key} = $${i + 1}`).join(', ')}
+        WHERE id = $${values.length - 1} AND company_id = $${values.length} RETURNING *`, values
+    );
+    await client.query('COMMIT'); return rows[0];
+  } catch (err) { await client.query('ROLLBACK').catch(() => {}); throw err; }
+  finally { client.release(); }
 };
-
-/* DELETE LINE (SAFE DELETE) */
-exports.deleteLine = async (req) => {
-  const { id } = req.params;
-
-  // check if machines exist
-  const check = await pool.query(
-    `SELECT COUNT(*)::int AS count
-     FROM machines
-     WHERE line_id = $1`,
-    [id]
-  );
-
-  if (check.rows[0].count > 0) {
-    throw new Error('Cannot delete line. Machines are assigned.');
-  }
-
-  await pool.query(`DELETE FROM line WHERE id = $1 AND company_id = $2`, [id, req.user.company_id]);
+exports.deleteLine = async req => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await currentLine(client, req);
+    const { rows } = await client.query('SELECT id FROM machines WHERE line_id = $1 AND company_id = $2 LIMIT 1', [current.id, req.user.company_id]);
+    if (rows.length) throw { status: 409, message: 'Cannot delete line. Machines are assigned.' };
+    await client.query('DELETE FROM line WHERE id = $1 AND company_id = $2', [current.id, req.user.company_id]);
+    await client.query('COMMIT');
+  } catch (err) { await client.query('ROLLBACK').catch(() => {}); throw err; }
+  finally { client.release(); }
 };

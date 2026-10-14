@@ -130,12 +130,12 @@ describe('direct program download and backup', () => {
     expect(res.headers['content-length']).not.toBe('1234');
   });
 
-  test('backup is saved separately even if the request includes job or type fields', async () => {
+  test('an independent backup remains separate and cannot override type or machine identity', async () => {
     const current = { id: '81', program_name: 'O8001.nc', size_bytes: 42, sha256: 'a'.repeat(64) };
     authRow();
     mockDb.queueResponse(one({ id: '90', program_name: 'O8001.nc', kind: 'BACKUP', folder: 'f', stored_name: 'backup.nc', size_bytes: 3, sha256: 'x', created_at: 'now' }));
     const res = await request(app).post('/api/device/v1/backup').set(AUTH)
-      .field('type', 'NEW').field('job_id', '11').field('machine_id', '999').attach('file', Buffer.from('M30'), 'O8001.nc');
+      .field('type', 'NEW').field('machine_id', '999').attach('file', Buffer.from('M30'), 'O8001.nc');
     expect(res.status).toBe(201);
     expect(res.body.file).toMatchObject({ id: 90, kind: 'BACKUP', program_name: 'O8001.nc' });
     const write = mockDb.calls().find(call => /INSERT INTO program_files/.test(call.text));

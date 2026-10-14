@@ -1,4 +1,5 @@
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 const { generateOEEPdf, generateMaintenancePdf } = require('./pdf.util');
 
 exports.exportOEEPdf = async (req, res) => {
@@ -6,7 +7,7 @@ exports.exportOEEPdf = async (req, res) => {
     const { from_date, to_date, machine_id, shift_id, line_id } = req.query;
     const company_id = req.user.company_id;
 
-    const conditions = [`m.company_id = $1`];
+    const conditions = [`m.company_id = $1${plantSql('m.id')}`];
     const params = [company_id];
     let i = 2;
     if (machine_id) { conditions.push(`os.machine_id = $${i++}`); params.push(machine_id); }
@@ -52,7 +53,7 @@ exports.exportMaintenancePdf = async (req, res) => {
     const { from_date, to_date, machine_id } = req.query;
     const company_id = req.user.company_id;
 
-    const conditions = [`ml.company_id = $1`];
+    const conditions = [`ml.company_id = $1${plantSql('ml.machine_id')}`];
     const params = [company_id];
     let i = 2;
     if (machine_id) { conditions.push(`ml.machine_id = $${i++}`); params.push(machine_id); }

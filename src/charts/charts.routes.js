@@ -1,5 +1,7 @@
+const { effectivePlantId } = require('../lib/plant-scope');
 const express    = require('express');
 const router     = express.Router();
+const access = require('../middleware/access.middleware');
 const auth = require('../middleware/auth.middleware');
 const svc        = require('./charts.service');
 const heavy      = require('../middleware/heavy.middleware');
@@ -7,7 +9,7 @@ const heavy      = require('../middleware/heavy.middleware');
 /* GET /api/charts/meta */
 router.get('/meta', auth, async (req, res, next) => {
   try {
-    const data = await svc.getMeta(req.user.plant_id, req.user.company_id);
+    const data = await svc.getMeta(effectivePlantId(req.user), req.user.company_id);
     res.json({ success: true, data });
   } catch (err) {
     next(err);
@@ -15,13 +17,13 @@ router.get('/meta', auth, async (req, res, next) => {
 });
 
 /* GET /api/charts/data?machine_id=&shift_id=&date= */
-router.get('/data', auth, async (req, res, next) => {
+router.get('/data', auth, access.any('page:charts:view', 'page:dashboard:live:view'), async (req, res, next) => {
   try {
     const { machine_id, shift_id, date } = req.query;
     const today = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })).toISOString().split('T')[0];
 
     const data = await svc.getChartData({
-      plantId:   req.user.plant_id,
+      plantId:   effectivePlantId(req.user),
       companyId: req.user.company_id,
       machineId: machine_id || null,
       shiftId:   shift_id   || null,
@@ -35,7 +37,7 @@ router.get('/data', auth, async (req, res, next) => {
 });
 
 /* GET /api/charts/parts?machine_id=&shift_start_epoch= */
-router.get('/parts', auth, heavy, async (req, res, next) => {
+router.get('/parts', auth, access.any('page:charts:view', 'page:dashboard:live:view'), heavy, async (req, res, next) => {
   try {
     const { machine_id, shift_start_epoch, shift_end_epoch, max_parts } = req.query;
     if (!machine_id) return res.status(400).json({ success: false, message: 'machine_id required' });

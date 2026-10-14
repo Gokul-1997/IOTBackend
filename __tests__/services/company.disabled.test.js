@@ -71,23 +71,26 @@ describe('an open session stops on its next request', () => {
     expect(mockDb.calls()[0].text).toMatch(/LEFT JOIN companies c ON c\.id = u\.company_id/);
   });
 
-  test('the company\'s status is cached with the user, so the next request is refused from the cache', async () => {
+  test('disabled company status never creates an authoritative user cache', async () => {
     mockDb.queueResponse({ rows: [{ id: 17, company_id: 5, is_active: true, company_active: false }] });
     await middleware(bearer(), makeRes(), jest.fn());
-    expect(JSON.parse(mockRedis.setex.mock.calls[0][2])).toMatchObject({ company_active: false });
+    expect(mockRedis.setex).not.toHaveBeenCalled();
   });
 
-  test('from the cache', async () => {
+  test('an old active cache cannot override a disabled company', async () => {
     mockRedis.get.mockResolvedValue(JSON.stringify({ id: 17, company_id: 5, is_active: true, company_active: false }));
+    mockDb.queueResponse({ rows: [{ id: 17, company_id: 5, is_active: true, company_active: false }] });
     const res = makeRes(); const next = jest.fn();
     await middleware(bearer(), res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res._body.code).toBe('COMPANY_DISABLED');
-    expect(mockDb.calls()).toHaveLength(0);
+    expect(mockDb.calls()).toHaveLength(1);
+    expect(mockRedis.get).not.toHaveBeenCalled();
   });
 
-  test('an entry cached before the field existed still passes — it expires within a minute', async () => {
+  test('an old cache cannot prevent reading current active status', async () => {
     mockRedis.get.mockResolvedValue(JSON.stringify({ id: 17, company_id: 5, is_active: true }));
+    mockDb.queueResponse({ rows: [{ id: 17, company_id: 5, is_active: true, company_active: true }] });
     const next = jest.fn();
     await middleware(bearer(), makeRes(), next);
     expect(next).toHaveBeenCalled();

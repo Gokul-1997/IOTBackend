@@ -4,6 +4,7 @@ const router = express.Router();
 const auth = require('../middleware/auth.middleware');
 const controller = require('./master.controller');
 
+router.get("/plants", auth, controller.getPlantList);
 router.get("/machines", auth, controller.getMachineList);
 router.get("/shifts", auth, controller.getShiftList);
 router.get('/machines-by-line', auth, controller.getMachinesByLine);

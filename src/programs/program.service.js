@@ -12,12 +12,24 @@ const jobs = require('./jobs');
 const deviceToken = require('./device-token');
 const audit = require('../audit/audit.service');
 const currentProgram = require('./current-program');
+const { requireConfig } = require('./commands');
+const { plantSql } = require('../lib/read-scope');
+const { effectivePlantId } = require('../lib/plant-scope');
+const { denialFor } = require('../middleware/access.middleware');
 
 const MAX_JOBS_PER_REQUEST = 50;
 
 const fail = (message, code, status = 400, extra = {}) => Object.assign(new Error(message), { code, status, ...extra });
 
 const allowed = (req, key) => !!req.user?.is_snt_super || (req.user?.permissions || []).includes(key);
+
+async function requireAction(req, key, message) {
+  if (!allowed(req, key)) throw fail(message, 'FORBIDDEN', 403);
+  const denial = await denialFor(req.user, key);
+  if (denial) throw fail(denial === 'COMPANY'
+    ? 'Your plan does not include this program action. Contact S&T to add it.'
+    : message, denial === 'COMPANY' ? 'NOT_IN_PLAN' : 'FORBIDDEN', 403);
+}
 
 function pageOf(query, defLimit = 20) {
   const limit = Math.min(200, Math.max(1, parseInt(query.limit, 10) || defLimit));
@@ -26,12 +38,12 @@ function pageOf(query, defLimit = 20) {
 }
 
 /** A machine of the caller's company that is switched on, or a 404. */
-async function getMachine(machineId, companyId) {
+async function getMachine(machineId, companyId, plantId) {
   const id = Number(machineId);
   if (!Number.isInteger(id) || id <= 0) throw fail('Choose a machine.', 'NO_MACHINE');
   const { rows } = await pool.query(
     `SELECT id, company_id, machine_serial_no, ip_address, controller_ip, program_path
-       FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true`,
+       FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true${plantSql('id', plantId, companyId)}`,
     [id, companyId]
   );
   if (!rows.length) throw fail('Machine not found.', 'MACHINE_NOT_FOUND', 404);
@@ -49,14 +61,14 @@ function requirePath(machine) {
   }
 }
 
-async function getFile(fileId, companyId) {
+async function getFile(fileId, companyId, plantId) {
   const id = Number(fileId);
   if (!Number.isInteger(id) || id <= 0) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
   const { rows } = await pool.query(
     `SELECT f.id, f.company_id, f.machine_id, f.folder, f.stored_name, f.program_name, f.kind, f.size_bytes, f.sha256,
             m.machine_serial_no
        FROM program_files f LEFT JOIN machines m ON m.id = f.machine_id
-      WHERE f.id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL`,
+      WHERE f.id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL${plantSql('f.machine_id', plantId, companyId)}`,
     [id, companyId]
   );
   if (!rows.length) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
@@ -131,7 +143,7 @@ exports.listMachines = async (req) => {
        FROM machines m
        LEFT JOIN program_devices d ON d.machine_id = m.id AND d.revoked_at IS NULL
        LEFT JOIN program_controller_files c ON c.machine_id = m.id
-      WHERE m.company_id = $1 AND m.is_active = true
+      WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', effectivePlantId(req.user), req.user.company_id)}
       ORDER BY m.machine_serial_no`,
     [req.user.company_id, jobs.ONLINE_WINDOW_SEC]
   );
@@ -143,7 +155,7 @@ exports.listMachines = async (req) => {
 };
 
 exports.controllerFiles = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
   const { rows } = await pool.query(
     `SELECT files, reported_at FROM program_controller_files WHERE machine_id = $1`, [machine.id]
   );
@@ -156,7 +168,7 @@ exports.listFiles = async (req) => {
   const { machine_id, kind, search } = req.query;
   const { limit, page, offset } = pageOf(req.query, 50);
   const values = [req.user.company_id];
-  let where = `f.company_id = $1 AND f.deleted_at IS NULL`;
+  let where = `f.company_id = $1 AND f.deleted_at IS NULL${plantSql('f.machine_id', effectivePlantId(req.user), req.user.company_id)}`;
   if (machine_id) { values.push(Number(machine_id)); where += ` AND f.machine_id = $${values.length}`; }
   if (kind) { values.push(String(kind).toUpperCase()); where += ` AND f.kind = $${values.length}`; }
   if (search) {
@@ -188,7 +200,8 @@ exports.publishCurrentProgram = async (req) => {
     throw fail('Uploading a program for the machine is not part of your role.', 'FORBIDDEN', 403);
   }
   if (!req.file) throw fail('Choose a program file.', 'NO_FILE');
-  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
+  requireConfig(machine);
   const body = req.body || {};
   const saved = await storage.save({
     machine, kind: 'NEW', programName: body.program_name || req.file.originalname, buffer: req.file.buffer
@@ -225,7 +238,7 @@ exports.publishCurrentProgram = async (req) => {
 };
 
 exports.getCurrentProgram = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
   return { file: await currentProgram.get(machine.company_id, machine.id) };
 };
 
@@ -240,11 +253,10 @@ exports.uploadFile = async (req) => {
   const body = req.body || {};
   const send = String(body.send) === 'true';
   const overwrite = String(body.overwrite) === 'true';
-  if (send && !allowed(req, 'page:programs:transfer')) {
-    throw fail('Sending a program to a machine is not part of your role.', 'FORBIDDEN', 403);
-  }
+  if (send) await requireAction(req, 'page:programs:transfer', 'Sending a program to a machine is not part of your role.');
 
-  const machine = await getMachine(body.machine_id, req.user.company_id);
+  const machine = await getMachine(body.machine_id, req.user.company_id, effectivePlantId(req.user));
+  requireConfig(machine);
   const programName = storage.safeProgramName(body.program_name || req.file.originalname);
   storage.checkContent(req.file.buffer);
 
@@ -270,11 +282,11 @@ exports.uploadFile = async (req) => {
   return { file, job };
 };
 
-exports.getFileForDownload = async (req) => getFile(req.params.id, req.user.company_id);
+exports.getFileForDownload = async (req) => getFile(req.params.id, req.user.company_id, effectivePlantId(req.user));
 
 /** Delete a file from the folder. Its row stays (deleted_at), so the history still names it. */
 exports.deleteFile = async (req) => {
-  const file = await getFile(req.params.id, req.user.company_id);
+  const file = await getFile(req.params.id, req.user.company_id, effectivePlantId(req.user));
   const current = await pool.query(
     `SELECT file_id FROM program_current WHERE company_id = $1 AND machine_id = $2 AND file_id = $3`,
     [req.user.company_id, file.machine_id, file.id]
@@ -307,8 +319,8 @@ exports.createJobs = async (req) => {
   const companyId = req.user.company_id;
 
   if (action === 'FETCH') {
-    if (!allowed(req, 'page:programs:fetch')) throw fail('Fetching from a machine is not part of your role.', 'FORBIDDEN', 403);
-    const machine = await getMachine(body.machine_id, companyId);
+    await requireAction(req, 'page:programs:fetch', 'Fetching from a machine is not part of your role.');
+    const machine = await getMachine(body.machine_id, companyId, effectivePlantId(req.user));
     requirePath(machine);
     const names = [...new Set((body.program_names || []).map(n => storage.safeProgramName(n)))];
     if (!names.length) throw fail('Choose a program on the machine.', 'NO_PROGRAM');
@@ -327,7 +339,7 @@ exports.createJobs = async (req) => {
   }
 
   if (action !== 'SEND') throw fail('action must be SEND or FETCH.', 'BAD_ACTION');
-  if (!allowed(req, 'page:programs:transfer')) throw fail('Sending a program to a machine is not part of your role.', 'FORBIDDEN', 403);
+  await requireAction(req, 'page:programs:transfer', 'Sending a program to a machine is not part of your role.');
 
   const fileIds = [...new Set((body.file_ids || []).map(Number))];
   const machineIds = [...new Set((body.machine_ids || []).map(Number))];
@@ -339,9 +351,9 @@ exports.createJobs = async (req) => {
   const overwrite = body.overwrite === true || String(body.overwrite) === 'true';
 
   const files = [];
-  for (const id of fileIds) files.push(await getFile(id, companyId));
+  for (const id of fileIds) files.push(await getFile(id, companyId, effectivePlantId(req.user)));
   const machines = [];
-  for (const id of machineIds) machines.push(await getMachine(id, companyId));
+  for (const id of machineIds) machines.push(await getMachine(id, companyId, effectivePlantId(req.user)));
   machines.forEach(requirePath);
 
   const exists = [];
@@ -383,7 +395,7 @@ exports.listJobs = async (req) => {
   const { machine_id, status, action } = req.query;
   const { limit, page, offset } = pageOf(req.query, 20);
   const values = [req.user.company_id];
-  let where = `j.company_id = $1`;
+  let where = `j.company_id = $1${plantSql('j.machine_id', effectivePlantId(req.user), req.user.company_id)}`;
   if (machine_id) { values.push(Number(machine_id)); where += ` AND j.machine_id = $${values.length}`; }
   if (action) { values.push(String(action).toUpperCase()); where += ` AND j.action = $${values.length}`; }
   if (status === 'open') { values.push(jobs.OPEN); where += ` AND j.status = ANY($${values.length})`; }
@@ -404,10 +416,14 @@ exports.listJobs = async (req) => {
 
 /** Withdraw a job the device has not taken yet. */
 exports.cancelJob = async (req) => {
-  const job = await jobs.getJob(Number(req.params.id) || 0);
+  const { rows: [job] } = await pool.query(
+    `SELECT ${jobs.JOB_COLUMNS}, j.company_id FROM program_jobs j ${jobs.JOB_JOINS}
+      WHERE j.id = $1 AND j.company_id = $2${plantSql('j.machine_id', effectivePlantId(req.user), req.user.company_id)}`,
+    [Number(req.params.id) || 0, req.user.company_id]
+  );
   if (!job || job.company_id !== req.user.company_id) throw fail('Job not found.', 'JOB_NOT_FOUND', 404);
   const need = job.action === 'SEND' ? 'page:programs:transfer' : 'page:programs:fetch';
-  if (!allowed(req, need)) throw fail('Cancelling this job is not part of your role.', 'FORBIDDEN', 403);
+  await requireAction(req, need, 'Cancelling this job is not part of your role.');
   if (job.status !== 'QUEUED') {
     throw fail(job.status === 'DELIVERED'
       ? 'The machine\'s device has already taken this job; it can no longer be cancelled.'
@@ -415,8 +431,8 @@ exports.cancelJob = async (req) => {
   }
   const { rowCount } = await pool.query(
     `UPDATE program_jobs SET status = 'CANCELLED', finished_at = NOW(), message = $2
-      WHERE id = $1 AND status = 'QUEUED'`,
-    [job.id, `Cancelled by ${req.user.username || 'a user'}.`]
+      WHERE id = $1 AND company_id = $3 AND status = 'QUEUED'${plantSql('machine_id', effectivePlantId(req.user), req.user.company_id)}`,
+    [job.id, `Cancelled by ${req.user.username || 'a user'}.`, req.user.company_id]
   );
   if (!rowCount) throw fail('The machine\'s device took this job a moment ago; it can no longer be cancelled.', 'JOB_NOT_OPEN', 409);
   const done = await jobs.getJob(job.id);
@@ -432,7 +448,7 @@ exports.cancelJob = async (req) => {
  * stored, and cannot be shown again.
  */
 exports.createDeviceToken = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
   const label = req.body?.label ? String(req.body.label).trim().slice(0, 100) : null;
   const { token, hash, prefix } = deviceToken.generate();
 
@@ -467,7 +483,7 @@ exports.createDeviceToken = async (req) => {
 
 /** Stop the machine's device at once (a lost or replaced device). */
 exports.revokeDeviceToken = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id);
+  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
   const { rows } = await pool.query(
     `UPDATE program_devices SET revoked_at = NOW(), revoked_by = $2
       WHERE machine_id = $1 AND revoked_at IS NULL RETURNING id, token_prefix`,

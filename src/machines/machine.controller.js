@@ -1,15 +1,15 @@
 const service = require('./machine.service');
 
-exports.createMachine = async (req, res) => {
+exports.createMachine = async (req, res, next) => {
   try {
     const data = await service.createMachine(req);
     res.json({ status: 'success', data });
   } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
+    next(e);
   }
 };
 
-exports.getMachines = async (req, res) => {
+exports.getMachines = async (req, res, next) => {
   try {
     const result = await service.getMachines(req);
     res.json({
@@ -18,42 +18,42 @@ exports.getMachines = async (req, res) => {
       total: result.total
     });
   } catch (e) {
-    res.status(500).json({ status: 'error', message: e.message });
+    next(e);
   }
 };
 
-exports.toggleMachineStatus = async (req, res) => {
+exports.toggleMachineStatus = async (req, res, next) => {
   try {
     await service.toggleMachineStatus(req);
     res.json({ status: 'success', message: 'Status updated' });
   } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
+    next(e);
   }
 };
 
-exports.regenerateApiKey = async (req, res) => {
+exports.regenerateApiKey = async (req, res, next) => {
   try {
     const apiKey = await service.regenerateApiKey(req);
     res.json({ status: 'success', api_key: apiKey });
   } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
+    next(e);
   }
 };
 
-exports.deleteMachine = async (req, res) => {
+exports.deleteMachine = async (req, res, next) => {
   try {
     await service.deleteMachine(req);
     res.json({ status: 'success', message: 'Machine deleted successfully' });
   } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
+    next(e);
   }
 };
 
-exports.updateMachine = async (req, res) => {
+exports.updateMachine = async (req, res, next) => {
   try {
     const data = await service.updateMachine(req);
     res.json({ status: 'success', data });
   } catch (e) {
-    res.status(400).json({ status: 'error', message: e.message });
+    next(e);
   }
 };

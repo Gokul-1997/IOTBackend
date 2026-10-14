@@ -103,12 +103,12 @@ const ACTIVE_USER = {
   is_active: true, failed_login_attempts: 0, lock_until: null, company_name: 'Acme'
 };
 
-function queueSuccessfulLogin() {
+function queueSuccessfulLogin(user = ACTIVE_USER) {
   bcrypt.compare.mockResolvedValueOnce(true);
 
   mockDb.queueResponse(
     // user lookup
-    { rows: [ACTIVE_USER], rowCount: 1 },
+    { rows: [user], rowCount: 1 },
     // roles
     { rows: [{ role_name: 'ADMIN' }], rowCount: 1 },
     // permissions
@@ -237,6 +237,22 @@ describe('POST /api/auth/login', () => {
     expect(user).toHaveProperty('permissions');
     expect(user).toHaveProperty('company_permissions');
   });
+
+  test('login signs the precise account revision snapshot before loading grants', async () => {
+    queueSuccessfulLogin({ ...ACTIVE_USER, auth_revision: '9007199254740993' });
+    const app = makeApp(); const jwtForApp = require('jsonwebtoken');
+    const res = await request(app).post('/api/auth/login').send({ email: 'test@x.com', password: 'correct' });
+    expect(res.status).toBe(200);
+    expect(jwtForApp.sign).toHaveBeenCalledWith(expect.objectContaining({ auth_revision: '9007199254740993' }), 'test-secret', { expiresIn: '15m' });
+    expect(mockDb.calls()[0].text).toMatch(/u\.auth_revision/);
+  });
+
+  test('login DB failure is retryable503 and hides internal SQL errors', async () => {
+    mockDb.queueError(new Error('private database relation users does not exist'));
+    const res = await request(makeApp()).post('/api/auth/login').send({ email: 'test@x.com', password: 'correct' });
+    expect(res.status).toBe(503); expect(res.body.code).toBe('AUTH_UNAVAILABLE');
+    expect(res.body.message).not.toMatch(/relation|users does not exist/);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,6 +332,27 @@ describe('POST /api/auth/refresh', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.accessToken).toBe('signed-access-token');
+  });
+
+  test('refresh signs the revision read before grants and returns current authorization scope', async () => {
+    mockDb.queueResponse({ rows: [{ user_id: 1, plant_id: 12, auth_revision: '9007199254740993',
+      expires_at: new Date(Date.now() + 86400000), revoked: false, is_active: true }], rowCount: 1 },
+    { rows: [{ role_name: 'QUALITY' }] }, { rows: [{ permission_key: 'page:quality:view' }] },
+    { rows: [{ company_id: 4, user_type: 'company_user' }] }, { rows: [{ permission_key: 'page:quality:view' }] });
+    const app = makeApp(); const jwtForApp = require('jsonwebtoken');
+    const res = await request(app).post('/api/auth/refresh').send({ refreshToken: 'valid-token' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ auth_revision: '9007199254740993', company_id: 4, plant_id: 12,
+      user_type: 'company_user', is_snt_super: false, roles: ['QUALITY'], permissions: ['page:quality:view'], company_permissions: ['page:quality:view'] });
+    expect(jwtForApp.sign).toHaveBeenCalledWith(expect.objectContaining({ auth_revision: '9007199254740993' }), 'test-secret', { expiresIn: '15m' });
+    expect(mockDb.calls()[0].text).toMatch(/u\.auth_revision/);
+  });
+
+  test('refresh DB failure is retryable503 without invalidating the session or leaking SQL', async () => {
+    mockDb.queueError(new Error('private database query failed'));
+    const res = await request(makeApp()).post('/api/auth/refresh').send({ refreshToken: 'valid-token' });
+    expect(res.status).toBe(503); expect(res.body.code).toBe('AUTH_UNAVAILABLE');
+    expect(res.body.message).not.toMatch(/database query failed/);
   });
 });
 
@@ -428,7 +465,8 @@ describe('POST /api/auth/reset-password', () => {
   });
 
   test('TC-AR-53 200 on valid token + password reset', async () => {
-    // resetPassword queries: find token, update password, delete token
+    // Atomic transaction: BEGIN, claim token, update password, revoke sessions, COMMIT
+    mockDb.queueResponse({ rows: [] });
     mockDb.queueResponse({
       rows: [{ user_id: 1, expires_at: new Date(Date.now() + 60000).toISOString() }],
       rowCount: 1

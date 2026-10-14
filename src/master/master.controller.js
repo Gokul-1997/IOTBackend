@@ -1,49 +1,44 @@
+const { effectivePlantId } = require('../lib/plant-scope');
 const {
   getMachineListService,
   getShiftListService,
   getMachinesByLineService
 } = require("./master.service");
 
-const getMachineList = async (req, res) => {
+const getMachineList = async (req, res, next) => {
   try {
-    const machines = await getMachineListService(req.user.plant_id, req.user.company_id);
+    const machines = await getMachineListService(effectivePlantId(req.user), req.user.company_id);
 
     res.json({
       success: true,
       data: machines
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Error fetching machines"
-    });
+    next(error);
   }
 };
 
-const getShiftList = async (req, res) => {
+const getShiftList = async (req, res, next) => {
   try {
-    const shifts = await getShiftListService(req.user.plant_id, req.user.company_id);
+    const shifts = await getShiftListService(effectivePlantId(req.user), req.user.company_id);
 
     res.json({
       success: true,
       data: shifts
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Error fetching shifts"
-    });
+    next(error);
   }
 };
 
-const getMachinesByLine = async (req, res) => {
+const getMachinesByLine = async (req, res, next) => {
   try {
 
     const { line_id } = req.query;
 
     const machines = await getMachinesByLineService(
       line_id,
-      req.user.plant_id,
+      effectivePlantId(req.user),
       req.user.company_id
     );
 
@@ -53,10 +48,7 @@ const getMachinesByLine = async (req, res) => {
     });
 
   } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: error.message
-    });
+    next(error);
   }
 };
 
@@ -64,4 +56,9 @@ module.exports = {
   getMachineList,
   getShiftList,
   getMachinesByLine
+};
+
+module.exports.getPlantList = async (req, res, next) => {
+  try { res.json({ success: true, data: await require('./master.service').getPlantListService(effectivePlantId(req.user), req.user.company_id) }); }
+  catch (err) { next(err); }
 };

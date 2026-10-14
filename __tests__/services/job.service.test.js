@@ -27,7 +27,7 @@ beforeEach(() => resetDb());
 
 describe('job.service.getJobHistory', () => {
 
-  test('without page/limit returns every row, and data stays an array', async () => {
+  test('without page/limit defaults to a bounded page, and data stays an array', async () => {
     queue([{ job_id: 1 }, { job_id: 2 }], 2);
 
     const res = await svc.getJobHistory(company_id);
@@ -38,10 +38,9 @@ describe('job.service.getJobHistory', () => {
     expect(res.total).toBe(2);
     expect(res.totalPages).toBe(1);
 
-    // no LIMIT/OFFSET appended, and only the company is bound
     const dataCall = mockDb.calls()[0];
-    expect(dataCall.text).not.toMatch(/LIMIT/);
-    expect(dataCall.params).toEqual([company_id]);
+    expect(dataCall.text).toMatch(/LIMIT \$2 OFFSET \$3/);
+    expect(dataCall.params).toEqual([company_id, 20, 0]);
   });
 
   test('the old hard-coded LIMIT 200 is gone', async () => {

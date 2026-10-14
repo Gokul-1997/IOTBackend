@@ -1,7 +1,8 @@
 const db = require('../db');
+const { pagination } = require('../lib/pagination');
 
 exports.getPlants = async (companyId, { search = '', page = 1, limit = 10 }) => {
-  const offset = (page - 1) * limit;
+  const { limitNum, offset } = pagination(page, limit);
 
   const data = await db.query(
     `SELECT * FROM plants
@@ -9,7 +10,7 @@ exports.getPlants = async (companyId, { search = '', page = 1, limit = 10 }) => 
        AND (plant_name ILIKE $2 OR plant_code ILIKE $2)
      ORDER BY id DESC
      LIMIT $3 OFFSET $4`,
-    [companyId, `%${search}%`, limit, offset]
+    [companyId, `%${search}%`, limitNum, offset]
   );
 
   const total = await db.query(

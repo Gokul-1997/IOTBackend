@@ -18,6 +18,7 @@ function appWithUser(user = fakeUser()) {
   jest.doMock('../../src/middleware/auth.middleware', () =>
     (req, _res, next) => { req.user = user; next(); });
   jest.doMock('../../src/db', () => mockDb);
+  jest.doMock('../../src/redis', () => ({ get: jest.fn(async () => '[]'), set: jest.fn() }));
   const router = require('../../src/component/component.routes');
   return buildApp({ mountPath: '/api/components', router });
 }
@@ -56,7 +57,10 @@ describe('POST /api/components', () => {
 
   test('happy path inserts and cascades', async () => {
     mockDb.queueResponse(
+      { rows: [], rowCount: 0 },
+      { rows: [{ id: 1, plant_id: 8 }], rowCount: 1 },
       { rows: [{ id: 9, target: 50, part_name: 'X' }], rowCount: 1 },
+      { rows: [], rowCount: 0 },
       { rows: [], rowCount: 0 }
     );
 
@@ -70,7 +74,7 @@ describe('POST /api/components', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.id).toBe(9);
-    expect(mockDb.calls()).toHaveLength(2);
+    expect(mockDb.calls().at(-1).text).toBe('COMMIT');
   });
 });
 
@@ -79,6 +83,6 @@ describe('DELETE /api/components/:id', () => {
     mockDb.queueResponse({ rows: [], rowCount: 1 });
     const res = await request(appWithUser()).delete('/api/components/9');
     expect(res.status).toBe(200);
-    expect(mockDb.calls()[0].params).toEqual(['9', 4]);   // route param is a string
+    expect(mockDb.calls()[0].params).toEqual(['9', 4, 1]);   // route param is a string
   });
 });

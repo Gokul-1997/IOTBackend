@@ -37,6 +37,7 @@
  */
 
 const pool = require('../db');
+const { plantSql, entityPlantSql } = require('../lib/read-scope');
 const { parsePart } = require('./parts');
 const oeeSvc = require('./oee.dashboard.service');
 const cache = require('./cache');
@@ -96,7 +97,7 @@ async function assignments({ companyId, start, end, machineId, operatorId, searc
        FROM operators op
        JOIN operator_machine_assignments a
          ON a.operator_id = op.id
-        AND a.company_id = $1
+        AND a.company_id = $1${plantSql('a.machine_id')}
         AND a.is_active = TRUE
         AND a.assigned_from <= $3::timestamptz
         AND (a.assigned_to IS NULL OR a.assigned_to >= $2::timestamptz)
@@ -112,8 +113,8 @@ async function assignments({ companyId, start, end, machineId, operatorId, searc
 /** Every active operator, for the Operator filter — whatever else is set. */
 async function operatorOptions(companyId) {
   const { rows } = await pool.query(
-    `SELECT id, operator_code, operator_name FROM operators
-      WHERE company_id = $1 AND is_active = TRUE ORDER BY operator_name`,
+    `SELECT op.id, op.operator_code, op.operator_name FROM operators op
+      WHERE company_id = $1 AND is_active = TRUE${entityPlantSql('op')} ORDER BY operator_name`,
     [companyId]
   );
   return rows.map(r => ({ id: r.id, operator_code: r.operator_code, operator_name: (r.operator_name || '').trim() }));

@@ -14,6 +14,8 @@
  */
 
 const pool = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
+const { idOrNull } = require('../lib/plant-scope');
 const { parsePart, when } = require('./parts');
 
 /* Statuses that mean the work has not been done yet. */
@@ -49,7 +51,7 @@ async function kpis(companyId, machineId) {
               COALESCE(s.grace_days, 0) AS grace_days
          FROM maintenance_tickets t
          JOIN maintenance_schedules s ON s.id = t.schedule_id
-        WHERE t.company_id = $1
+        WHERE t.company_id = $1${plantSql('t.machine_id')}
           AND t.schedule_id IS NOT NULL
           AND ($2::int IS NULL OR t.machine_id = $2)
      ),
@@ -78,7 +80,7 @@ async function kpis(companyId, machineId) {
        -- the company's schedules, whichever machine is chosen: none at all is
        -- a setup gap the page says in words, without loading the plan to know
        (SELECT COUNT(*) FROM maintenance_schedules s
-         WHERE s.company_id = $1 AND s.frequency IS NOT NULL)               AS plans
+         WHERE s.company_id = $1${plantSql('s.machine_id')} AND s.frequency IS NOT NULL)               AS plans
      FROM judged`,
     [companyId, machineId, LIVE_STATUSES, DONE_STATUSES]
   );
@@ -120,7 +122,7 @@ async function complianceTrend(companyId, machineId) {
               COALESCE(t.resolved_at, t.closed_at) AS finished_at
          FROM maintenance_tickets t
          JOIN maintenance_schedules s ON s.id = t.schedule_id
-        WHERE t.company_id = $1
+        WHERE t.company_id = $1${plantSql('t.machine_id')}
           AND t.schedule_id IS NOT NULL
           AND ($2::int IS NULL OR t.machine_id = $2)
           AND t.due_date >= date_trunc('week', NOW() - INTERVAL '11 weeks')
@@ -163,7 +165,7 @@ async function byFrequency(companyId, machineId) {
             MIN(t.due_date) FILTER (WHERE t.status = ANY($3))                 AS next_due_at
        FROM maintenance_tickets t
        JOIN maintenance_schedules s ON s.id = t.schedule_id
-      WHERE t.company_id = $1
+      WHERE t.company_id = $1${plantSql('t.machine_id')}
         AND t.schedule_id IS NOT NULL
         AND ($2::int IS NULL OR t.machine_id = $2)
       GROUP BY s.frequency
@@ -198,7 +200,7 @@ async function technicianWorkload(companyId, machineId) {
        FROM maintenance_tickets t
        JOIN maintenance_schedules s ON s.id = t.schedule_id
        LEFT JOIN users u ON u.id = t.assigned_to
-      WHERE t.company_id = $1
+      WHERE t.company_id = $1${plantSql('t.machine_id')}
         AND t.schedule_id IS NOT NULL
         AND ($2::int IS NULL OR t.machine_id = $2)
         AND t.status = ANY($3)
@@ -226,7 +228,7 @@ async function upcoming(companyId, machineId, limit = 50) {   // enough for the 
        JOIN maintenance_schedules s ON s.id = t.schedule_id
        JOIN machines m ON m.id = t.machine_id
        LEFT JOIN users u ON u.id = t.assigned_to
-      WHERE t.company_id = $1
+      WHERE t.company_id = $1${plantSql('t.machine_id')}
         AND t.schedule_id IS NOT NULL
         AND ($2::int IS NULL OR t.machine_id = $2)
         AND t.status = ANY($3)
@@ -258,7 +260,7 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
    * rather than ignoring the extras.
    */
   const values = [companyId, machineId];
-  let where = `WHERE t.company_id = $1
+  let where = `WHERE t.company_id = $1${plantSql('t.machine_id')}
                  AND t.schedule_id IS NOT NULL
                  AND ($2::int IS NULL OR t.machine_id = $2)`;
 
@@ -413,7 +415,7 @@ exports.listSchedules = async ({ company_id, machine_id }) => {
        FROM maintenance_schedules s
        JOIN machines m ON m.id = s.machine_id
        LEFT JOIN users u ON u.id = s.assigned_user_id
-      WHERE s.company_id = $1
+      WHERE s.company_id = $1${plantSql('s.machine_id')}
         AND s.frequency IS NOT NULL
         AND ($2::int IS NULL OR s.machine_id = $2)
       ORDER BY s.is_active DESC, s.next_due_at NULLS LAST, s.id`,
@@ -451,10 +453,19 @@ exports.upsertSchedule = async ({
   // The machine has to belong to the caller's company; without this a
   // schedule could be hung off another tenant's machine.
   const { rowCount: ok } = await pool.query(
-    `SELECT 1 FROM machines WHERE id = $1 AND company_id = $2`,
+    `SELECT 1 FROM machines WHERE id = $1 AND company_id = $2${plantSql('id')}`,
     [machineId, company_id]
   );
   if (!ok) throw httpError('Machine not found or access denied', 404);
+
+  const assignee = idOrNull(assigned_user_id, 'Assignee');
+  if (assignee) {
+    const { rowCount } = await pool.query(
+      `SELECT 1 FROM users WHERE id = $1 AND company_id = $2 AND is_active = TRUE${sharedEntityPlantSql('users')}`,
+      [assignee, company_id]
+    );
+    if (!rowCount) throw httpError('Assignee not found or access denied', 404);
+  }
 
   if (id) {
     const { rows, rowCount } = await pool.query(
@@ -462,11 +473,11 @@ exports.upsertSchedule = async ({
           SET machine_id = $3, title = $4, description = $5, frequency = $6,
               next_due_at = $7, grace_days = $8, assigned_user_id = $9,
               checklist = $10, is_active = $11, updated_at = NOW()
-        WHERE id = $1 AND company_id = $2
+        WHERE id = $1 AND company_id = $2${plantSql('machine_id')}
         RETURNING *`,
       [id, company_id, machineId, title.trim(), description || null,
        String(frequency).toUpperCase(), next_due_at, grace,
-       assigned_user_id || null, checklist ? JSON.stringify(checklist) : null,
+       assignee, checklist ? JSON.stringify(checklist) : null,
        is_active !== false]
     );
     if (!rowCount) throw httpError('Schedule not found or access denied', 404);
@@ -482,7 +493,7 @@ exports.upsertSchedule = async ({
      RETURNING *`,
     [company_id, machineId, title.trim(), description || null,
      String(frequency).toUpperCase(), next_due_at, grace,
-     assigned_user_id || null, checklist ? JSON.stringify(checklist) : null,
+     assignee, checklist ? JSON.stringify(checklist) : null,
      is_active !== false, user_id]
   );
   return rows[0];
@@ -499,7 +510,7 @@ exports.deleteSchedule = async ({ id, company_id }) => {
   const { rowCount } = await pool.query(
     `UPDATE maintenance_schedules
         SET is_active = FALSE, updated_at = NOW()
-      WHERE id = $1 AND company_id = $2`,
+      WHERE id = $1 AND company_id = $2${plantSql('machine_id')}`,
     [id, company_id]
   );
   if (!rowCount) throw httpError('Schedule not found or access denied', 404);

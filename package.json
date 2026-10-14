@@ -21,6 +21,7 @@
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
     "helmet": "^8.1.0",
@@ -29,17 +30,16 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
-    "nodemailer": "^7.0.13",
+    "nodemailer": "^10.1.0",
     "pdfkit": "^0.18.0",
     "pg": "^8.18.0",
     "rate-limit-redis": "^4.3.1",
     "socket.io": "^4.8.3",
     "swagger-jsdoc": "^6.2.8",
-    "swagger-ui-express": "^5.0.1",
-    "xlsx": "^0.18.5"
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
-    "jest": "^29.7.0",
+    "jest": "^30.5.2",
     "socket.io-client": "^4.8.3",
     "supertest": "^7.2.2"
   },
@@ -56,5 +56,16 @@
     "setupFiles": [
       "<rootDir>/__tests__/setup/isolate.js"
     ]
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    },
+    "@istanbuljs/load-nyc-config": {
+      "js-yaml": "^4.3.2"
+    }
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

@@ -15,6 +15,7 @@
  *              threshold — or nothing yet this shift.
  */
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 
 const GAP_MS   = 60 * 1000;
 const IST_MS   = 330 * 60 * 1000;
@@ -31,7 +32,7 @@ async function currentShift(companyId) {
   const { rows } = await db.query(`
     SELECT id, shift_code, shift_name, start_time, end_time, break_minutes
       FROM shifts
-     WHERE company_id = $1 AND is_active = true
+     WHERE company_id = $1 AND is_active = true${sharedEntityPlantSql('shifts')}
        AND ((start_time <= end_time
              AND (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time BETWEEN start_time AND end_time)
          OR (start_time > end_time
@@ -116,7 +117,7 @@ exports.machineTimeline = async (machineId, companyId, nowMs = Date.now()) => {
   if (!Number.isInteger(id) || id <= 0) throw httpError('machine_id must be a positive integer', 400);
 
   const { rows: m } = await db.query(
-    `SELECT id FROM machines WHERE id = $1 AND company_id = $2`, [id, companyId]);
+    `SELECT id FROM machines WHERE id = $1 AND company_id = $2${plantSql('id')}`, [id, companyId]);
   if (!m.length) return null;
 
   const shift = await currentShift(companyId);

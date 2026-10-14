@@ -1,5 +1,7 @@
 # Go-live runbook — production readiness changes of 7 Oct 2026
 
+**Historical document.** For the current source use [the 13–14 October audit](PROJECT_AUDIT_2026-10-13.md) and [current deployment/recovery procedure](../../LOCAL_DEPLOYMENT_RUNBOOK.md). The earlier claims below do not establish readiness for this release; current tests used isolated fixtures and no configured application services. Do not follow the old migration/restore commands for this release.
+
 What ships, in what order, how to check each step, and how to undo it.
 Rehearsed end to end on a copy of production (schema, all configuration
 tables, recent telemetry, the collector's database role and its grants).

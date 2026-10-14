@@ -54,7 +54,7 @@ test('a code the company already has is a 409 in words; other database errors pa
 test('events: a page or limit that is not a number falls back instead of reaching the database', async () => {
   mockDb.queueResponse({ rows: [{ count: '0' }] }, { rows: [] });
   const r = await svc.getEvents({ company_id: 13, page: 'abc', limit: '-5' });
-  expect(r.pagination).toMatchObject({ page: 1, limit: 1 });
+  expect(r.pagination).toMatchObject({ page: 1, limit: 20 });
   const data = mockDb.calls()[1];
-  expect(data.params.slice(-2)).toEqual([1, 0]);
+  expect(data.params.slice(-2)).toEqual([20, 0]);
 });

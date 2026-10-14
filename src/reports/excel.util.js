@@ -1,8 +1,28 @@
-const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
 
-exports.createExcel = (sheetName, data) => {
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.json_to_sheet(data);
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+/** Build an XLSX attachment while retaining the report's column order and types. */
+exports.createExcel = async (sheetName, data) => {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName);
+  const headers = [];
+  const seenHeaders = new Set();
+  for (const row of data) {
+    for (const header of Object.keys(row)) {
+      if (!seenHeaders.has(header)) {
+        seenHeaders.add(header);
+        headers.push(header);
+      }
+    }
+  }
+
+  if (headers.length) {
+    worksheet.addRow(headers);
+    for (const row of data) {
+      // Strings remain literal cell values, including text beginning with '='.
+      // ExcelJS only writes formulas when explicitly passed a formula object.
+      worksheet.addRow(headers.map(header => row[header] ?? null));
+    }
+  }
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
 };

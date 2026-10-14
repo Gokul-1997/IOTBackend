@@ -1,6 +1,7 @@
 const multer = require('multer');
 const service = require('./program.service');
 const storage = require('./storage');
+const commands = require('./commands');
 
 /* One error shape for the screen: a code it can act on (FILE_EXISTS asks
    "overwrite?"), the names involved, and a sentence to show. */
@@ -30,6 +31,16 @@ const parseUpload = (req, res) => new Promise((resolve, reject) =>
   upload.single('file')(req, res, err => (err ? reject(err) : resolve())));
 
 exports.listMachines = handle(async (req, res) => res.json({ status: 'success', data: await service.listMachines(req) }));
+exports.saveConnection = handle(async (req, res) => res.json({ status: 'success', data: await commands.saveConnection(req) }));
+exports.commandStatus = handle(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ status: 'success', data: await commands.status(req) });
+});
+exports.transfer = handle(async (req, res) => {
+  await parseUpload(req, res);
+  res.status(201).json({ status: 'success', data: await commands.transfer(req), message: 'Saved on server and waiting for device confirmation' });
+});
+exports.backup = handle(async (req, res) => res.status(201).json({ status: 'success', data: await commands.backup(req), message: 'Current running program backup requested' }));
 
 exports.controllerFiles = handle(async (req, res) => res.json({ status: 'success', data: await service.controllerFiles(req) }));
 

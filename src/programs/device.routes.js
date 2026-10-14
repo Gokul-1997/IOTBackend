@@ -19,6 +19,7 @@ const deviceAuth = require('../middleware/device.middleware');
 const { deviceFailLimiter, deviceLimiter } = require('../middleware/rateLimit.middleware');
 const storage = require('./storage');
 const service = require('./device.service');
+const commands = require('./commands');
 
 const router = express.Router();
 
@@ -52,6 +53,10 @@ const handle = fn => async (req, res) => {
 router.use(deviceFailLimiter, deviceAuth, deviceLimiter);
 
 router.get('/ping', handle(async (req, res) => res.json(await service.ping(req.device))));
+router.post('/commands/next', handle(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(await commands.next(req.device));
+}));
 
 router.get('/program/info', handle(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -89,8 +94,14 @@ router.get('/jobs/next', handle(async (req, res) => {
   res.json({ job });
 }));
 
-router.get('/jobs/:id/file', handle(async (req, res) => {
+const downloadJobFile = handle(async (req, res) => {
   const { job, file } = await service.jobFile(req.device, req.params.id);
+  const stream = storage.open(file.folder, file.stored_name);
+  await new Promise((resolve, reject) => {
+    stream.once('open', resolve);
+    stream.once('error', err => reject(Object.assign(err, err.code === 'ENOENT'
+      ? { status: 404, code: 'FILE_GONE', message: 'The saved program file is unavailable. Upload it again.' } : {})));
+  });
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Length', String(file.size_bytes));
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(job.program_name)}"`);
@@ -98,12 +109,13 @@ router.get('/jobs/:id/file', handle(async (req, res) => {
   res.setHeader('X-Sha256', file.sha256);
   res.setHeader('Cache-Control', 'no-store');
   await new Promise((resolve, reject) => {
-    const stream = storage.open(file.folder, file.stored_name);
     stream.on('error', reject);
     stream.on('end', resolve);
     stream.pipe(res);
   });
-}));
+});
+router.get('/jobs/:id/file', downloadJobFile);
+router.post('/jobs/:id/file', downloadJobFile);
 
 /* multer inside the handler, so a file over the limit answers with the
    same JSON shape as every other error */
@@ -113,7 +125,7 @@ const parseUpload = (req, res) => new Promise((resolve, reject) =>
 router.post('/backup', handle(async (req, res) => {
   await parseUpload(req, res);
   const body = req.body || {};
-  const file = await service.uploadFile(req.device, {
+  const file = body.job_id ? await commands.storeBackup(req.device, body, req.file) : await service.uploadFile(req.device, {
     file: req.file, type: 'BACKUP', program_name: body.program_name,
     sha256: body.sha256, note: body.note
   });

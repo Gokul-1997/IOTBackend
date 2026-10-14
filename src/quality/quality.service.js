@@ -1,5 +1,18 @@
 const db = require("../db");
 const { ownedOrThrow } = require("../lib/tenant");
+const historical = require("../lib/historical-production");
+const { plantSql } = require("../lib/read-scope");
+
+function qualityDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw Object.assign(new Error('date must be a valid YYYY-MM-DD calendar date.'), { status: 400 });
+  }
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw Object.assign(new Error('date must be a valid YYYY-MM-DD calendar date.'), { status: 400 });
+  }
+  return value;
+}
 
 // ─────────────────────────────────────────────────────────────
 // Helper: shift planned seconds (duration minus break)
@@ -16,39 +29,11 @@ function shiftPlannedSeconds(shift) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Helper: OEE from raw numbers
-// ─────────────────────────────────────────────────────────────
-function calcOee({ runSeconds, plannedSeconds, producedQty, cycleTimeSec, accepted, multFactor = 1 }) {
-  const availability = plannedSeconds > 0
-    ? Math.min(100, (runSeconds / plannedSeconds) * 100)
-    : 0;
-
-  // idealQty = how many parts should have been made in run time (× factor for multi-part fixtures)
-  const idealQty    = cycleTimeSec > 0 ? (runSeconds / cycleTimeSec) * multFactor : 0;
-  const actualQty   = producedQty * multFactor;
-  const performance = idealQty > 0
-    ? Math.min(100, (actualQty / idealQty) * 100)
-    : 0;
-
-  const quality = producedQty > 0
-    ? Math.min(100, (accepted / producedQty) * 100)
-    : 0;
-
-  const oee = (availability / 100) * (performance / 100) * (quality / 100) * 100;
-
-  return {
-    availability: +availability.toFixed(2),
-    performance:  +performance.toFixed(2),
-    quality:      +quality.toFixed(2),
-    oee:          +oee.toFixed(2)
-  };
-}
-
-// ─────────────────────────────────────────────────────────────
 // GET QUALITY DASHBOARD
 // ─────────────────────────────────────────────────────────────
 exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, date }) => {
-  // machine and shift come from the query string; nothing below is scoped by company
+  date = qualityDate(date);
+  // Validate the referenced machine and shared/owned shift before reading totals.
   await ownedOrThrow(company_id, { machine_id, shift_id });
 
   // 1. Machine info + target
@@ -81,45 +66,24 @@ exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, 
          AND (oma.assigned_to IS NULL OR oma.assigned_to >= $3::date)
        LIMIT 1
      )
-     WHERE m.id = $1`,
-    [machine_id, shift_id, date]
+     WHERE m.id = $1 AND m.company_id = $4`,
+    [machine_id, shift_id, date, company_id]
   );
 
   const machine = machineRows[0] || {};
-  const cycleTimeSec = Number(machine.cycle_time_seconds || 0);
-  const multFactor   = Number(machine.multiplication_factor || 1);
 
   // 2. Shift info (for planned seconds)
   const { rows: shiftRows } = await db.query(
-    `SELECT start_time, end_time, break_minutes FROM shifts WHERE id = $1`,
-    [shift_id]
+    `SELECT start_time, end_time, break_minutes FROM shifts WHERE id = $1 AND company_id = $2`,
+    [shift_id, company_id]
   );
   const shift = shiftRows[0];
   const plannedSeconds = shift ? shiftPlannedSeconds(shift) : 0;
 
-  // 3. Production totals from production_hourly
-  //    Use range-based filter: hour_start between shift start and shift end
-  //    (matches dashboard + charts approach — avoids UTC hour-truncation bugs)
-  const { rows: prodRows } = await db.query(
-    `SELECT
-       COALESCE(SUM(produced_qty), 0)  AS produced,
-       COALESCE(SUM(run_seconds), 0)   AS run_seconds
-     FROM production_hourly ph
-     JOIN shifts s ON s.id = ph.shift_id
-     WHERE ph.machine_id = $1
-       AND ph.shift_id   = $2
-       AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-       AND ph.hour_start <  (
-             CASE WHEN s.start_time > s.end_time
-                  THEN ($3::date + INTERVAL '1 day' + s.end_time)
-                  ELSE ($3::date + s.end_time)
-             END
-           ) AT TIME ZONE 'Asia/Kolkata'`,
-    [machine_id, shift_id, date]
-  );
-
-  const produced   = Number(prodRows[0].produced);
-  const runSeconds = Number(prodRows[0].run_seconds);
+  // Read the bounded shift once; reuse its rows for totals and the chart.
+  const { rows: hourlyRows } = await db.query(historical.rowsSQL, [company_id, [Number(machine_id)], shift_id, date]);
+  const produced = hourlyRows.reduce((sum, row) => sum + Number(row.produced_qty || 0), 0);
+  const runSeconds = hourlyRows.reduce((sum, row) => sum + Number(row.run_seconds || 0), 0);
 
   // 4. Quality entries (reject + rework)
   const { rows: qRows } = await db.query(
@@ -129,7 +93,7 @@ exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, 
      FROM quality_entries
      WHERE machine_id = $1
        AND shift_id   = $2
-       AND COALESCE(shift_date, created_at::date) = $3::date`,
+       AND COALESCE(shift_date, (created_at AT TIME ZONE 'Asia/Kolkata')::date) = $3::date`,
     [machine_id, shift_id, date]
   );
 
@@ -138,80 +102,20 @@ exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, 
   const accepted = Math.max(0, produced - reject - rework);
   const quality_percent = produced > 0
     ? +((accepted / produced) * 100).toFixed(2)
-    : 0;
+    : null;
 
-  // 5. OEE — calculated on the fly from production_hourly + quality_entries
-  const oee = calcOee({ runSeconds, plannedSeconds, producedQty: produced, cycleTimeSec, accepted, multFactor });
-
-  // Also upsert oee_shift_summary so future reads are fast
-  if (produced > 0 && shift) {
-    await db.query(
-      `INSERT INTO oee_shift_summary
-         (machine_id, shift_id, shift_date, availability, performance, quality, oee)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       ON CONFLICT (machine_id, shift_id, shift_date)
-       DO UPDATE SET
-         availability = EXCLUDED.availability,
-         performance  = EXCLUDED.performance,
-         quality      = EXCLUDED.quality,
-         oee          = EXCLUDED.oee`,
-      [machine_id, shift_id, date, oee.availability, oee.performance, oee.quality, oee.oee]
-    );
-  }
-
-  // 6. Hourly chart — per hour OEE from production_hourly
-  const { rows: hourlyRows } = await db.query(
-    `SELECT
-       ph.hour_start,
-       COALESCE(ph.run_seconds, 0)   AS run_seconds,
-       COALESCE(ph.idle_seconds, 0)  AS idle_seconds,
-       COALESCE(ph.produced_qty, 0)  AS produced_qty
-     FROM production_hourly ph
-     JOIN shifts s ON s.id = ph.shift_id
-     WHERE ph.machine_id = $1
-       AND ph.shift_id   = $2
-       AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-       AND ph.hour_start <  (
-             CASE WHEN s.start_time > s.end_time
-                  THEN ($3::date + INTERVAL '1 day' + s.end_time)
-                  ELSE ($3::date + s.end_time)
-             END
-           ) AT TIME ZONE 'Asia/Kolkata'
-     ORDER BY ph.hour_start`,
-    [machine_id, shift_id, date]
-  );
-
-  // Distribute reject+rework proportionally across hours by produced_qty
-  const hourly = hourlyRows.map((h) => {
-    const hProduced   = Number(h.produced_qty);
-    const hRunSeconds = Number(h.run_seconds);
-
-    // Proportional reject/rework for this hour
-    const ratio      = produced > 0 ? hProduced / produced : 0;
-    const hReject    = Math.round(reject * ratio);
-    const hRework    = Math.round(rework * ratio);
-    const hAccepted  = Math.max(0, hProduced - hReject - hRework);
-
-    // For hourly availability, use 3600s as the hour window (1 hour)
-    const hourPlanned = 3600;
-    const oeeH = calcOee({
-      runSeconds:    hRunSeconds,
-      plannedSeconds: hourPlanned,
-      producedQty:   hProduced,
-      cycleTimeSec,
-      accepted:      hAccepted,
-      multFactor
-    });
-
+  // GET is read-only. Scheduled rollups persist summaries; opening a dashboard
+  // must never change historical results using the currently active component.
+  const oee = historical.metrics(hourlyRows, plannedSeconds, accepted);
+  const hourlyQualityKnown = reject === 0 && rework === 0;
+  const hourly = hourlyRows.map(h => {
+    const hProduced = Number(h.produced_qty || 0);
     return {
-      hour: h.hour_start,
-      run_seconds:  hRunSeconds,
-      idle_seconds: Number(h.idle_seconds),
-      produced_qty: hProduced,
-      accepted:     hAccepted,
-      reject:       hReject,
-      rework:       hRework,
-      ...oeeH
+      hour: h.hour_start, run_seconds: Number(h.run_seconds || 0), idle_seconds: Number(h.idle_seconds || 0), produced_qty: hProduced,
+      accepted: hourlyQualityKnown ? hProduced : null,
+      reject: hourlyQualityKnown ? 0 : null, rework: hourlyQualityKnown ? 0 : null,
+      measurement_basis: hourlyQualityKnown ? 'SHIFT_HAS_NO_REJECTS' : 'HOURLY_QUALITY_NOT_MEASURED',
+      ...historical.metrics([h], Number(h.planned_seconds || 3600), hourlyQualityKnown ? hProduced : null)
     };
   });
 
@@ -251,55 +155,85 @@ exports.upsertQualityEntryService = async ({
   rework_qty,
   user_id
 }) => {
-  // rejects entered against another company's machine changed that company's OEE
-  await ownedOrThrow(company_id, { machine_id, shift_id });
-  // Validate reject+rework does not exceed produced_qty for this shift+date
-  const { rows: prodRows } = await db.query(
-    `SELECT COALESCE(SUM(produced_qty), 0) AS produced
-     FROM production_hourly ph
-     JOIN shifts s ON s.id = ph.shift_id
-     WHERE ph.machine_id = $1
-       AND ph.shift_id   = $2
-       AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-       AND ph.hour_start <  (
-             CASE WHEN s.start_time > s.end_time
-                  THEN ($3::date + INTERVAL '1 day' + s.end_time)
-                  ELSE ($3::date + s.end_time)
-             END
-           ) AT TIME ZONE 'Asia/Kolkata'`,
-    [machine_id, shift_id, date]
-  );
-  const produced = Number(prodRows[0]?.produced || 0);
-  if (produced > 0 && (reject_qty + rework_qty) > produced) {
-    const err = new Error(`Reject (${reject_qty}) + Rework (${rework_qty}) cannot exceed produced quantity (${produced})`);
-    err.status = 422;
-    throw err;
+  date = qualityDate(date);
+  reject_qty = Number(reject_qty);
+  rework_qty = Number(rework_qty);
+  if (![reject_qty, rework_qty].every(value => Number.isSafeInteger(value) && value >= 0)) {
+    throw Object.assign(new Error('Reject and rework quantities must be non-negative whole numbers.'), { status: 400 });
   }
-
-  const { rows: existing } = await db.query(
-    `SELECT id FROM quality_entries
-     WHERE machine_id = $1
-       AND shift_id   = $2
-       AND COALESCE(shift_date, created_at::date) = $3::date
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [machine_id, shift_id, date]
-  );
-
-  if (existing.length > 0) {
-    await db.query(
-      `UPDATE quality_entries
-       SET reject_qty = $1, rework_qty = $2, entered_by = $3, shift_date = $4
-       WHERE id = $5`,
-      [reject_qty, rework_qty, user_id, date, existing[0].id]
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await ownedOrThrow(company_id, { machine_id, shift_id }, client);
+    // This parent row exists even before the first quality entry. Locking it
+    // serializes two first saves as well as later edits, on every API server.
+    const { rows: machines } = await client.query(
+      `SELECT id FROM machines WHERE id=$1 AND company_id=$2${plantSql('id')} FOR UPDATE`,
+      [machine_id, company_id]
     );
-    return { action: "updated" };
-  }
+    if (!machines.length) throw Object.assign(new Error('Machine not found'), { status: 404 });
+    // Include the first partial hour of a shift, with the same overlap rule as
+    // the historical dashboard. Never count another company's rollup rows.
+    const { rows: prodRows } = await client.query(
+      `SELECT COALESCE(SUM(produced_qty), 0) AS produced
+       FROM production_hourly ph
+       JOIN shifts s ON s.id = ph.shift_id AND s.company_id=$4
+       WHERE ph.company_id=$4 AND ph.machine_id = $1
+         AND ph.shift_id   = $2
+         AND ph.hour_start + INTERVAL '1 hour' > ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+         AND ph.hour_start <  (
+               CASE WHEN s.start_time >= s.end_time
+                    THEN ($3::date + INTERVAL '1 day' + s.end_time)
+                    ELSE ($3::date + s.end_time)
+               END
+             ) AT TIME ZONE 'Asia/Kolkata'`,
+      [machine_id, shift_id, date, company_id]
+    );
+    const produced = Number(prodRows[0]?.produced || 0);
+    if (produced > 0 && (reject_qty + rework_qty) > produced) {
+      const err = new Error(`Reject (${reject_qty}) + Rework (${rework_qty}) cannot exceed produced quantity (${produced})`);
+      err.status = 422;
+      throw err;
+    }
 
-  await db.query(
-    `INSERT INTO quality_entries (machine_id, shift_id, shift_date, reject_qty, rework_qty, entered_by)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [machine_id, shift_id, date, reject_qty, rework_qty, user_id]
-  );
-  return { action: "created" };
+    const { rows: existing } = await client.query(
+      `SELECT id FROM quality_entries
+       WHERE machine_id = $1
+         AND shift_id   = $2
+         AND COALESCE(shift_date, (created_at AT TIME ZONE 'Asia/Kolkata')::date) = $3::date
+       ORDER BY id
+       LIMIT 2 FOR UPDATE`,
+      [machine_id, shift_id, date]
+    );
+
+    if (existing.length > 1) {
+      throw Object.assign(new Error('Multiple quality totals exist for this machine, shift and date. An administrator must review them before saving.'), {
+        status: 409, code: 'QUALITY_TOTALS_AMBIGUOUS'
+      });
+    }
+
+    if (existing.length > 0) {
+      await client.query(
+        `UPDATE quality_entries
+         SET reject_qty = $1, rework_qty = $2, entered_by = $3, shift_date = $4
+         WHERE id = $5`,
+        [reject_qty, rework_qty, user_id, date, existing[0].id]
+      );
+      await client.query('COMMIT');
+      return { action: "updated" };
+    }
+
+    await client.query(
+      `INSERT INTO quality_entries (machine_id, shift_id, shift_date, reject_qty, rework_qty, entered_by)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [machine_id, shift_id, date, reject_qty, rework_qty, user_id]
+    );
+    await client.query('COMMIT');
+    return { action: "created" };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 };

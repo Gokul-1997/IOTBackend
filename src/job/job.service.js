@@ -1,94 +1,101 @@
 const db = require('../db');
+const { pagination } = require('../lib/pagination');
+
+function id(value, label) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n <= 0) throw { status: 400, message: `${label} id is not valid` };
+  return n;
+}
+
+/** Lock the owned machine, so simultaneous starts/stops are serialized.
+ * Company and plant are checked before either components or jobs are read. */
+async function lockedMachine(client, machineId, companyId, plantId) {
+  if (!companyId) throw { status: 403, message: 'No company on this account' };
+  const { rows } = await client.query(
+    `SELECT id, plant_id FROM machines
+      WHERE id = $1 AND company_id = $2 AND is_active = TRUE
+        AND ($3::int IS NULL OR plant_id = $3)
+      FOR UPDATE`,
+    [machineId, companyId, plantId ?? null]
+  );
+  if (!rows.length) throw { status: 404, message: 'Machine not found' };
+  return rows[0];
+}
 
 exports.startJob = async (req) => {
-
-  const { machine_id, component_id, job_start } = req.body;
-  const company_id = req.user.company_id;
-
-  if (!job_start) throw new Error("job_start (date & time) is required");
-
-  // Block if machine already has an active job
-  const { rows: existing } = await db.query(`
-    SELECT j.id, j.part_name
-    FROM machine_current_job j
-    JOIN machines m ON m.id = j.machine_id
-    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.company_id = $2
-  `, [machine_id, company_id]);
-
-  if (existing.length > 0) {
-    throw new Error(`Machine already has an active job (${existing[0].part_name}). Stop it before starting a new one.`);
+  const machineId = id(req.body.machine_id, 'Machine');
+  const componentId = id(req.body.component_id, 'Component');
+  const start = new Date(req.body.job_start);
+  if (!req.body.job_start || !Number.isFinite(start.getTime())) {
+    throw { status: 400, message: 'job_start must be a valid date and time' };
   }
-
-  const { rows } = await db.query(`
-    SELECT part_name, target
-    FROM components
-    WHERE id = $1 AND machine_id = $2
-  `,[component_id, machine_id]);
-
-  const component = rows[0];
-
-  if (!component) {
-    throw new Error("Component not found or does not belong to this machine");
-  }
-
-  await db.query(`
-    INSERT INTO machine_current_job
-    (plant_id,company_id,machine_id,component_id,part_name,target_qty,started_at)
-    VALUES (NULL,$1,$2,$3,$4,$5,$6)
-  `,[
-    company_id,
-    machine_id,
-    component_id,
-    component.part_name,
-    component.target,
-    job_start
-  ]);
-
+  const companyId = req.user.company_id;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const machine = await lockedMachine(client, machineId, companyId, req.user.plant_id);
+    const { rows: existing } = await client.query(
+      `SELECT id, part_name FROM machine_current_job
+        WHERE machine_id = $1 AND company_id = $2 AND is_active = TRUE`,
+      [machineId, companyId]
+    );
+    if (existing.length) throw { status: 409, message: `Machine already has an active job (${existing[0].part_name}). Stop it before starting a new one.` };
+    const { rows } = await client.query(
+      `SELECT part_name, target, EXTRACT(EPOCH FROM cycle_time) AS cycle_time_seconds FROM components
+        WHERE id = $1 AND machine_id = $2 AND company_id = $3`,
+      [componentId, machineId, companyId]
+    );
+    if (!rows.length) throw { status: 404, message: 'Component not found or does not belong to this machine' };
+    const result = await client.query(
+      `INSERT INTO machine_current_job
+         (plant_id, company_id, machine_id, component_id, part_name, target_qty, started_at, cycle_time_seconds)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      [machine.plant_id, companyId, machineId, componentId, rows[0].part_name, rows[0].target, start, rows[0].cycle_time_seconds ?? null]
+    );
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err.code === '23505') throw { status: 409, message: 'Machine already has an active job. Refresh and try again.' };
+    throw err;
+  } finally { client.release(); }
 };
 
-
-
-exports.stopJob = async (machine_id, company_id) => {
-
-  // Guard: no active job means nothing to stop
-  const { rows: active } = await db.query(`
-    SELECT j.id, j.part_name
-    FROM machine_current_job j
-    JOIN machines m ON m.id = j.machine_id
-    WHERE j.machine_id = $1 AND j.is_active = TRUE AND m.company_id = $2
-  `, [machine_id, company_id]);
-
-  if (active.length === 0) {
-    throw new Error('No active job found for this machine.');
-  }
-
-  await db.query(`
-    UPDATE machine_current_job
-    SET is_active = false,
-        ended_at = now(),
-        setting_time_end = now()
-    WHERE machine_id = $1
-      AND is_active = true
-  `,[machine_id]);
-
-  return true;
-
+exports.stopJob = async (machine_id, company_id, plant_id = null) => {
+  const machineId = id(machine_id, 'Machine');
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await lockedMachine(client, machineId, company_id, plant_id);
+    const result = await client.query(
+      `UPDATE machine_current_job
+          SET is_active = FALSE, ended_at = NOW(), setting_time_end = NOW()
+        WHERE machine_id = $1 AND company_id = $2 AND is_active = TRUE
+        RETURNING id`,
+      [machineId, company_id]
+    );
+    if (!result.rowCount) throw { status: 409, message: 'No active job found for this machine.' };
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally { client.release(); }
 };
 
-
-
-exports.getAvailableMachines = async (company_id) => {
+exports.getAvailableMachines = async (company_id, plant_id = null) => {
   const { rows } = await db.query(`
     SELECT m.id, m.machine_serial_no
     FROM machines m
     WHERE m.company_id = $1
+      AND ($2::int IS NULL OR m.plant_id = $2)
       AND m.is_active = TRUE
       AND NOT EXISTS (
         SELECT 1 FROM machine_current_job j
         WHERE j.machine_id = m.id AND j.is_active = TRUE
       )
     ORDER BY m.machine_serial_no
-  `, [company_id]);
+  `, [company_id, plant_id]);
   return rows;
 };
 
@@ -98,16 +105,16 @@ exports.getAvailableMachines = async (company_id) => {
  * Bounded by machine count in practice, but paginated on the same opt-in
  * terms as the history so both endpoints answer in one shape.
  */
-exports.getCurrentJobs = async (company_id, { page, limit } = {}) => {
+exports.getCurrentJobs = async (company_id, { page, limit, plant_id = null } = {}) => {
 
   const paginated = page != null || limit != null;
 
-  const lim    = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
-  const pg     = Math.max(parseInt(page, 10) || 1, 1);
-  const offset = (pg - 1) * lim;
+  const { limitNum: lim, pageNum: pg, offset } = pagination(page, limit, 200);
+  const scoped = plant_id != null;
+  const scopeParams = scoped ? [company_id, plant_id] : [company_id];
 
   const where = `
-    WHERE m.company_id = $1
+    WHERE m.company_id = $1 AND j.company_id = $1 ${scoped ? 'AND m.plant_id = $2' : ''}
       AND m.is_active = TRUE
       AND j.is_active = TRUE`;
 
@@ -131,9 +138,9 @@ exports.getCurrentJobs = async (company_id, { page, limit } = {}) => {
     ${where}`;
 
   const [dataRes, countRes] = await Promise.all([
-    db.query(paginated ? `${select} LIMIT $2 OFFSET $3` : select,
-             paginated ? [company_id, lim, offset] : [company_id]),
-    db.query(countSql, [company_id])
+    db.query(paginated ? `${select} LIMIT $${scopeParams.length + 1} OFFSET $${scopeParams.length + 2}` : select,
+             paginated ? [...scopeParams, lim, offset] : scopeParams),
+    db.query(countSql, scopeParams)
   ]);
 
   // tolerate an empty count result rather than throwing on .total
@@ -156,20 +163,19 @@ exports.getCurrentJobs = async (company_id, { page, limit } = {}) => {
  * company passed 200 jobs the older ones were simply unreachable, and no
  * client could have paged to them because the row count was never returned.
  *
- * Pagination is opt-in so existing callers are unaffected — omit page/limit
- * and you get the whole history as before (minus the silent truncation).
+ * History is always bounded; clients send page/limit to navigate older work.
  */
-exports.getJobHistory = async (company_id, { page, limit } = {}) => {
+exports.getJobHistory = async (company_id, { page, limit, plant_id = null } = {}) => {
 
-  const paginated = page != null || limit != null;
+  const paginated = true;
 
   // clamp: a caller asking for limit=100000 should not be able to pull the
   // whole table into memory
-  const lim    = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
-  const pg     = Math.max(parseInt(page, 10) || 1, 1);
-  const offset = (pg - 1) * lim;
+  const { limitNum: lim, pageNum: pg, offset } = pagination(page, limit, 200);
+  const scoped = plant_id != null;
+  const scopeParams = scoped ? [company_id, plant_id] : [company_id];
 
-  const where  = `WHERE m.company_id = $1`;
+  const where  = `WHERE m.company_id = $1 AND j.company_id = $1 ${scoped ? 'AND m.plant_id = $2' : ''}`;
   const select = `
     SELECT
       j.id AS job_id,
@@ -192,9 +198,9 @@ exports.getJobHistory = async (company_id, { page, limit } = {}) => {
     ${where}`;
 
   const [dataRes, countRes] = await Promise.all([
-    db.query(paginated ? `${select} LIMIT $2 OFFSET $3` : select,
-             paginated ? [company_id, lim, offset] : [company_id]),
-    db.query(countSql, [company_id])
+    db.query(paginated ? `${select} LIMIT $${scopeParams.length + 1} OFFSET $${scopeParams.length + 2}` : select,
+             paginated ? [...scopeParams, lim, offset] : scopeParams),
+    db.query(countSql, scopeParams)
   ]);
 
   // tolerate an empty count result rather than throwing on .total

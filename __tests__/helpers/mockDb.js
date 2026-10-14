@@ -25,7 +25,7 @@ const calls = [];
  * about contention calls `denyAdvisoryLock()` to make the next attempt
  * fail, which is how the "machine busy" case is exercised.
  */
-const ADVISORY_LOCK = /pg_(try_)?advisory_(unlock|lock)/i;
+const ADVISORY_LOCK = /pg_(try_)?advisory_(?:xact_)?(unlock|lock)/i;
 let grantLock = true;
 
 /*

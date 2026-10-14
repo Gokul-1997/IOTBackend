@@ -24,6 +24,7 @@
  */
 const crypto = require('crypto');
 const redis = require('../redis');
+const { cacheScope } = require('../lib/read-scope');
 
 const LIVE_TTL = 30;
 const PAST_TTL = 300;
@@ -95,7 +96,7 @@ async function json(name, companyId, params, ttl, compute) {
   if (companyId === undefined || companyId === null || companyId === '') return JSON.stringify(await compute());
 
   const version = await versionOf(companyId);
-  const key = `dash:${name}:${companyId}:${version ?? 'x'}:${fingerprint(params)}`;
+  const key = `dash:${name}:${companyId}:${version ?? 'x'}:${fingerprint({ ...params, authorization_plant: cacheScope() })}`;
 
   if (inflight.has(key)) return inflight.get(key);
   if (version !== null) {

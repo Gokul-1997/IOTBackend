@@ -20,6 +20,7 @@
  * date_bin, not TimescaleDB's time_bucket, so this runs on any PostgreSQL 14+.
  */
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 
 const RANGES = {
   '1h':  { seconds: 3600,       bucket: 60 },
@@ -78,7 +79,7 @@ async function meters(companyId, nowMs) {
     `SELECT m.id, m.machine_serial_no, MAX(r.read_at) AS last_read_at
        FROM energy_meter_readings r
        JOIN machines m ON m.id = r.machine_id
-      WHERE m.company_id = $1 AND r.read_at >= $2
+      WHERE m.company_id = $1 AND r.read_at >= $2${plantSql('m.id')}
       GROUP BY m.id, m.machine_serial_no
       ORDER BY m.machine_serial_no`,
     [companyId, new Date(nowMs - LOOKBACK_MS)]
@@ -127,7 +128,7 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
 
   let machine = null;
   if (id !== null) {
-    const { rows } = await db.query(`SELECT id, machine_serial_no FROM machines WHERE id = $1 AND company_id = $2`, [id, companyId]);
+    const { rows } = await db.query(`SELECT id, machine_serial_no FROM machines WHERE id = $1 AND company_id = $2${plantSql('id')}`, [id, companyId]);
     if (!rows.length) return null;
     machine = { id: rows[0].id, serial: rows[0].machine_serial_no };
   } else if (list.length) {

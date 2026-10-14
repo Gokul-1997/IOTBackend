@@ -1,321 +1,137 @@
-# STM MEXA Program Transfer — Device API
+# Program Transfer: acknowledged delivery and fresh backup
 
-## Direct flow: current program and backup
+## Operator flow
 
-The web publishes one current program for each machine. Its device downloads that file with a repeatable GET. Backups are uploaded independently. This flow does not use jobs, claims, or result calls.
+1. Choose the CNC machine in **Program Transfer**. Save its **Machine IP** and **Program path** on this page. Create its device token once and install it privately on the device.
+2. **Upload and send** saves an immutable server reference and requests delivery to that machine. The file stays on the server even if delivery fails. “Saved” and “Confirmed by machine” are different states.
+3. **Backup** requests a new read of the program currently selected/running on the CNC at execution time. Every completed request saves a distinct server backup. **Download** retrieves an already saved file.
 
-Before deploying this flow, apply migration `039_program_current.sql` through the existing `npm run migrate` process. Older job-polling clients must switch to the direct GET endpoint, and existing saved files must be explicitly republished to become current.
+The device reaches the server through outbound HTTPS requests; no factory-side inbound port is required. Uploading never starts a CNC program. The device must check its controller's permitted operating mode before writing and verify the bytes by reading them back.
 
-### Deployment
+## Deployment and compatibility
 
-From `Backend`, use `npm run migrate -- --status` to review the target database. Follow the existing deployment process and run `npm run migrate` to apply all pending migrations, including `039_program_current.sql`. Verify that it is applied before starting the updated application; do not baseline a database missing the `program_current` table.
+Apply pending migrations through the guarded `npm run migrate` runner before deploying the updated API/collector. This flow needs `039_program_current.sql`, `040_program_commands.sql`, and `041_program_tenant_integrity.sql`. Review `npm run migrate -- --status` first. Normal migrations exclude the retired destructive 003 reset. Baseline only an already verified schema with `--baseline --through <last-verified-file>`.
 
-Update the machine client to download from `GET /api/device/v1/program`, optionally checking `/program/info` first. Clients polling only `/jobs/next` do not receive these publications. Existing uploads stay in saved history; use **Upload program** to publish the intended current file for each machine.
+New commands use `protocol_version=2`. Existing GET `/jobs/next` clients consume only legacy protocol 1 jobs. Update the device client; telemetry publishing alone does not implement the command consumer. A queued command expires after five minutes; a claimed command expires after fifteen minutes. Check the controller before retrying a timed-out write.
 
-### Authentication and setup
+The reference [Python agent](../tools/program-agent/program_agent.py) implements durable command handling and retry logic using only the Python standard library. Its `FolderController` is explicitly a test fixture: set `CNC_DIR` and `CNC_ACTIVE_PROGRAM` to a real file in that test folder. Physical Fanuc/FOCAS, Mitsubishi, Siemens, or FTP adapters are not included. Implement the adapter's `read_current(path)`, `read`, `write`, and operational write-safety checks using the controller's actual APIs. Never infer the running program from the newest server file, first directory entry, or last uploaded filename.
 
-An administrator selects the machine and creates its device token. Creating a replacement invalidates the old token immediately. Store the token privately on that device. No controller program path is required by the direct API.
+## Authentication
 
-- Backend origin: your HTTPS server URL, without `/api`.
-- Device API base: `{origin}/api/device/v1`.
-- Every device request: `Authorization: Bearer {device_token}`.
-- `GET /ping` verifies the token and returns `machine.id`, `machine.serial`, and `poll_seconds` (default 15). Verify both the numeric ID and serial against the machine selected on the web; serial alone can repeat across companies.
-- Optional `X-Agent-Version` identifies the installed device software.
+Web requests use the signed-in user's JWT. Device requests use that machine's `mxd_...` token:
 
-A device token only accesses its assigned active machine. Web APIs use a logged-in user's JWT and company permissions instead.
+```text
+Authorization: Bearer <device_token>
+X-Agent-Version: 2.0.0
+```
 
-### Web publication
+The token is stored as a hash on the server, belongs to one machine/company, and is invalidated when replaced/revoked. MQTT credentials and the HTTP device token have different roles. Do not share one global device password across companies.
 
-`POST /api/programs/machines/{machine_id}/current-program` uses a user JWT and multipart `file`, with optional `program_name` and `note`. It requires both `page:programs:upload` and `page:programs:transfer`.
+## Web API
 
-A successful `201` response contains `{"status":"success","data":{"file":{...}},"message":"Program ready for the machine"}`. The file becomes the selected machine's current publication atomically; older files stay saved. No job is created. The web can read this publication with `GET` on the same URL, returning `data.file` or `null`.
-
-### Machine download
-
-| Request | Response |
+| Request | Body / result |
 |---|---|
-| `GET /program/info` | `200 {"file":{"id":41,"program_name":"O1234.nc","size":2048,"sha256":"...","url":"/api/device/v1/program"}}`; `file:null` if nothing is published. |
-| `GET /program` | `200` with program bytes; repeating GET returns the current publication again. `404 NO_PROGRAM` if nothing is published. |
+| `PUT /api/programs/machines/{id}/connection` | JSON `{"ip_address":"192.168.1.7","program_path":"//CNC_MEM/USER/PATH1/"}`. Saves validated connection settings; cannot change them while an operation is pending. Requires machine edit and Program Transfer view. |
+| `POST /api/programs/machines/{id}/transfer` | Multipart `file`, optional `program_name`, `note`, and `overwrite=true` only after explicit replacement confirmation. `201 {"data":{"file":{...},"job":{...}}}`. Requires upload and transfer. |
+| `POST /api/programs/machines/{id}/backup` | Empty JSON. `201 {"data":{"job":{...}}}`. Requires fetch permission. No filename is supplied: the device resolves the current program. |
+| `GET /api/programs/machines/{id}/status` | Current server reference, newest saved backup, connection state, and latest SEND/BACKUP states. This does not assert which program is running. |
+| `GET /api/programs/files?machine_id={id}&page=1&limit=25` | Saved versions, loaded only when history is opened. |
+| `GET /api/programs/files/{file_id}/download` | Saved file bytes. |
 
-A successful download supplies `Content-Type: application/octet-stream`, `Content-Length`, `X-File-Id`, `X-Program-Name` (URL encoded), `X-Sha256`, and `Cache-Control: no-store`. Metadata also uses `no-store`. Decode the program-name header and treat it as a filename, not an executable command. `404 FILE_GONE` means its backing file is unavailable; an operator must republish it.
+Send a unique `Idempotency-Key` of 16–80 letters/digits/hyphens/underscores with Upload or Backup. Reuse it after a lost HTTP reply; use a new key for a new operator action. Reusing a key with different file bytes/name/replacement choice returns `409 REQUEST_CONFLICT`.
 
-For efficient polling, remember the last file ID or checksum and read `/program/info` at the interval returned by Ping. Download only when it changes. Verify the downloaded byte count and SHA-256 against that download's headers; a new publication may arrive between metadata and download requests.
+Saved IP/path and an active device token are required. An offline device can receive a queued request after reconnecting before the deadline. A machine handles one pending controller operation at a time.
 
-**Current program means available for download, not currently running on the CNC.** The device's FOCAS/FTP/controller adapter performs any physical write and verifies the written bytes. The API never starts a CNC program. Apply the device's controller-specific overwrite rules and save the old controller program before replacing it.
+## Device protocol: POST requests only
 
-### Machine backup
+### 1. Collect or resume a command
 
-Read the actual program bytes from the controller, then send:
+```text
+POST /api/device/v1/commands/next
+Authorization: Bearer <device_token>
+Content-Type: application/json
+
+{}
+```
+
+Response with no command:
+
+```json
+{"job":null,"poll_seconds":15,"machine":{"id":7,"serial":"CNC-7","ip_address":"192.168.1.7","program_path":"//CNC_MEM/USER/PATH1/"}}
+```
+
+A SEND command contains `id`, `action:"SEND"`, `program_name`, `program_path`, `ip_address`, `overwrite`, `expires_at`, and `file:{size,sha256,method:"POST",url:"/api/device/v1/jobs/42/file"}`. A BACKUP command contains `action:"BACKUP"`, `source:"CURRENT_RUNNING"`, and no initial filename.
+
+Repeated collection returns the same claimed command until completion. Persist the command ID and phase locally; a repeated response must not perform another controller write. The connection settings in a command are snapshots. Stop acting when its deadline has passed. Poll at the returned interval when idle, with bounded backoff on network errors.
+
+### 2. SEND: download, safely write, verify, acknowledge
+
+```text
+POST /api/device/v1/jobs/42/file
+Authorization: Bearer <device_token>
+```
+
+The response is program bytes. Verify byte length and SHA-256 against the command and `X-Sha256` header. Reject a changed or partial download.
+
+If the destination exists and `overwrite=false`, report `FILE_EXISTS`. An explicitly authorized replacement must first read and save the old controller bytes:
+
+```text
+POST /api/device/v1/files
+Authorization: Bearer <device_token>
+Body: multipart/form-data
+  file=<old controller bytes>
+  type=BACKUP
+  job_id=42
+  program_name=O1001.nc
+  sha256=<old file SHA-256>
+```
+
+This upload is idempotent for that command and exact payload. Confirm the saved backup checksum before replacing anything. Recheck that the original program has not changed since the backup. Refuse writes to a running/incompatible controller. Write and read back the destination, then:
+
+```text
+POST /api/device/v1/jobs/42/result
+Authorization: Bearer <device_token>
+Content-Type: application/json
+
+{"status":"DONE","verified":true,"replaced":false,"sha256":"<verified new file SHA-256>"}
+```
+
+Use `replaced:true` when an existing program was replaced. The server requires explicit overwrite authorization and a saved previous-program backup in that case. A DONE result without verified checksum/read-back attestation is refused.
+
+### 3. BACKUP: read the actual current CNC program and upload
+
+Resolve the current selected/running program from the controller at command execution. Read a consistent snapshot; report `NO_ACTIVE_PROGRAM`, `UNSUPPORTED_OPERATION`, or `PROGRAM_CHANGED` if it cannot be obtained safely.
 
 ```text
 POST /api/device/v1/backup
-Authorization: Bearer {device_token}
-Content-Type: multipart/form-data; boundary=<generated by client>
-
-file=<actual program bytes>
-program_name=O1234.nc       (optional; defaults to uploaded filename)
-sha256=<digest of file>    (optional)
-note=<note>                (optional)
+Authorization: Bearer <device_token>
+Body: multipart/form-data
+  file=<actual current controller program bytes>
+  job_id=43
+  program_name=O2002.nc
+  sha256=<actual file SHA-256>
 ```
 
-The response is `201 {"file":{"id":42,"kind":"BACKUP","program_name":"O1234.nc","stored_as":"...","size":2048,"sha256":"...","created_at":"..."}}`. A backup never changes the current publication. No job ID, type field, or result call is needed. A supplied checksum mismatch returns `422 CHECKSUM_MISMATCH`.
+`201 {"file":{"id":...,"kind":"BACKUP",...}}` means the server saved the bytes and completed the command together. Retrying the same command with the same name/checksum returns the same file ID. Another Backup click creates another command and another saved version. A backup never changes the uploaded reference or writes to the CNC.
 
-The web **Backup** button downloads the newest available saved backup; it does not issue a controller-read command. Backups can also be listed with user JWT `GET /api/programs/files?machine_id={id}&kind=BACKUP` and downloaded with `GET /api/programs/files/{file_id}/download`. Existing `FETCHED` files from old integrations remain available as historical backups.
+### 4. Report a device failure
 
-## Legacy queued-transfer API
+```text
+POST /api/device/v1/jobs/43/result
+Authorization: Bearer <device_token>
+Content-Type: application/json
 
-The following contract is retained for existing integrations using `/jobs`, `/files`, and controller inventories. These requests are independent of the direct current-program API above. New uploads in the direct flow do not create SEND jobs, and a successful direct GET does not produce DONE/FAILED job state.
-
-## Legacy 1. Setup for queued transfers
-
-1. A queued-transfer integration configures the machine's **Program path**. The direct download API above does not require this path. This is the folder on the machine where
-   programs live, for example `//CNC_MEM/USER/PATH1/`.
-2. The admin clicks **Link a device → Create token**. The platform shows two
-   values, once only:
-   ```
-   MEXA_URL=https://stmapi.stmcnc.com
-   MEXA_DEVICE_TOKEN=mxd_…            (47 characters)
-   ```
-3. The device keeps them in a file only its administrator can read. Never put
-   them in code, in git, or in a log.
-4. The device calls `GET /ping`. The platform then shows the device as
-   **Online**.
-
-There is one token per machine. When an admin replaces or revokes it, the old
-token stops working at once.
-
-## 2. Connection rules
-
-| | |
-|---|---|
-| Base URL | `{MEXA_URL}/api/device/v1` |
-| Every request | header `Authorization: Bearer {MEXA_DEVICE_TOKEN}` |
-| Optional header | `X-Agent-Version: 1.0.0` (shown on the platform) |
-| Transport | HTTPS only. The device always starts the call; nothing on the factory side is opened |
-| Answers | JSON, except the program download (bytes) |
-| Errors | `{ "status": "error", "code": "JOB_NOT_OPEN", "message": "…" }` — act on `code`, log `message` |
-| Polling | every `poll_seconds` from `/ping` (15 s) |
-
-## 3. The workflows
-
-The platform keeps a queue of **jobs** for each machine. The device asks for
-the next job, does it, and says how it went.
-
-| Job `action` | Meaning | Direction |
-|---|---|---|
-| `SEND` | A user uploaded a **new program** for this machine | platform → machine |
-| `FETCH` | A user asked for a **program that is on the machine** | machine → platform |
-
-Backups need no job. The device uploads them itself: before an overwrite, and
-on its own schedule.
-
-### Workflow A — new program (platform → machine)
-
-```
-GET  /jobs/next                         → 200 job { action: "SEND", target_file, overwrite, file.sha256 }
-GET  /jobs/{id}/file                    → the program's bytes; check size and SHA-256
-     is target_file already on the machine?
-       no                               → save the new program at target_file
-       yes, overwrite = false           → POST /jobs/{id}/result  FAILED "already on the machine"   (stop)
-       yes, overwrite = true            → read it, then
-                                          POST /files  type=BACKUP job_id={id}   → must answer 201
-                                          then save the new program at target_file
-     read target_file back; it must equal what was downloaded
-POST /jobs/{id}/result  {"status":"DONE"}          (or FAILED with a message)
+{"status":"FAILED","error_code":"PATH_NOT_FOUND","message":"The configured program folder does not exist on this controller."}
 ```
 
-### Workflow B — backup (machine → platform)
+The screen shows this code/message. Useful codes include `PATH_NOT_FOUND`, `PATH_UNSUPPORTED`, `UNSUPPORTED_OPERATION`, `CONTROLLER_UNREACHABLE`, `CONTROLLER_BUSY`, `NO_ACTIVE_PROGRAM`, `PROGRAM_CHANGED`, `WRITE_FAILED`, `READ_FAILED`, and `COMMAND_INTERRUPTED`.
 
-**Before an overwrite.** This is part of Workflow A. Send `job_id` = the SEND
-job's id.
+A server can validate path syntax, not its existence on the factory LAN. The adapter must report actual controller errors. On 401/403, stop and resolve token/company/machine access. On HTTP 429, respect backoff. On a lost result reply, retry the result without rewriting the program. An interrupted/uncertain write needs read-back reconciliation or explicit failure; never blindly execute it again.
 
-**On the device's own schedule.** For example nightly, or when a program on
-the machine changes. Upload each program from the program path, with no
-`job_id`:
+## MQTT and costs
 
-```
-POST /files   type=BACKUP   program_name=O1234.nc   file=<bytes>   sha256=<hex>   → 201
-```
+Existing telemetry can continue over its current MQTT connection. A device that only publishes telemetry needs updated software to receive commands. This implementation supports POST polling without another broker or worker.
 
-### Workflow C — a user asks for a program (machine → platform)
+The same MQTT client could subscribe to a private command notification topic after broker ACLs and device support are configured, then collect the durable command through the POST API. Send small notifications over MQTT and file bytes over HTTPS; a notification does not prove delivery or CNC completion. The database command and verified device result remain authoritative.
 
-```
-GET  /jobs/next                         → 200 job { action: "FETCH", program_name, target_file }
-     read target_file from the machine
-       not there                        → POST /jobs/{id}/result  FAILED "O2001.nc is not on the machine."
-       found                            → POST /files  type=FETCHED  job_id={id}  file=<bytes>   → 201
-                                          (this completes the job: no result call needed)
-```
-
-### Workflow D — what is on the machine
-
-Every ~5 minutes, and after every job, send the list of programs in the
-program path. The platform shows it as "On the machine" and uses it to warn
-before an overwrite.
-
-```
-PUT /controller-files   {"files":[{"name":"O1234.nc","size":2048,"modified":"2026-10-05T04:00:00Z"}]}
-```
-
-### The device's loop
-
-```
-on start:            GET /ping   → learn program_path, poll_seconds
-                     if a job was interrupted last time (device restarted mid-job):
-                        POST /jobs/{that id}/result FAILED "device restarted during this job"   (never redo it)
-every poll_seconds:  GET /jobs/next
-                        204 → nothing; wait
-                        200 → do the job (Workflow A or C), then ask again at once
-every ~5 minutes:    GET /ping (the program path can be changed by an admin)
-                     PUT /controller-files
-on 401 / 403:        stop and alert: the token was revoked or the machine switched off
-on network errors:   retry, waiting longer each time (up to 5 minutes)
-```
-
-## 4. Endpoints
-
-### `GET /ping`
-
-Checks the token. It is also the heartbeat.
-
-```json
-200 {
-  "device_id": 3,
-  "machine": { "id": 7, "serial": "VMC-1", "ip_address": "192.168.200.3", "program_path": "//CNC_MEM/USER/PATH1/" },
-  "server_time": "2026-10-05T18:19:11.119Z",
-  "poll_seconds": 15
-}
-```
-
-`program_path` is `null` until an admin sets it. While it is `null` there will
-be no jobs.
-
-### `GET /jobs/next`
-
-Gives the oldest waiting job for this machine and marks it as taken by this
-device. No other call can take it again. **204** (no body) means there is
-nothing to do.
-
-```json
-200 { "job": {
-  "id": 11,
-  "action": "SEND",
-  "program_name": "O1234.nc",
-  "program_path": "//CNC_MEM/USER/PATH1/",
-  "target_file": "//CNC_MEM/USER/PATH1/O1234.nc",
-  "overwrite": true,
-  "requested_at": "2026-10-05T18:20:02.000Z",
-  "requested_by": "Priya",
-  "file": { "size": 2048, "sha256": "9f2c…", "url": "/api/device/v1/jobs/11/file" }
-} }
-```
-
-- `target_file` is `program_name` inside `program_path`. Save to it (SEND) or
-  read from it (FETCH).
-- `program_path` is the path when the job was made. It does not change if an
-  admin edits the machine's path later.
-- `file` is `null` for FETCH jobs.
-
-### `GET /jobs/{id}/file`
-
-The program of a SEND job this device has taken, as
-`application/octet-stream`. Headers:
-
-| Header | |
-|---|---|
-| `X-Sha256` | hex SHA-256 of the bytes; check it before using the file |
-| `Content-Length` | size in bytes |
-| `X-Program-Name` | URL-encoded program name |
-
-### `POST /files` — every program going from the machine to the platform
-
-Send `multipart/form-data` with these fields:
-
-| Field | Required | |
-|---|---|---|
-| `file` | yes | the program's bytes |
-| `type` | yes | `BACKUP` (a copy of what is on the machine) or `FETCHED` (the answer to a FETCH job) |
-| `job_id` | FETCHED: yes. BACKUP: before an overwrite | the job it belongs to |
-| `program_name` | no | its name on the machine. Defaults to the job's name, or the file's name |
-| `sha256` | recommended | hex SHA-256 of `file`; the platform refuses the upload if it differs |
-| `note` | no | up to 255 characters, shown to users |
-
-```json
-201 { "file": { "id": 41, "kind": "BACKUP", "program_name": "O1234.nc", "size": 1990, "sha256": "…", "created_at": "…" } }
-```
-
-### `POST /jobs/{id}/result`
-
-```json
-{ "status": "DONE" }
-{ "status": "FAILED", "message": "Controller memory is full." }
-```
-
-- `message` is required for FAILED. The person who asked reads it, so write
-  it for them.
-- Sending the same result again is accepted, which makes retries safe.
-
-### `PUT /controller-files`
-
-```json
-{ "files": [ { "name": "O1234.nc", "size": 2048, "modified": "2026-10-05T04:00:00Z", "comment": "FLANGE" } ] }
-```
-
-- At most 5000 entries per call.
-- `size`, `modified` and `comment` may be `null`.
-- Each call replaces the previous list.
-
-## 5. Error codes
-
-| HTTP | `code` | Meaning — what the device does |
-|---|---|---|
-| 401 | `TOKEN_MISSING`, `TOKEN_INVALID` | No token, or it was replaced or revoked — stop, alert |
-| 403 | `MACHINE_INACTIVE`, `COMPANY_DISABLED` | The machine or company is switched off — stop, alert |
-| 404 | `JOB_NOT_FOUND` | Not a job for this machine — drop it |
-| 409 | `JOB_NOT_OPEN` | Already finished, cancelled or timed out — drop it |
-| 409 | `WRONG_ACTION` | A file was asked for on a FETCH job — fix the device logic |
-| 409 | `NO_FILE` | DONE was reported for a FETCH job before its file was uploaded |
-| 410 | `FILE_GONE` | The program was deleted on the platform — report FAILED |
-| 400 | `BAD_TYPE`, `BAD_JOB`, `NO_FILE`, `BAD_NAME`, `NOT_TEXT`, `EMPTY`, `NO_MESSAGE`, `BAD_STATUS`, `BAD_LIST` | The request is wrong — fix and do not retry as is |
-| 413 | `TOO_LARGE` | Over the size limit (20 MB) |
-| 422 | `CHECKSUM_MISMATCH` | The upload arrived changed — send it again |
-| 429 | `TOO_MANY_REQUESTS`, `TOO_MANY_FAILURES` | Too many calls — wait, then poll at `poll_seconds` |
-| 5xx | `SERVER_ERROR` | Retry later |
-
-## 6. Rules the device must keep
-
-1. **HTTPS only.** Keep the token in a protected file and never log it.
-2. **Check every download.** Its size and SHA-256 must match before anything
-   is written to the machine.
-3. **Back up before overwriting.** Upload the program already on the machine
-   (`type=BACKUP`, with the job id). Write the new one only after that upload
-   answered 201.
-4. **Write only to `target_file`.** Never execute or start a program; the
-   operator still selects it and presses CYCLE START.
-5. **Never redo an interrupted job.** Remember the job id on disk while
-   working. After a restart, report that job FAILED.
-6. **Answer every job you took.** A job taken but not answered within
-   **15 minutes** is marked FAILED by the platform. A job no device takes
-   within **24 hours** also fails.
-7. **On 401/403, stop.** Do not retry in a loop.
-
-Limits:
-
-- A program is a text file of at most 20 MB.
-- A program name is at most 100 characters, without folder separators.
-- About 600 calls per 15 minutes per device.
-
-## 7. Trying it with curl
-
-```bash
-URL=https://stmapi.stmcnc.com/api/device/v1
-AUTH="Authorization: Bearer mxd_…"
-
-curl -s -H "$AUTH" $URL/ping
-curl -s -w '\nHTTP %{http_code}\n' -H "$AUTH" $URL/jobs/next
-curl -s -H "$AUTH" -o O1234.nc $URL/jobs/11/file && sha256sum O1234.nc
-curl -s -H "$AUTH" -F type=BACKUP -F job_id=11 -F program_name=O1234.nc -F file=@O1234-on-machine.nc $URL/files
-curl -s -H "$AUTH" -H 'Content-Type: application/json' -d '{"status":"DONE"}' $URL/jobs/11/result
-curl -s -H "$AUTH" -F type=FETCHED -F job_id=12 -F file=@O2001.nc $URL/files
-curl -s -X PUT -H "$AUTH" -H 'Content-Type: application/json' -d '{"files":[{"name":"O1234.nc","size":2048}]}' $URL/controller-files
-```
+Legacy file/publication and SEND/FETCH APIs remain for existing integrations. The new operator screen uses the acknowledged command flow above. No Postman collection or environment files are shipped.

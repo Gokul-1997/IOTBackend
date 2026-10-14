@@ -8,6 +8,7 @@
  */
 
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 
 /** Client mistakes must not surface as 500s — they pollute error monitoring
  *  and tell the caller the server is broken when the request was. */
@@ -78,7 +79,7 @@ async function resolveWindow(companyId, { date, shift_id }) {
 
   const { rows, rowCount } = await db.query(
     `SELECT id, shift_code, start_time, end_time
-     FROM shifts WHERE id = $1 AND company_id = $2`,
+     FROM shifts WHERE id = $1 AND company_id = $2${sharedEntityPlantSql('shifts')}`,
     [shiftId, companyId]
   );
   /* 404, not 500 — and deliberately the same message whether the shift is
@@ -110,6 +111,7 @@ function scope(companyId, win, machineId, startIdx = 1) {
     params.push(machineId);
     sql += ` AND machine_id = $${startIdx + 3}`;
   }
+  sql += plantSql('machine_id');
   return { sql, params };
 }
 
@@ -135,6 +137,7 @@ function scopeViaMachine(companyId, win, machineId, startIdx = 1) {
     params.push(machineId);
     sql += ` AND o.machine_id = $${startIdx + 3}`;
   }
+  sql += plantSql('m.id');
   return { sql, params };
 }
 

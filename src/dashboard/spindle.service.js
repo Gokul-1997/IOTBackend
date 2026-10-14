@@ -16,6 +16,7 @@
  * neither cutting nor standing still.
  */
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 
 const RANGES = {
   '15m': { ms: 15 * 60e3,   bucket: '15 seconds', seconds: 15 },
@@ -46,7 +47,7 @@ exports.machineSpindle = async (machineId, companyId, range = '1h', nowMs = Date
   if (!r) throw httpError(`range must be one of ${Object.keys(RANGES).join(', ')}`, 400);
 
   const { rows: m } = await db.query(
-    `SELECT id, machine_serial_no, spindle_rpm FROM machines WHERE id = $1 AND company_id = $2`, [id, companyId]);
+    `SELECT id, machine_serial_no, spindle_rpm FROM machines WHERE id = $1 AND company_id = $2${plantSql('id')}`, [id, companyId]);
   if (!m.length) return null;
 
   const from = new Date(nowMs - r.ms);

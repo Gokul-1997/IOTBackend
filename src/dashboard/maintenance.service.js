@@ -20,6 +20,7 @@
  * agree with each other.
  */
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 const { severityClass } = require('./severity');
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
@@ -63,7 +64,7 @@ async function latestSupply(companyId, machineId, from, to) {
       SELECT r.read_at, r.v1n, r.v2n, r.v3n, r.v_ln_avg, r.v12, r.v23, r.v31, r.v_ll_avg
         FROM energy_meter_readings r
         JOIN machines m ON m.id = r.machine_id AND m.company_id = $1
-       WHERE r.machine_id = $4 AND r.read_at >= $2 AND r.read_at < $3
+       WHERE r.machine_id = $4${plantSql('r.machine_id')} AND r.read_at >= $2 AND r.read_at < $3
        ORDER BY r.read_at DESC
        LIMIT 1`, [companyId, from, to, machineId]);
   } catch (err) {
@@ -123,7 +124,7 @@ exports.getMaintenanceDashboard = async (req) => {
                t.machine_id, t.machine_status, t.alarm, t.received_at
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
-        WHERE m.company_id = $1 AND m.is_active
+        WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
           AND t.received_at > NOW() - ${TELEMETRY_LOOKBACK}
           ${machineId ? 'AND t.machine_id = $2' : ''}
         ORDER BY t.machine_id, t.received_at DESC
@@ -145,7 +146,7 @@ exports.getMaintenanceDashboard = async (req) => {
       FROM counted c
       CROSS JOIN (
         SELECT COUNT(*)::int AS total FROM machines
-        WHERE company_id = $1 AND is_active ${machineId ? 'AND id = $2' : ''}
+        WHERE company_id = $1 AND is_active${plantSql('id')} ${machineId ? 'AND id = $2' : ''}
       ) tot`,
       machineId ? [companyId, machineId] : [companyId]
     ),
@@ -173,7 +174,7 @@ exports.getMaintenanceDashboard = async (req) => {
                t.fan_status, ${flags}
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
-        WHERE m.company_id = $1 AND m.is_active
+        WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
           ${machineId
             ? 'AND t.machine_id = $4 AND t.received_at >= $2 AND t.received_at < $3'
             : `AND t.received_at > NOW() - ${TELEMETRY_LOOKBACK}`}
@@ -182,7 +183,7 @@ exports.getMaintenanceDashboard = async (req) => {
       runtime AS (
         SELECT machine_id, SUM(run_seconds)::int AS run_seconds
         FROM production_hourly
-        WHERE company_id = $1 AND hour_start >= $2 AND hour_start < $3
+        WHERE company_id = $1${plantSql('machine_id')} AND hour_start >= $2 AND hour_start < $3
           ${machineId ? 'AND machine_id = $4' : ''}
         GROUP BY machine_id
       )
@@ -221,7 +222,7 @@ exports.getMaintenanceDashboard = async (req) => {
         ORDER BY oma.assigned_from DESC NULLS LAST, oma.id DESC
         LIMIT 1
       ) op ON TRUE
-      WHERE m.company_id = $1 AND m.is_active
+      WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
         ${machineId ? 'AND m.id = $4' : ''}
       ORDER BY m.machine_serial_no`,
       machineId
@@ -235,7 +236,7 @@ exports.getMaintenanceDashboard = async (req) => {
              COUNT(*)::int                                        AS total,
              COUNT(*) FILTER (WHERE is_resolved IS NOT TRUE)::int  AS open
       FROM machine_alarms
-      WHERE company_id = $1 AND started_at >= $2 AND started_at < $3
+      WHERE company_id = $1${plantSql('machine_id')} AND started_at >= $2 AND started_at < $3
         ${machineId ? 'AND machine_id = $4' : ''}
       GROUP BY 1`, alarmParams
     ),
@@ -274,7 +275,7 @@ exports.getMaintenanceDashboard = async (req) => {
                  ROUND(AVG(t.servo_insulation_res_z)::numeric, 1)::float AS servo_insulation_res_z
             FROM telemetry_raw t
             JOIN machines m ON m.id = t.machine_id AND m.company_id = $1
-           WHERE t.machine_id = $4
+           WHERE t.machine_id = $4${plantSql('t.machine_id')}
              AND t.received_at >= $2 AND t.received_at < $3
            GROUP BY 1 ORDER BY 1`,
           [companyId, win.from, win.to, machineId])

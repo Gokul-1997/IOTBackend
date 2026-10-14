@@ -10,6 +10,7 @@
  * the factory-level view that sits above it.
  */
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { severityClass } = require('./severity');
 // resolveWindow/scope moved to ./window.js when the Maintenance dashboard
 // needed the same filter behaviour — two screens filtered identically must
@@ -75,7 +76,7 @@ exports.getFactoryDashboard = async (req) => {
                t.machine_id, t.machine_status, t.alarm, t.received_at
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
-        WHERE m.company_id = $1 AND m.is_active
+        WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
           AND t.received_at > NOW() - INTERVAL '1 hour'
           ${machineId ? 'AND t.machine_id = $2' : ''}
         ORDER BY t.machine_id, t.received_at DESC
@@ -99,7 +100,7 @@ exports.getFactoryDashboard = async (req) => {
       FROM counted c
       CROSS JOIN (
         SELECT COUNT(*)::int AS total FROM machines
-        WHERE company_id = $1 AND is_active ${machineId ? 'AND id = $2' : ''}
+        WHERE company_id = $1 AND is_active${plantSql('id')} ${machineId ? 'AND id = $2' : ''}
       ) tot`,
       machineId ? [companyId, machineId] : [companyId]
     ),
@@ -134,9 +135,9 @@ exports.getFactoryDashboard = async (req) => {
       LEFT JOIN production_hourly p
         ON p.shift_id = sh.id
        AND p.company_id = sh.company_id
-       AND p.hour_start >= $2 AND p.hour_start < $3
+       AND p.hour_start >= $2 AND p.hour_start < $3${plantSql('p.machine_id')}
        ${machineId ? 'AND p.machine_id = $4' : ''}
-      WHERE sh.company_id = $1 AND sh.is_active
+      WHERE sh.company_id = $1 AND sh.is_active${sharedEntityPlantSql('sh')}
       GROUP BY sh.id, sh.shift_code, sh.shift_name, sh.start_time, sh.end_time, p.machine_id
       ORDER BY sh.shift_code`,
       machineId
@@ -152,7 +153,7 @@ exports.getFactoryDashboard = async (req) => {
              COUNT(*)::int AS events
       FROM downtime_events d
       LEFT JOIN downtime_reasons r ON r.id = d.downtime_reason_id
-      WHERE d.company_id = $1 AND d.started_at >= $2 AND d.started_at < $3
+      WHERE d.company_id = $1${plantSql('d.machine_id')} AND d.started_at >= $2 AND d.started_at < $3
         ${machineId ? 'AND d.machine_id = $4' : ''}
       GROUP BY r.name, r.category
       ORDER BY seconds DESC`,
@@ -165,7 +166,7 @@ exports.getFactoryDashboard = async (req) => {
              COUNT(*)::int AS count,
              COUNT(*) FILTER (WHERE is_resolved IS NOT TRUE)::int AS open
       FROM machine_alarms
-      WHERE company_id = $1 AND started_at >= $2 AND started_at < $3
+      WHERE company_id = $1${plantSql('machine_id')} AND started_at >= $2 AND started_at < $3
         ${machineId ? 'AND machine_id = $4' : ''}
       GROUP BY 1`,
       machineId ? [companyId, win.from, win.to, machineId] : [companyId, win.from, win.to]
@@ -189,7 +190,7 @@ exports.getFactoryDashboard = async (req) => {
         FROM machine_current_job j
         JOIN machines m ON m.id = j.machine_id AND m.company_id = $1 AND m.is_active
         LEFT JOIN components c ON c.id = j.component_id
-       WHERE j.is_active = TRUE
+       WHERE j.is_active = TRUE${plantSql('j.machine_id')}
          ${machineId ? 'AND j.machine_id = $2' : ''}`,
       machineId ? [companyId, machineId] : [companyId]
     ),
@@ -199,7 +200,7 @@ exports.getFactoryDashboard = async (req) => {
       SELECT COALESCE(SUM(energy_kwh),0)::float AS kwh,
              COALESCE(SUM(produced_qty),0)::int AS produced
         FROM production_hourly
-       WHERE company_id = $1
+       WHERE company_id = $1${plantSql('machine_id')}
          AND hour_start >= ($2::date - 1)::timestamp AT TIME ZONE 'Asia/Kolkata'
          AND hour_start <  ($2::date)::timestamp AT TIME ZONE 'Asia/Kolkata'
          ${machineId ? 'AND machine_id = $3' : ''}`,
@@ -221,7 +222,7 @@ exports.getFactoryDashboard = async (req) => {
              WHERE hour_start >= date_trunc('month', $2::date) - INTERVAL '1 month'
                AND hour_start <  ($2::date - INTERVAL '1 month' + INTERVAL '1 day')), 0)::float AS prev_kwh
     FROM production_hourly
-    WHERE company_id = $1
+    WHERE company_id = $1${plantSql('machine_id')}
       AND hour_start >= date_trunc('month', $2::date) - INTERVAL '1 month'
       AND hour_start <  (date_trunc('month', $2::date) + INTERVAL '1 month')
       ${machineId ? 'AND machine_id = $3' : ''}`,

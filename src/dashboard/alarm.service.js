@@ -14,6 +14,7 @@
  */
 
 const pool = require('../db');
+const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 
 /* The severities the screen groups by. Anything a controller sends that is
@@ -65,7 +66,7 @@ function parseId(value, label) {
  */
 function buildFilter({ companyId, machineId, shiftId, alarmType, alarmCode, severity, search, start, end }) {
   const params = [companyId];
-  let sql = `WHERE a.company_id = $1`;
+  let sql = `WHERE a.company_id = $1${plantSql('a.machine_id')}`;
 
   const add = (clause, value) => { params.push(value); sql += ` AND ${clause.replace('?', `$${params.length}`)}`; };
 
@@ -324,7 +325,7 @@ async function facets(companyId, { start, end }) {
   const { rows } = await pool.query(
     `SELECT DISTINCT a.alarm_type, a.alarm_code
        FROM machine_alarms a
-      WHERE a.company_id = $1
+      WHERE a.company_id = $1${plantSql('a.machine_id')}
         AND ($2::timestamptz IS NULL OR a.started_at >= $2)
         AND ($3::timestamptz IS NULL OR a.started_at <= $3)
       ORDER BY a.alarm_type, a.alarm_code

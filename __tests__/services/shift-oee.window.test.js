@@ -21,8 +21,8 @@ test('at 00:50 IST on the 7th: the three completed shifts with production, dated
   const log = jest.spyOn(console, 'log').mockImplementation(() => {});
 
   const prod = [
-    { machine_id: 15, total_run_seconds: 30000, total_produced_qty: 40, cycle_time_seconds: 600 },
-    { machine_id: 16, total_run_seconds: 20000, total_produced_qty: 25, cycle_time_seconds: 600 }
+    { machine_id: 15, run_seconds: 30000, produced_qty: 40, cycle_time_seconds: 600 },
+    { machine_id: 16, run_seconds: 20000, produced_qty: 25, cycle_time_seconds: 600 }
   ];
   mockDb.queueResponse(
     { rows: [{ id: 4 }] },                                                           // companies

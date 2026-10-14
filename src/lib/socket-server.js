@@ -1,4 +1,7 @@
 const jwt = require('jsonwebtoken');
+const { effectivePlantId } = require('./plant-scope');
+const { matches, revisionOf } = require('./auth-revision');
+const placement = require('./machine-placement');
 
 /*
  * Live machine data over Socket.IO, kept inside each company.
@@ -7,13 +10,15 @@ const jwt = require('jsonwebtoken');
  * valid for 15 minutes; a disabled user or company must stop getting data at
  * once), and the server puts it in its rooms from that record:
  *   user:<id>        progress meant for one person (program transfer)
- *   company:<id>     every machine update of that company
+ *   company:<id>     company-wide administrators and unassigned users
+ *   company:<id>:plant:<id> plant-bound users, from their database record
  *
  * Machine updates used to go to a plant room the client chose by sending
  * `joinPlant` — nothing checked that the plant was the user's, and every
  * machine without a plant (all of a company's machines when its admin
  * created them) went to "plant:null", which any signed-in user could join.
- * `joinPlant` is still accepted from older apps, and ignored.
+ * `joinPlant` is still accepted from older apps, and ignored. The authorized
+ * plant is loaded from the database, including for bounded subscriptions.
  */
 
 function attach(io, { db }) {
@@ -26,15 +31,22 @@ function attach(io, { db }) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
       const { rows } = await db.query(
-        `SELECT u.is_active, u.company_id, COALESCE(c.is_active, true) AS company_active
+        `SELECT u.is_active, u.company_id, u.plant_id, u.user_type, u.auth_revision, COALESCE(c.is_active, true) AS company_active
            FROM users u LEFT JOIN companies c ON c.id = u.company_id
           WHERE u.id = $1`,
         [decoded.user_id]
       );
       if (!rows[0]?.is_active || !rows[0].company_active) return next(new Error('Unauthorized'));
+      if (!matches(decoded, rows[0])) {
+        const error = new Error('TOKEN_EXPIRED');
+        error.data = { code: 'AUTH_REVISION_CHANGED' };
+        return next(error);
+      }
 
       // the company comes from the database, never from the client
-      socket.user = { ...decoded, company_id: rows[0].company_id };
+      socket.user = { ...decoded, company_id: rows[0].company_id, plant_id: rows[0].plant_id,
+        user_type: rows[0].user_type, auth_revision: revisionOf(rows[0].auth_revision) };
+      socket.plantScopeId = effectivePlantId({ ...socket.user, roles: decoded.roles || [] });
       next();
     } catch (err) {
       // a distinct code so the app refreshes its token rather than giving up
@@ -47,7 +59,23 @@ function attach(io, { db }) {
     if (userId) socket.join(`user:${userId}`);
 
     const companyId = socket.user?.company_id;
-    if (companyId) socket.join(`company:${companyId}`);
+    const plantId = socket.plantScopeId;
+    const feedRoom = plantId == null ? `company:${companyId}` : `company:${companyId}:plant:${plantId}`;
+    // The account can change after handshake authentication and before this
+    // socket is registered. Join its revocation room first, then recheck once
+    // before exposing a feed. Later committed mutations can now disconnect it.
+    const ready = (async () => {
+      const { rows } = await db.query(
+        `SELECT u.is_active, u.auth_revision, COALESCE(c.is_active, true) AS company_active
+           FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = $1`, [userId]
+      );
+      if (!socket.connected || !rows[0]?.is_active || !rows[0].company_active || !matches(socket.user, rows[0])) {
+        socket.disconnect(true);
+        return false;
+      }
+      if (companyId) socket.join(feedRoom);
+      return true;
+    })().catch(() => { socket.disconnect(true); return false; });
 
     // New clients opt in to bounded machine subscriptions; old clients keep
     // their company feed. Room names and ownership always come from the server.
@@ -57,6 +85,7 @@ function attach(io, { db }) {
     let scopeRequests = 0;
     socket.on('subscribeMachines', async (ids, acknowledge) => {
       const reply = typeof acknowledge === 'function' ? acknowledge : () => {};
+      if (!await ready) return reply({ ok: false, code: 'UNAUTHORIZED' });
       if (Date.now() - scopeWindow >= 1000) { scopeWindow = Date.now(); scopeRequests = 0; }
       if (++scopeRequests > 10) return reply({ ok: false, code: 'RATE_LIMITED' });
       if (!companyId || !Array.isArray(ids) || ids.length > 100 ||
@@ -67,16 +96,20 @@ function attach(io, { db }) {
       const uniqueIds = [...new Set(ids)];
       try {
         const { rows } = uniqueIds.length ? await db.query(
-          'SELECT id FROM machines WHERE company_id = $1 AND id = ANY($2::int[]) AND is_active = true',
-          [companyId, uniqueIds]
+          'SELECT id FROM machines WHERE company_id = $1 AND id = ANY($2::int[]) AND is_active = true AND ($3::int IS NULL OR plant_id = $3)',
+          [companyId, uniqueIds, plantId]
         ) : { rows: [] };
         if (version !== scopeVersion || !socket.connected) return reply({ ok: false, code: 'SUPERSEDED' });
         if (rows.length !== uniqueIds.length) return reply({ ok: false, code: 'FORBIDDEN' });
         // With the current in-process adapter these room operations are synchronous.
         // A distributed adapter rollout must preserve the ordering of scope changes.
-        socket.leave(`company:${companyId}`);
+        socket.leave(feedRoom);
         for (const room of machineRooms) socket.leave(room);
-        machineRooms = rows.map(row => `company:${companyId}:machine:${row.id}`);
+        // A plant-bound room includes the authorized plant. Moving a machine
+        // then stops its updates reaching an old plant's prior subscription.
+        machineRooms = rows.map(row => plantId == null
+          ? `company:${companyId}:machine:${row.id}`
+          : `company:${companyId}:plant:${plantId}:machine:${row.id}`);
         if (machineRooms.length) socket.join(machineRooms);
         reply({ ok: true });
       } catch {
@@ -93,11 +126,18 @@ function relay(io, message) {
   let data;
   try { data = JSON.parse(message); }
   catch (err) { console.error('❌ Invalid JSON from Redis:', err.message); return; }
-  // a machine with no company reaches nobody
-  if (data && data.company_id) io.to([
-    `company:${data.company_id}`,
-    `company:${data.company_id}:machine:${data.machine_id}`
-  ]).emit('machineUpdate', data);
+  // Placement comes from the API's authoritative database snapshot, updated
+  // at machine mutation commits. The collector's cached plant cannot route
+  // updates to a machine's previous plant during a move.
+  const machine = placement.resolve(data);
+  if (machine) io.to([
+    `company:${machine.company_id}`,
+    ...(machine.plant_id != null ? [
+      `company:${machine.company_id}:plant:${machine.plant_id}`,
+      `company:${machine.company_id}:plant:${machine.plant_id}:machine:${machine.id}`
+    ] : []),
+    `company:${machine.company_id}:machine:${machine.id}`
+  ]).emit('machineUpdate', { ...data, plant_id: machine.plant_id });
 }
 
 module.exports = { attach, relay };

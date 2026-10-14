@@ -1,4 +1,14 @@
 const db = require('../db');
+const { invalidateUsers } = require('../lib/auth-revision');
+
+async function advanceRoleUsers(client, roleId) {
+  const { rows } = await client.query(
+    `UPDATE users u SET auth_revision = auth_revision + 1
+      WHERE EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = $1)
+      RETURNING u.id`, [roleId]
+  );
+  return rows.map(user => user.id);
+}
 
 // ── Legacy: kept for backward-compat seed on startup ─────────
 /* SUPERVISOR is not listed here. It is one of the default roles, and those
@@ -395,15 +405,16 @@ exports.list = async ({ company_id, is_snt_super = false } = {}) => {
 
   const { rows } = await db.query(query, params);
 
-  for (const role of rows) {
-    const { rows: perms } = await db.query(
-      `SELECT p.id, p.permission_key, p.description
-       FROM permissions p
-       JOIN role_permissions rp ON rp.permission_id = p.id
-       WHERE rp.role_id = $1 ORDER BY p.permission_key`,
-      [role.id]
+  if (rows.length) {
+    const { rows: permissions } = await db.query(
+      `SELECT rp.role_id, p.id, p.permission_key, p.description
+         FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = ANY($1::int[]) ORDER BY p.permission_key`,
+      [rows.map(role => role.id)]
     );
-    role.permissions = perms;
+    const byRole = new Map(rows.map(role => [Number(role.id), []]));
+    for (const { role_id, ...permission } of permissions) byRole.get(Number(role_id))?.push(permission);
+    for (const role of rows) role.permissions = byRole.get(Number(role.id));
   }
 
   return rows;
@@ -574,7 +585,9 @@ exports.update = async (roleId, { role_name, description } = {}, actor = {}) => 
        RETURNING *`,
       [name, description === undefined ? null : String(description).slice(0, 500), roleId]
     );
+    const affectedUsers = name === null ? [] : await advanceRoleUsers(client, roleId);
     await client.query('COMMIT');
+    await invalidateUsers(affectedUsers);
     return rows[0];
   } catch (e) {
     await client.query('ROLLBACK');
@@ -604,7 +617,10 @@ exports.assignPermissions = async (roleId, permissionIds, actor = {}) => {
     if (pageIds.length) await assertCompanyMayGrant(client, actor.company_id, pageIds);
     const written = await writeRolePermissions(client, roleId, pageIds);
 
+    const affectedUsers = await advanceRoleUsers(client, roleId);
+
     await client.query('COMMIT');
+    await invalidateUsers(affectedUsers);
     return written;
   } catch (e) {
     await client.query('ROLLBACK');
@@ -705,12 +721,19 @@ exports.assign = async (user_id, role_ids, actor = {}) => {
 
     await assertAssignable(client, ids, { actor, targetCompanyId: target.company_id });
 
+    // All role mutations lock roles before users. Two replacements of the
+    // same user's role set must serialize, rather than interleave inserts.
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [user_id]);
+
     await client.query(`DELETE FROM user_roles WHERE user_id = $1`, [user_id]);
     for (const r of ids) {
       await client.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2)`, [user_id, r]);
     }
 
+    await client.query('UPDATE users SET auth_revision = auth_revision + 1 WHERE id = $1', [user_id]);
+
     await client.query('COMMIT');
+    await invalidateUsers([user_id]);
     return { user_id, role_ids: ids };
   } catch (e) {
     await client.query('ROLLBACK');

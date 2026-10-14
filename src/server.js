@@ -8,6 +8,7 @@ const db = require('./db');
 const redis = require('./redis'); // ioredis instance
 const realtime = require('./lib/realtime');
 const socketServer = require('./lib/socket-server');
+const { startListening } = require('./lib/start-listening');
 
 const PORT = process.env.PORT || 8000;
 
@@ -58,8 +59,14 @@ subscriber.on('message', (channel, message) => {
 /* ===============================
    🚀 Start Server
 ================================ */
-httpServer.listen(PORT, () => {
+startListening(httpServer, db, PORT).then(() => {
   console.log(`Server-2 running on port ${PORT}`);
+}).catch(async (err) => {
+  console.error('Startup failed; API listener remains closed:', err.message);
+  require('./cron').stop?.();
+  await Promise.allSettled([subscriber.quit(), redis.quit(), db.end()]);
+  io.close();
+  process.exit(1);
 });
 
 /* ===============================

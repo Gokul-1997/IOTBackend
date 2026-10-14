@@ -1,4 +1,5 @@
 const db = require('../db');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { ownedOrThrow } = require('../lib/tenant');
 
 /* ─────────────────────────────────────────────────────────────
@@ -9,13 +10,13 @@ exports.getMeta = async (plantId, companyId) => {
     db.query(`
       SELECT id, machine_serial_no
       FROM machines
-      WHERE company_id = $1 AND is_active = TRUE
+      WHERE company_id = $1 AND is_active = TRUE${plantSql('id', plantId, companyId)}
       ORDER BY machine_serial_no
     `, [companyId]),
     db.query(`
       SELECT id, shift_code, shift_name, start_time, end_time
       FROM shifts
-      WHERE company_id = $1 AND is_active = TRUE
+      WHERE company_id = $1 AND is_active = TRUE${sharedEntityPlantSql('shifts', plantId, companyId)}
       ORDER BY start_time
     `, [companyId])
   ]);
@@ -53,7 +54,7 @@ exports.getChartData = async ({ plantId, companyId, machineId, shiftId, date }) 
         SUM(ph.produced_qty)::int AS produced
       FROM production_hourly ph
       JOIN shifts s ON s.id = ph.shift_id
-      WHERE ph.machine_id = $1
+      WHERE ph.machine_id = $1${plantSql('ph.machine_id', plantId, companyId)}
         AND ph.shift_id   = $2
         AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
         AND ph.hour_start <  (
@@ -79,7 +80,7 @@ exports.getChartData = async ({ plantId, companyId, machineId, shiftId, date }) 
       FROM production_hourly ph
       JOIN shifts s ON s.id = ph.shift_id
       JOIN machines m ON m.id = ph.machine_id
-      WHERE m.company_id  = $1
+      WHERE m.company_id  = $1${plantSql('m.id', plantId, companyId)}
         AND ph.machine_id = $2
         AND s.company_id  = $1
         AND s.is_active   = TRUE
@@ -153,7 +154,7 @@ exports.getPartTiming = async ({ companyId, machineId, shiftStartEpoch, shiftEnd
           EXTRACT(EPOCH FROM (received_at - LAG(received_at) OVER (ORDER BY received_at)))::int
         ) AS interval_sec
       FROM telemetry_raw
-      WHERE machine_id  = $1
+      WHERE machine_id  = $1${plantSql('machine_id')}
         AND received_at >= to_timestamp($2)
         AND received_at <  to_timestamp($3)
     ),

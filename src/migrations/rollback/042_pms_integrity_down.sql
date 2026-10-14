@@ -1,0 +1,10 @@
+BEGIN;
+ALTER TABLE machines DROP CONSTRAINT IF EXISTS fk_machine_line_placement_pms;
+ALTER TABLE machines DROP CONSTRAINT IF EXISTS fk_machine_plant_company_pms;
+ALTER TABLE line DROP CONSTRAINT IF EXISTS fk_line_plant_company_pms;
+DROP INDEX IF EXISTS uq_line_id_company_plant_pms;
+DROP INDEX IF EXISTS uq_plants_id_company_pms;
+DROP INDEX IF EXISTS uq_ticket_preventive_live;
+DROP INDEX IF EXISTS uq_machine_current_job_active;
+ALTER TABLE machine_current_job DROP COLUMN IF EXISTS cycle_time_seconds;
+COMMIT;

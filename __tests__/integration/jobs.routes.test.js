@@ -1,313 +1,136 @@
-/*
- * HTTP integration tests for /api/jobs
- *
- * Exercises the full middleware stack:
- *   auth middleware → validate middleware → controller → service → DB
- *
- * Covers:
- *  POST /api/jobs/start
- *    TC-JR-01  400 when machine_id missing
- *    TC-JR-02  400 when component_id missing
- *    TC-JR-03  400 when job_start missing
- *    TC-JR-04  401 when no auth token
- *    TC-JR-05  500 when machine already has active job
- *    TC-JR-06  500 when component not found for machine
- *    TC-JR-07  200 on successful job start
- *
- *  POST /api/jobs/stop
- *    TC-JR-20  400 when machine_id missing
- *    TC-JR-21  401 when no auth token
- *    TC-JR-22  500 when no active job to stop
- *    TC-JR-23  200 on successful job stop
- *
- *  GET /api/jobs/available-machines
- *    TC-JR-30  401 when no auth token
- *    TC-JR-31  200 returns list of machines
- *
- *  GET /api/jobs/current
- *    TC-JR-40  401 when no auth token
- *    TC-JR-41  200 returns current active jobs
- *    TC-JR-42  200 returns empty array when no active jobs
- *
- *  GET /api/jobs/history
- *    TC-JR-50  401 when no auth token
- *    TC-JR-51  200 returns job history
- */
-
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
-
 const request = require('supertest');
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const { buildApp, fakeUser } = require('../helpers/testApp');
-
 beforeEach(() => resetDb());
-
-// ── app factories ─────────────────────────────────────────────────────────────
-
-function makeApp(user = fakeUser()) {
+function app(user = fakeUser({ plant_id: null }), grants = [], productionErrors = false) {
   jest.resetModules();
-  jest.doMock('../../src/middleware/auth.middleware', () =>
-    (req, _res, next) => { req.user = user; next(); });
+  jest.doMock('../../src/middleware/auth.middleware', () => (req, res, next) => {
+    if (!user) return res.status(401).json({ message: 'Unauthorized' });
+    req.user = user; next();
+  });
+  jest.doMock('../../src/redis', () => ({ get: jest.fn(async () => JSON.stringify(grants)), set: jest.fn() }));
   jest.doMock('../../src/db', () => mockDb);
   const router = require('../../src/job/job.routes');
-  return buildApp({ mountPath: '/api/jobs', router });
+  if (!productionErrors) return buildApp({ mountPath: '/api/jobs', router });
+  const express = require('express');
+  const instance = express();
+  instance.use(express.json());
+  instance.use('/api/jobs', router);
+  instance.use(require('../../src/middleware/error.middleware'));
+  return instance;
+}
+const body = { machine_id: 7, component_id: 3, job_start: '2026-10-13T08:00:00+05:30' };
+const response = (rows = [], rowCount = rows.length) => ({ rows, rowCount });
+const machine = { id: 7, plant_id: 8 };
+const writes = () => mockDb.calls().filter(c => /^\s*(INSERT|UPDATE)\b/.test(c.text));
+function startFixture(existing = [], component = [{ part_name: 'Part A', target: 50, cycle_time_seconds: 60 }]) {
+  mockDb.queueResponse(response(), response([machine]), response(existing), response(component), response([{ id: 9 }]), response());
 }
 
-function makeUnauthApp() {
-  jest.resetModules();
-  jest.doMock('../../src/middleware/auth.middleware', () =>
-    (_req, res) => res.status(401).json({ success: false, message: 'Unauthorized' }));
-  jest.doMock('../../src/db', () => mockDb);
-  const router = require('../../src/job/job.routes');
-  return buildApp({ mountPath: '/api/jobs', router });
-}
-
-const VALID_START = {
-  machine_id:   1,
-  component_id: 2,
-  job_start:    '2026-05-01T08:00:00'
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/jobs/start
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('POST /api/jobs/start', () => {
-  test('TC-JR-01 400 when machine_id missing', async () => {
-    const res = await request(makeApp())
-      .post('/api/jobs/start')
-      .send({ component_id: 2, job_start: '2026-05-01T08:00:00' });
-    expect(res.status).toBe(400);
+describe('job authorization', () => {
+  test.each(['start', 'stop'])('unauthenticated %s is refused', async action => {
+    expect((await request(app(null)).post(`/api/jobs/${action}`).send(body)).status).toBe(401);
   });
-
-  test('TC-JR-02 400 when component_id missing', async () => {
-    const res = await request(makeApp())
-      .post('/api/jobs/start')
-      .send({ machine_id: 1, job_start: '2026-05-01T08:00:00' });
-    expect(res.status).toBe(400);
+  test('a role with view alone cannot start or stop jobs', async () => {
+    const user = fakeUser({ roles: ['Line viewer'], permissions: ['page:job:view'] });
+    for (const action of ['start', 'stop']) expect((await request(app(user)).post(`/api/jobs/${action}`).send(body)).status).toBe(403);
+    expect(writes()).toHaveLength(0);
   });
-
-  test('TC-JR-03 400 when job_start missing', async () => {
-    const res = await request(makeApp())
-      .post('/api/jobs/start')
-      .send({ machine_id: 1, component_id: 2 });
-    expect(res.status).toBe(400);
+  test('role and company must grant the same action', async () => {
+    const user = fakeUser({ roles: ['Line setter'], permissions: ['page:job:create'] });
+    expect((await request(app(user, ['page:job:view'])).post('/api/jobs/start').send(body)).status).toBe(403);
+    expect(writes()).toHaveLength(0);
   });
+});
 
-  test('TC-JR-04 401 when no auth token', async () => {
-    const res = await request(makeUnauthApp())
-      .post('/api/jobs/start')
-      .send(VALID_START);
-    expect(res.status).toBe(401);
+describe('start job', () => {
+  test.each(['machine_id', 'component_id', 'job_start'])('%s is required', async key => {
+    const missing = { ...body }; delete missing[key];
+    expect((await request(app()).post('/api/jobs/start').send(missing)).status).toBe(400);
   });
-
-  test('TC-JR-05 500 when machine already has an active job', async () => {
-    mockDb.queueResponse({
-      rows: [{ id: 99, part_name: 'OldPart' }],
-      rowCount: 1
-    });
-
-    const res = await request(makeApp())
-      .post('/api/jobs/start')
-      .send(VALID_START);
-
+  test('an invalid date is refused before a connection is acquired', async () => {
+    expect((await request(app()).post('/api/jobs/start').send({ ...body, job_start: 'wrong' })).status).toBe(400);
+    expect(mockDb.connect).not.toHaveBeenCalled();
+  });
+  test('foreign or unavailable machine is refused before component lookup or insertion', async () => {
+    mockDb.queueResponse(response(), response());
+    expect((await request(app()).post('/api/jobs/start').send(body)).status).toBe(404);
+    expect(writes()).toHaveLength(0);
+    expect(mockDb.calls()[1].params).toEqual([7, 4, null]);
+    expect(mockDb.calls()[1].text).toMatch(/company_id = \$2/);
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+  });
+  test('plant-bound caller cannot operate another or unassigned plant machine', async () => {
+    mockDb.queueResponse(response(), response());
+    expect((await request(app(fakeUser({ plant_id: 8 }))).post('/api/jobs/start').send(body)).status).toBe(404);
+    expect(mockDb.calls()[1].text).toMatch(/plant_id = \$3/);
+    expect(mockDb.calls()[1].params).toEqual([7, 4, 8]);
+  });
+  test('an already active job is a conflict and rolls back', async () => {
+    startFixture([{ id: 1, part_name: 'Old part' }]);
+    expect((await request(app()).post('/api/jobs/start').send(body)).status).toBe(409);
+    expect(writes()).toHaveLength(0);
+  });
+  test('component lookup is bound to both selected machine and company', async () => {
+    startFixture([], []);
+    expect((await request(app()).post('/api/jobs/start').send(body)).status).toBe(404);
+    expect(mockDb.calls()[3].params).toEqual([3, 7, 4]);
+    expect(mockDb.calls()[3].text).toMatch(/company_id = \$3/);
+    expect(writes()).toHaveLength(0);
+  });
+  test('success locks the machine then stores tenant, plant and cycle snapshot in one transaction', async () => {
+    startFixture();
+    const res = await request(app()).post('/api/jobs/start').send({ ...body, company_id: 99 });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ id: 9 });
+    expect(mockDb.calls()[1].text).toMatch(/FOR UPDATE/);
+    expect(mockDb.calls().at(-1).text).toBe('COMMIT');
+    expect(writes()[0].params).toEqual([8, 4, 7, 3, 'Part A', 50, new Date(body.job_start), 60]);
+  });
+  test('unexpected database errors pass through the safe production error handler', async () => {
+    const failure = new Error('column secret_account_token does not exist');
+    failure.code = '42703';
+    mockDb.queueResponse(response());
+    mockDb.queueError(failure);
+    const res = await request(app(fakeUser({ plant_id: null }), [], true)).post('/api/jobs/start').send(body);
     expect(res.status).toBe(500);
-    expect(res.body.message).toMatch(/already has an active job/i);
-  });
-
-  test('TC-JR-06 500 when component not found or wrong machine', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 }); // no active job
-    mockDb.queueResponse({ rows: [], rowCount: 0 }); // component lookup fails
-
-    const res = await request(makeApp())
-      .post('/api/jobs/start')
-      .send(VALID_START);
-
-    expect(res.status).toBe(500);
-    expect(res.body.message).toMatch(/does not belong to this machine/i);
-  });
-
-  test('TC-JR-07 200 on successful job start', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 });                        // no active job
-    mockDb.queueResponse({ rows: [{ part_name: 'PartA', target: 50 }] });   // component found
-    mockDb.queueResponse({ rows: [], rowCount: 1 });                         // INSERT
-
-    const res = await request(makeApp())
-      .post('/api/jobs/start')
-      .send(VALID_START);
-
-    expect(res.status).toBe(200);
-    expect(mockDb.calls()[2].text).toMatch(/INSERT INTO machine_current_job/);
-  });
-
-  test('TC-JR-08 DB INSERT uses company_id from authenticated user', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 });
-    mockDb.queueResponse({ rows: [{ part_name: 'PartA', target: 50 }] });
-    mockDb.queueResponse({ rows: [], rowCount: 1 });
-
-    const user = fakeUser({ company_id: 7 });
-    await request(makeApp(user))
-      .post('/api/jobs/start')
-      .send(VALID_START);
-
-    expect(mockDb.calls()[2].params[0]).toBe(7);
+    expect(res.body).toMatchObject({ status: 'error', message: 'Something went wrong on the server. Please try again.', ref: expect.any(String) });
+    expect(JSON.stringify(res.body)).not.toMatch(/secret_account_token|42703/);
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/jobs/stop
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('POST /api/jobs/stop', () => {
-  test('TC-JR-20 400 when machine_id missing', async () => {
-    const res = await request(makeApp())
-      .post('/api/jobs/stop')
-      .send({});
-    expect(res.status).toBe(400);
+describe('stop job', () => {
+  test('no active job is a conflict', async () => {
+    mockDb.queueResponse(response(), response([machine]), response());
+    expect((await request(app()).post('/api/jobs/stop').send({ machine_id: 7 })).status).toBe(409);
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
   });
-
-  test('TC-JR-21 401 when no auth token', async () => {
-    const res = await request(makeUnauthApp())
-      .post('/api/jobs/stop')
-      .send({ machine_id: 1 });
-    expect(res.status).toBe(401);
-  });
-
-  test('TC-JR-22 500 when no active job to stop', async () => {
-    mockDb.queueResponse({ rows: [], rowCount: 0 });
-
-    const res = await request(makeApp())
-      .post('/api/jobs/stop')
-      .send({ machine_id: 1 });
-
-    expect(res.status).toBe(500);
-    expect(res.body.message).toMatch(/No active job/i);
-  });
-
-  test('TC-JR-23 200 on successful job stop', async () => {
-    mockDb.queueResponse({ rows: [{ id: 1, part_name: 'PartA' }], rowCount: 1 });
-    mockDb.queueResponse({ rows: [], rowCount: 1 });
-
-    const res = await request(makeApp())
-      .post('/api/jobs/stop')
-      .send({ machine_id: 1 });
-
-    expect(res.status).toBe(200);
-    expect(mockDb.calls()[1].text).toMatch(/UPDATE machine_current_job/);
-    expect(mockDb.calls()[1].text).toMatch(/is_active = false/);
-  });
-
-  test('TC-JR-24 stop scoped to authenticated user company_id', async () => {
-    mockDb.queueResponse({ rows: [{ id: 1, part_name: 'PartA' }], rowCount: 1 });
-    mockDb.queueResponse({ rows: [], rowCount: 1 });
-
-    const user = fakeUser({ company_id: 9 });
-    await request(makeApp(user))
-      .post('/api/jobs/stop')
-      .send({ machine_id: 1 });
-
-    expect(mockDb.calls()[0].params[1]).toBe(9);
+  test('update itself has the company predicate under the same machine lock', async () => {
+    mockDb.queueResponse(response(), response([machine]), response([{ id: 9 }]), response());
+    expect((await request(app()).post('/api/jobs/stop').send({ machine_id: 7 })).status).toBe(200);
+    expect(mockDb.calls()[1].text).toMatch(/FOR UPDATE/);
+    expect(writes()[0].params).toEqual([7, 4]);
+    expect(writes()[0].text).toMatch(/company_id = \$2/);
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/jobs/available-machines
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('GET /api/jobs/available-machines', () => {
-  test('TC-JR-30 401 when no auth token', async () => {
-    const res = await request(makeUnauthApp()).get('/api/jobs/available-machines');
-    expect(res.status).toBe(401);
+describe('job reads', () => {
+  test.each(['/available-machines', '/current', '/history'])('%s needs authentication', async path => {
+    expect((await request(app(null)).get(`/api/jobs${path}`)).status).toBe(401);
   });
-
-  test('TC-JR-31 200 returns list of available machines', async () => {
-    mockDb.queueResponse({
-      rows: [
-        { id: 1, machine_serial_no: 'VMC-1-F' },
-        { id: 2, machine_serial_no: 'VMC-2-F' }
-      ]
-    });
-
-    const res = await request(makeApp()).get('/api/jobs/available-machines');
-
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.data || res.body)).toBe(true);
+  test('bounded history carries page state and stable ordering', async () => {
+    mockDb.queueResponse(response([{ job_id: 9 }]), response([{ total: 37 }]));
+    const res = await request(app()).get('/api/jobs/history?page=2&limit=10');
+    expect(res.body).toMatchObject({ data: [{ job_id: 9 }], total: 37, page: 2, limit: 10, totalPages: 4 });
+    expect(mockDb.calls()[0].params).toEqual([4, 10, 10]);
+    expect(mockDb.calls()[0].text).toMatch(/ORDER BY j.started_at DESC, j.id DESC/);
   });
-
-  test('TC-JR-32 200 returns empty array when all machines are busy', async () => {
-    mockDb.queueResponse({ rows: [] });
-
-    const res = await request(makeApp()).get('/api/jobs/available-machines');
-
-    expect(res.status).toBe(200);
-    const data = res.body.data ?? res.body;
-    expect(Array.isArray(data) ? data.length : 0).toBe(0);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/jobs/current
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('GET /api/jobs/current', () => {
-  test('TC-JR-40 401 when no auth token', async () => {
-    const res = await request(makeUnauthApp()).get('/api/jobs/current');
-    expect(res.status).toBe(401);
-  });
-
-  test('TC-JR-41 200 returns current active jobs', async () => {
-    // the list endpoints run the page query and a COUNT together
-    mockDb.queueResponse({
-      rows: [{
-        machine_id: 1, machine_serial_no: 'VMC-1-F',
-        job_id: 10, part_name: 'PartA', target_qty: 50,
-        started_at: '2026-05-01T08:00:00Z'
-      }]
-    }, { rows: [{ total: 1 }] });
-
-    const res = await request(makeApp()).get('/api/jobs/current');
-    expect(res.status).toBe(200);
-  });
-
-  test('TC-JR-42 200 returns empty when no active jobs', async () => {
-    mockDb.queueResponse({ rows: [] }, { rows: [{ total: 0 }] });
-
-    const res = await request(makeApp()).get('/api/jobs/current');
-    expect(res.status).toBe(200);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/jobs/history
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('GET /api/jobs/history', () => {
-  test('TC-JR-50 401 when no auth token', async () => {
-    const res = await request(makeUnauthApp()).get('/api/jobs/history');
-    expect(res.status).toBe(401);
-  });
-
-  test('TC-JR-51 200 returns job history', async () => {
-    mockDb.queueResponse({
-      rows: [
-        {
-          machine_serial_no: 'VMC-1-F', part_name: 'PartA',
-          target_qty: 50, started_at: '2026-05-01T08:00:00Z',
-          ended_at: '2026-05-01T20:00:00Z', is_active: false
-        }
-      ]
-    }, { rows: [{ total: 1 }] });
-
-    const res = await request(makeApp()).get('/api/jobs/history');
-    expect(res.status).toBe(200);
-  });
-
-  test('TC-JR-52 history is scoped to authenticated company_id', async () => {
-    mockDb.queueResponse({ rows: [] });
-
-    const user = fakeUser({ company_id: 11 });
-    await request(makeApp(user)).get('/api/jobs/history');
-
-    expect(mockDb.calls()[0].params[0]).toBe(11);
+  test('plant scope applies to both history data and count', async () => {
+    mockDb.queueResponse(response(), response([{ total: 0 }]));
+    await request(app(fakeUser({ plant_id: 8 }))).get('/api/jobs/history');
+    for (const call of mockDb.calls()) expect(call.text).toMatch(/m.plant_id = \$2/);
+    expect(mockDb.calls()[0].params).toEqual([4, 8, 20, 0]);
   });
 });

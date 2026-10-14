@@ -13,7 +13,7 @@ exports.getReasons = async (req, res) => {
 };
 
 exports.createReason = async (req, res) => {
-  const data = await service.createReason({ ...req.body, company_id: req.user.company_id });
+  const data = await service.createReason({ ...req.body, company_id: req.user.company_id, plant_id: req.plantScopeId });
   res.status(201).json({ success: true, data });
 };
 
@@ -23,16 +23,16 @@ exports.updateReason = async (req, res) => {
 };
 
 exports.logEvent = async (req, res) => {
-  const data = await service.logEvent({ ...req.body, company_id: req.user.company_id, entered_by: req.user.id });
+  const data = await service.logEvent({ ...req.body, company_id: req.user.company_id, plant_id: req.plantScopeId, entered_by: req.user.id });
   res.status(201).json({ success: true, data });
 };
 
 exports.getEvents = async (req, res) => {
-  const result = await service.getEvents({ ...req.query, company_id: req.user.company_id });
+  const result = await service.getEvents({ ...req.query, company_id: req.user.company_id, plant_id: req.plantScopeId });
   res.json({ success: true, ...result });
 };
 
 exports.getDowntimeSummary = async (req, res) => {
-  const data = await service.getDowntimeSummary({ ...req.query, company_id: req.user.company_id });
+  const data = await service.getDowntimeSummary({ ...req.query, company_id: req.user.company_id, plant_id: req.plantScopeId });
   res.json({ success: true, data });
 };

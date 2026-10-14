@@ -23,6 +23,7 @@
  */
 
 const db = require('../db');
+const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 
 const STATUSES   = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
@@ -96,7 +97,7 @@ function buildFilter(q) {
     i++;
   }
 
-  return { sql: where.join(' AND '), params, start, end, machineId, next: i };
+  return { sql: where.join(' AND ') + plantSql('t.machine_id'), params, start, end, machineId, next: i };
 }
 
 /* Repair hours, from raised to resolved. Written once and reused so the

@@ -263,7 +263,7 @@ describe('the company\'s default roles are its own to change', () => {
     mockDb.queueResponse(
       {}, { rows: [{ id: 51, role_name: 'SUPERVISOR', is_system: false, company_id: 4 }] },
       { rows: [] },                                           // name free
-      { rows: [{ id: 51, role_name: 'SHIFT LEAD' }] }, {}     // UPDATE, COMMIT
+      { rows: [{ id: 51, role_name: 'SHIFT LEAD' }] }, { rows: [] }, {} // UPDATE, revision, COMMIT
     );
     await expect(svc.update(51, { role_name: 'SHIFT LEAD' }, companyA))
       .resolves.toMatchObject({ role_name: 'SHIFT LEAD' });

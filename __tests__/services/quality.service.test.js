@@ -6,7 +6,7 @@
  *    TC-QS-01  returns machine + production + oee + hourly
  *    TC-QS-02  accepted = produced - reject - rework
  *    TC-QS-03  accepted is clamped to 0 when reject+rework > produced
- *    TC-QS-04  quality_percent = 0 when produced = 0
+ *    TC-QS-04  quality_percent is unknown when produced = 0
  *    TC-QS-05  OEE = 0 when no production data
  *    TC-QS-06  upserts oee_shift_summary when produced > 0
  *    TC-QS-07  does NOT upsert oee_shift_summary when produced = 0
@@ -61,10 +61,8 @@ function queueDashboard({
   mockDb.queueResponse(
     { rows: [MACHINE_ROW] },                                  // machine
     { rows: [SHIFT_ROW] },                                    // shift
-    { rows: [{ produced, run_seconds: runSeconds }] },        // prod totals
-    { rows: [{ reject, rework }] },                           // quality entries
-    { rows: [], rowCount: 0 },                                // oee_shift_summary upsert
-    { rows: hourly }                                          // hourly rows
+    { rows: hourly.length ? hourly : [{ hour_start: '2026-05-06T02:30:00Z', produced_qty: produced, run_seconds: runSeconds, idle_seconds: 0, cycle_time_seconds: 60, planned_seconds: 3600 }] }, // one observed shift query
+    { rows: [{ reject, rework }] }                            // quality entries
   );
 }
 
@@ -107,33 +105,34 @@ describe('getQualityDashboardService', () => {
     expect(production.accepted).toBe(0);
   });
 
-  test('TC-QS-04 quality_percent = 0 when produced = 0', async () => {
+  test('TC-QS-04 quality_percent is unknown when produced = 0', async () => {
     queueDashboard({ produced: 0, runSeconds: 0, reject: 0, rework: 0 });
 
     const { production } = await quality.getQualityDashboardService(BASE_ARGS);
 
-    expect(production.quality_percent).toBe(0);
+    expect(production.quality_percent).toBeNull();
     expect(production.produced).toBe(0);
   });
 
-  test('TC-QS-05 OEE = 0 when no production data', async () => {
+  test('TC-QS-05 OEE is unknown when no production was measured', async () => {
     queueDashboard({ produced: 0, runSeconds: 0 });
 
     const { oee } = await quality.getQualityDashboardService(BASE_ARGS);
 
-    expect(oee.oee).toBe(0);
+    expect(oee.oee).toBeNull();
     expect(oee.availability).toBe(0);
   });
 
-  test('TC-QS-06 upserts oee_shift_summary when produced > 0', async () => {
+  test('TC-QS-06 GET never writes historical summaries', async () => {
     queueDashboard({ produced: 10, runSeconds: 1800 });
 
     await quality.getQualityDashboardService(BASE_ARGS);
 
     const calls = mockDb.calls();
     const upsertCall = calls.find(c => c.text.includes('oee_shift_summary'));
-    expect(upsertCall).toBeDefined();
-    expect(upsertCall.text).toMatch(/ON CONFLICT/i);
+    expect(upsertCall).toBeUndefined();
+    expect(calls).toHaveLength(4);
+    expect(calls.every(c => /^\s*(SELECT|WITH)/.test(c.text))).toBe(true);
   });
 
   test('TC-QS-07 does NOT upsert oee_shift_summary when produced = 0', async () => {
@@ -192,6 +191,7 @@ const UPSERT_ARGS = {
 };
 
 function queueUpsert({ produced = 10, existingId = null } = {}) {
+  mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }], rowCount: 1 }); // BEGIN + authorized machine lock
   // produced_qty validation query
   mockDb.queueResponse({ rows: [{ produced }] });
   // existing entry lookup
@@ -201,6 +201,7 @@ function queueUpsert({ produced = 10, existingId = null } = {}) {
   );
   // INSERT or UPDATE
   mockDb.queueResponse({ rows: [], rowCount: 1 });
+  mockDb.queueResponse({ rows: [] }); // COMMIT
 }
 
 describe('upsertQualityEntryService', () => {
@@ -254,7 +255,7 @@ describe('upsertQualityEntryService', () => {
 
   test('TC-QU-05 422 when reject+rework exceeds produced_qty', async () => {
     // produced = 5, reject = 4, rework = 3 → total 7 > 5
-    mockDb.queueResponse({ rows: [{ produced: 5 }] });
+    mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }], rowCount: 1 }, { rows: [{ produced: 5 }] });
 
     await expect(
       quality.upsertQualityEntryService({ ...UPSERT_ARGS, reject_qty: 4, rework_qty: 3 })
@@ -303,5 +304,38 @@ describe('upsertQualityEntryService', () => {
     );
     expect(lookupCall).toBeDefined();
     expect(lookupCall.text).toMatch(/COALESCE\(shift_date/i);
+  });
+
+  test('first saves hold the authorized machine lock until commit', async () => {
+    queueUpsert();
+    await quality.upsertQualityEntryService(UPSERT_ARGS);
+    const calls = mockDb.calls();
+    expect(calls[0].text).toBe('BEGIN');
+    expect(calls[1].text).toMatch(/FROM machines WHERE id=\$1 AND company_id=\$2.*FOR UPDATE/);
+    expect(calls[1].params).toEqual([23,4]);
+    expect(calls.at(-1).text).toBe('COMMIT');
+    expect((await mockDb.connect.mock.results[0].value).release).toHaveBeenCalledTimes(1);
+  });
+
+  test('legacy duplicate totals refuse the edit and preserve both rows', async () => {
+    mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }] }, { rows: [{ produced: 10 }] }, { rows: [{ id: 55 }, { id: 56 }] });
+    await expect(quality.upsertQualityEntryService(UPSERT_ARGS)).rejects.toMatchObject({ status: 409, code: 'QUALITY_TOTALS_AMBIGUOUS' });
+    expect(mockDb.calls().some(call=>/INSERT INTO quality_entries|UPDATE quality_entries/.test(call.text))).toBe(false);
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+    expect((await mockDb.connect.mock.results[0].value).release).toHaveBeenCalledTimes(1);
+  });
+
+  test('an insert failure rolls back and releases the checked-out client', async () => {
+    mockDb.queueResponse({ rows: [] }, { rows: [{ id: 23 }] }, { rows: [{ produced: 10 }] }, { rows: [] }, new Error('injected write failure'));
+    await expect(quality.upsertQualityEntryService(UPSERT_ARGS)).rejects.toThrow('injected write failure');
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+    expect((await mockDb.connect.mock.results[0].value).release).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['2026-02-31','2026-13-01','2026-05-06T00:00:00Z','06/05/2026'])('invalid calendar date %s is rejected before connecting', async date => {
+    await expect(quality.upsertQualityEntryService({...UPSERT_ARGS,date})).rejects.toMatchObject({status:400});
+    await expect(quality.getQualityDashboardService({...BASE_ARGS,date})).rejects.toMatchObject({status:400});
+    expect(mockDb.connect).not.toHaveBeenCalled();
+    expect(mockDb.calls()).toHaveLength(0);
   });
 });
