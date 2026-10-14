@@ -167,6 +167,12 @@ Reproduce the additional PostgreSQL check with `node tools/architecture/verify-l
 
 Existing S3 bytes were not fetched, moved or deleted. Re-upload/import and verify them before a disconnected on-prem move. Back up the database, unified file root, legacy program root and collector journal together; the database-only backup script's optional S3 off-host copy is independent of application uploads. No deployment, production schema change or push was performed for this storage change.
 
+## Migration 046 compatibility correction, 15 October 2026
+
+The original plant-reference delete action used PostgreSQL 15-only column-specific `SET NULL` syntax. An isolated PostgreSQL 14.18 source build reproduced the exact server-reported syntax error near `(` and confirmed the real migration runner left no partial media table or applied ledger entry. The corrected pending 046 retains the composite tenant foreign key and uses an invoker plant-deletion trigger to clear only `plant_id`. Rollback removes the new trigger/function only after refusing a nonempty catalogue.
+
+The corrected migration/storage fixture passed on actual PostgreSQL 14.18 and 18.3, including failed-migration retry, atomic ledger recording, repeated application/empty rollback, cross-tenant rejection, moved-machine access, blocked plant deletion restoring catalogue metadata and restricted-role column-update permissions. Nine migration-runner unit tests passed. The old-version fixture can be repeated with `MEDIA_FIXTURE_PG_BIN=/path/to/postgresql14/bin node tools/architecture/verify-local-media.cjs`; it uses only temporary storage and its own Unix-socket database. No customer database, migration ledger or server was modified. Already-applied migration checksums still require a separately reviewed upgrade; drift checks are not bypassed.
+
 ## Remaining release gates
 
 1. Export and review the real core schema, PostgreSQL/Timescale versions, constraints, indexes and grants; package a verified complete base schema so a new installation is reproducible. Resolve legacy invalid placements/references and duplicate operational entries without deleting history blindly.

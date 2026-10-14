@@ -9,6 +9,8 @@ DO $$ BEGIN
     END IF;
   END IF;
 END $$;
+DROP TRIGGER IF EXISTS detach_local_media_before_plant_delete ON public.plants;
+DROP FUNCTION IF EXISTS public.detach_local_media_before_plant_delete();
 DROP TABLE IF EXISTS media_assets;
 DROP INDEX IF EXISTS uq_plants_id_company_media;
 
