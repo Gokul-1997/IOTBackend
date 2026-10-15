@@ -76,6 +76,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   inject('src/db.js',pool);inject('src/redis.js',redis);
   inject('src/utils/nodemailer/index.js',{sendMail:async()=>{throw new Error('Fixture never sends email');}});
   inject('src/audit/audit.service.js',{log:()=>{throw new Error('Fixture should not invoke audited writes');}});
+  process.env.STORAGE_ROOT=path.join(temp,'storage');
   process.env.PROGRAM_TRANSFER_DIR=path.join(temp,'program-files');
   await pool.query(`
    ALTER TABLE machines ADD COLUMN ip_address TEXT, ADD COLUMN controller_ip TEXT, ADD COLUMN program_path TEXT;
@@ -89,17 +90,17 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
    INSERT INTO users(id,company_id,plant_id,username,is_active)VALUES(4,5,9,'Foreign technician',TRUE),(5,4,8,'Inactive technician',FALSE);
   `);
   for(const name of ['039_program_current.sql','040_program_commands.sql'])await pool.query(fs.readFileSync(path.join(repo,'src/migrations',name),'utf8'));
-  fs.mkdirSync(path.join(temp,'program-files','own'),{recursive:true});fs.writeFileSync(path.join(temp,'program-files','own','own.nc'),'M30');
+  await pool.query("UPDATE program_files SET folder='company-'||company_id||'/machine-'||machine_id");
+  fs.mkdirSync(path.join(temp,'program-files','company-4','machine-7'),{recursive:true});
+  fs.writeFileSync(path.join(temp,'program-files','company-4','machine-7','own.nc'),'M30');
   process.env.JWT_SECRET='isolated-plant-read-secret';
   const meter = require(path.join(repo,'src/dashboard/energy-meter.service'));
   await pool.query(`CREATE TABLE energy_meter_readings(machine_id INT,read_at TIMESTAMPTZ,${meter.READING_COLUMNS.map(c=>`${c} NUMERIC`).join(',')}); INSERT INTO energy_meter_readings(machine_id,read_at,kwh_total,kw_total,v_ll_avg)VALUES(7,NOW(),100,2,415),(10,NOW(),500,3,415)`);
   await pool.query(`CREATE FUNCTION time_bucket(INTERVAL,TIMESTAMPTZ) RETURNS TIMESTAMPTZ LANGUAGE SQL IMMUTABLE AS 'SELECT date_bin($1,$2,TIMESTAMPTZ ''2000-01-01 00:00:00+00'')'`);
-  inject('src/reports/pdf.util.js',{generateOEEPdf:async rows=>Buffer.from(JSON.stringify(rows)),generateMaintenancePdf:async rows=>Buffer.from(JSON.stringify(rows))});
   const app=express();app.use(express.json());
   app.use('/api/dashboard',require(path.join(repo,'src/dashboard/dashboard.routes')));
   app.use('/api/reports',require(path.join(repo,'src/reports/report.routes')));
   app.use('/api/reports',require(path.join(repo,'src/reports/operator.report.routes')));
-  app.use('/api/pdf',require(path.join(repo,'src/reports/pdf.routes')));
   app.use('/api/oee',require(path.join(repo,'src/oee/oee.routes')));
   app.use('/api/charts',require(path.join(repo,'src/charts/charts.routes')));
   app.use('/api/master',require(path.join(repo,'src/master/master.routes')));
@@ -151,7 +152,6 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   assert.deepEqual((await get('/api/reports/operator-performance')).data.map(r=>r.operator_id),[1]);
   assert.deepEqual((await get('/api/oee/reports')).data.map(r=>r.machine_id),[7]);
   assert(!String(await get('/api/oee/export')).includes('Other plant'));
-  const pdfRows=await get('/api/pdf/oee');assert.equal(pdfRows.length,1);assert.equal(pdfRows[0].machine_serial_no,'VMC-7');
   for(const type of ['production','hourly-oee','shift-oee']) {
     const response=await fetch(url+`/api/reports/${type}?date=${today}`,{headers:{authorization:`Bearer ${token(1)}`}});assert.equal(response.status,200);
     const ExcelJS=require('exceljs'),workbook=new ExcelJS.Workbook();await workbook.xlsx.load(Buffer.from(await response.arrayBuffer()));
@@ -244,7 +244,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   placement.upsert({id:7,company_id:4,plant_id:10,is_active:false});
   const afterMove=received.map(list=>list.length);sockets.relay(io,JSON.stringify({company_id:4,plant_id:8,machine_id:7}));
   await new Promise(r=>setTimeout(r,100));assert.deepEqual(received.map(list=>list.length),afterMove);
-  console.log('Plant isolation passed: actual PostgreSQL, JWT HTTP routes, legacy/paged fleet, detail, all 9 analytics dashboards, charts, OEE and production reports, CSV/XLSX/PDF exports, shared-shift dropdowns, periodic assignees, legacy program guards, concurrent quality saves/partial shift bounds/duplicate preservation, Redis cache separation and Socket.IO subscriptions. Server-derived company/plant defeats forged claims; company admins remain company-wide.');
+  console.log('Plant isolation passed: actual PostgreSQL, JWT HTTP routes, legacy/paged fleet, detail, all 9 analytics dashboards, charts, OEE and production reports, CSV/XLSX exports, shared-shift dropdowns, periodic assignees, legacy program guards, concurrent quality saves/partial shift bounds/duplicate preservation, Redis cache separation and Socket.IO subscriptions. Server-derived company/plant defeats forged claims; company admins remain company-wide.');
  } finally {
   clients.forEach(c=>c.close());if(io)await new Promise(r=>io.close(r));if(server?.listening)await new Promise(r=>server.close(r));if(pool)await pool.end();
   if(started)execFileSync(path.join(pgBin,'pg_ctl'),['-D',path.join(temp,'data'),'-m','immediate','-w','stop'],{stdio:'pipe'});fs.rmSync(temp,{recursive:true,force:true});

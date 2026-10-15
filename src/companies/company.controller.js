@@ -1,6 +1,5 @@
 const svc      = require('./company.service');
 const plantSvc = require('../plants/plant.service');
-const checkQuota = require('../middleware/quota.middleware');
 
 /* company.routes.js says "SNT_SUPER only (except GET own company)" — but
    nothing enforced the exception's other half. getById, getPlanFeatures and

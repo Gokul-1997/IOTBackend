@@ -209,8 +209,6 @@ exports.exportEnergy = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'No machines match these filters' });
     }
     const stamp = new Date().toISOString().slice(0, 10);
-    const headers = Object.keys(rows[0]);
-
     if (format === 'xlsx') {
       const file = await excel.createExcel('Energy', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

@@ -167,17 +167,6 @@ module.exports = async () => {
 };
 module.exports.runHourlyOee = runHourlyOee;
 
-// Helper: shift duration in minutes (handles overnight shifts)
-function getShiftDurationMinutes(shift) {
-  const [sh, sm] = shift.start_time.split(':').map(Number);
-  const [eh, em] = shift.end_time.split(':').map(Number);
-  const startMin = sh * 60 + sm;
-  const endMin   = eh * 60 + em;
-  const duration = endMin > startMin
-    ? endMin - startMin
-    : (1440 - startMin) + endMin;
-  return Math.max(1, duration - Number(shift.break_minutes || 0));
-}
 module.exports.previousIstHour = previousIstHour;
 
 /** An hour's quality cannot be inferred from positive cumulative shift

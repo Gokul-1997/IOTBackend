@@ -48,7 +48,7 @@ async function runShiftOee({ fromMs, toMs }) {
 
       const done = [];
       for (const inst of shiftInstances) {
-        const { shift, shiftDate, windowStart, windowEnd } = inst;
+        const { shift, shiftDate } = inst;
         const shiftDurationMinutes = getShiftDurationMinutes(shift);
         const plannedSeconds = shiftDurationMinutes * 60;
 

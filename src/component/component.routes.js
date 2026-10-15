@@ -2,7 +2,6 @@ const router = require('express').Router();
 const ctrl = require('./component.controller');
 const access = require('../middleware/access.middleware');
 const auth = require('../middleware/auth.middleware');
-const permit = require('../middleware/permission.middleware');
 const validate = require('../middleware/validate.middleware');
 
 

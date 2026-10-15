@@ -63,7 +63,7 @@ exports.forgotPassword = async (req, res) => {
       success: true,
       message: 'If the account exists, a reset link has been sent'
     });
-  } catch (e) {
+  } catch {
     res.status(500).json({
       success: false,
       message: 'Unable to process request'

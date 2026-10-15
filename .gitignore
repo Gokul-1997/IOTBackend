@@ -5,6 +5,11 @@
 # Program Transfer files (PROGRAM_TRANSFER_DIR defaults here); they belong to the server, not the repo
 /storage/
 
+# Generated reports and process output
+/coverage/
+/logs/
+npm-debug.log*
+
 # Local Python agent verification artifacts
 __pycache__/
 *.pyc

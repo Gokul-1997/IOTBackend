@@ -181,6 +181,14 @@ The importer locks and rechecks current company/plant/image references, protects
 
 Final backend verification: **95 suites / 1,972 tests**, including **73 importer checks**, passed. The new disposable PostgreSQL/private-file fixture passed tenant separation, atomic visibility, concurrent image/plant/company changes, real insert/update/deferred-COMMIT failures, lost-reply reconciliation, uncertain-commit retention and private backup import preserving source bytes. Reproduce with `node tools/architecture/verify-legacy-images.cjs`; it never reads application `.env` or contacts S3. See the [operator migration guide](LOCAL_FILE_STORAGE.md#move-older-machine-images-from-s3). No actual customer image, database reference, S3 object or server was migrated by this source task.
 
+## Frontend and backend cleanup — 15 October 2026
+
+Removed 32 confirmed unused files: 22 old frontend images/icons, the stale `public.zip` source archive, three unreferenced frontend templates/styles, the duplicate public storage guide, three orphan backend middleware modules and two customer-specific account scripts. The backend storage guide remains the operator reference; the Program Transfer device API guide remains available from the frontend download button.
+
+Removed the unused Lucide dependency and dead imports, callbacks, local variables and helper code. Frontend startup now uses the existing shared application configuration, including authenticated requests and master-data cache invalidation. Application TypeScript builds reject unused locals and parameters. Backend development uses Node's built-in watch mode, the former PM2 entry point reuses the canonical single-process configuration, and generated logs/coverage are ignored. Removed the nonfunctional placeholder lint command. Updated the isolated plant-access verifier to match the current export and file-storage paths.
+
+Verification passed: **95 backend suites / 1,972 tests**, **35 frontend suites / 273 tests**, the frontend production build, **21 browser checks** covering local images, Program Transfer and fleet dashboards, and the disposable PostgreSQL plant-access verifier. Production compilation still reports the existing bundle and component stylesheet budget warnings. Changes were verified locally; no server deployment, customer-file deletion or production database change was performed.
+
 ## Remaining release gates
 
 1. Export and review the real core schema, PostgreSQL/Timescale versions, constraints, indexes and grants; package a verified complete base schema so a new installation is reproducible. Resolve legacy invalid placements/references and duplicate operational entries without deleting history blindly.

@@ -83,7 +83,6 @@ exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, 
   // Read the bounded shift once; reuse its rows for totals and the chart.
   const { rows: hourlyRows } = await db.query(historical.rowsSQL, [company_id, [Number(machine_id)], shift_id, date]);
   const produced = hourlyRows.reduce((sum, row) => sum + Number(row.produced_qty || 0), 0);
-  const runSeconds = hourlyRows.reduce((sum, row) => sum + Number(row.run_seconds || 0), 0);
 
   // 4. Quality entries (reject + rework)
   const { rows: qRows } = await db.query(
