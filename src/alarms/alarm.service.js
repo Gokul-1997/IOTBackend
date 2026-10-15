@@ -1,6 +1,7 @@
 const db = require('../db');
 const { sendBulkEmails } = require('../utils/nodemailer');
 const { announceUnread } = require('../notifications/notification.service');
+const readScope = require('../lib/read-scope');
 
 exports.createAlarm = async ({ company_id, machine_id, alarm_type, severity, message }) => {
   // Check if there's already an open alarm for this machine+type
@@ -134,9 +135,9 @@ exports.createAlarmNotification = async (company_id, machine_id, alarm_type, mes
 
 exports.resolveAlarm = async ({ alarm_id, resolved_by, resolution_note, company_id }) => {
   const result = await db.query(
-    `UPDATE machine_alarms
+    `UPDATE machine_alarms a
      SET is_resolved = true, resolved_by = $1, resolved_at = NOW(), resolution_note = $2
-     WHERE id = $3 AND company_id = $4
+     WHERE a.id = $3 AND a.company_id = $4${readScope.plantSql('a.machine_id')}
      RETURNING *`,
     [resolved_by, resolution_note || null, alarm_id, company_id]
   );
@@ -187,7 +188,8 @@ exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, 
   if (sev === 'CRITICAL') conditions.push(`UPPER(a.severity) = 'CRITICAL'`);
   if (sev === 'NORMAL')   conditions.push(`UPPER(a.severity) <> 'CRITICAL'`);
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = (conditions.length ? `WHERE ${conditions.join(' AND ')}` : 'WHERE TRUE')
+    + readScope.plantSql('a.machine_id');
   const offset = (pageNum - 1) * limitNum;
 
   const countRes = await db.query(`SELECT COUNT(*) FROM machine_alarms a ${where}`, params);

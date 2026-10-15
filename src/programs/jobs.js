@@ -45,9 +45,9 @@ function view(job) {
 
 /**
  * Tell the person who asked: live on their open screens, and — when the job
- * ended — in their notifications, unless they switched Program transfer off
- * in Settings. Best effort: a notification that fails must never undo the
- * job's own result.
+ * ended — in their notifications, unless their saved program-transfer
+ * preference disables them. Best effort: a notification that fails must
+ * never undo the job's own result.
  */
 async function announce(job) {
   if (!job || !job.requested_by) return;

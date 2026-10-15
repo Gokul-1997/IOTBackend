@@ -66,7 +66,7 @@ describe('who may resolve', () => {
     const res = await request(app).patch('/api/alarms/7/resolve').send({ resolution_note: 'air restored' });
     expect(res.status).toBe(200);
     const upd = mockDb.calls().find(c => /UPDATE machine_alarms/.test(c.text));
-    expect(upd.text).toMatch(/WHERE id = \$3 AND company_id = \$4/);
+    expect(upd.text).toMatch(/WHERE a.id = \$3 AND a.company_id = \$4/);
     expect(upd.params[3]).toBe(4);
   });
 

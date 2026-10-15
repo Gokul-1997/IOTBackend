@@ -3,9 +3,11 @@ const { pagination } = require('../lib/pagination');
 const realtime = require('../lib/realtime');
 
 exports.getNotifications = async ({ user_id, company_id, page = 1, limit = 20, unread_only }) => {
-  const conditions = [`n.user_id = $1`];
-  const params = [user_id];
-  let i = 2;
+  // A reassigned user must never carry a previous company's inbox into their
+  // new account context. NULL is the explicit platform/SNT company scope.
+  const conditions = [`n.user_id = $1`, `n.company_id IS NOT DISTINCT FROM $2::int`];
+  const params = [user_id, company_id ?? null];
+  let i = 3;
 
   if (unread_only === 'true') { conditions.push(`n.is_read = false`); }
 
@@ -18,7 +20,8 @@ exports.getNotifications = async ({ user_id, company_id, page = 1, limit = 20, u
       `SELECT * FROM notifications n ${where} ORDER BY n.created_at DESC LIMIT $${i++} OFFSET $${i++}`,
       [...params, limitNum, offset]
     ),
-    db.query(`SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = false`, [user_id])
+    db.query(`SELECT COUNT(*) FROM notifications WHERE user_id = $1
+      AND company_id IS NOT DISTINCT FROM $2::int AND is_read = false`, params)
   ]);
 
   return {
@@ -32,19 +35,19 @@ exports.getNotifications = async ({ user_id, company_id, page = 1, limit = 20, u
   };
 };
 
-exports.markRead = async ({ user_id, notification_id }) => {
+exports.markRead = async ({ user_id, notification_id, company_id }) => {
   await db.query(
     `UPDATE notifications SET is_read = true, read_at = NOW()
-     WHERE id = $1 AND user_id = $2`,
-    [notification_id, user_id]
+     WHERE id = $1 AND user_id = $2 AND company_id IS NOT DISTINCT FROM $3::int`,
+    [notification_id, user_id, company_id ?? null]
   );
 };
 
-exports.markAllRead = async (user_id) => {
+exports.markAllRead = async (user_id, company_id) => {
   await db.query(
     `UPDATE notifications SET is_read = true, read_at = NOW()
-     WHERE user_id = $1 AND is_read = false`,
-    [user_id]
+     WHERE user_id = $1 AND company_id IS NOT DISTINCT FROM $2::int AND is_read = false`,
+    [user_id, company_id ?? null]
   );
 };
 
@@ -62,10 +65,11 @@ exports.announceUnread = async (userIds = []) => {
   if (!ids.length) return;
   try {
     const { rows } = await db.query(
-      `SELECT user_id, COUNT(*)::int AS count
-         FROM notifications
-        WHERE user_id = ANY($1::int[]) AND is_read = false
-        GROUP BY user_id`,
+      `SELECT n.user_id, COUNT(*)::int AS count
+         FROM notifications n
+         JOIN users u ON u.id = n.user_id AND n.company_id IS NOT DISTINCT FROM u.company_id
+        WHERE n.user_id = ANY($1::int[]) AND n.is_read = false
+        GROUP BY n.user_id`,
       [ids]
     );
     const counts = new Map(rows.map(r => [Number(r.user_id), Number(r.count)]));
@@ -75,10 +79,11 @@ exports.announceUnread = async (userIds = []) => {
   }
 };
 
-exports.getUnreadCount = async (user_id) => {
+exports.getUnreadCount = async (user_id, company_id) => {
   const res = await db.query(
-    `SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = false`,
-    [user_id]
+    `SELECT COUNT(*) FROM notifications WHERE user_id = $1
+      AND company_id IS NOT DISTINCT FROM $2::int AND is_read = false`,
+    [user_id, company_id ?? null]
   );
   return parseInt(res.rows[0].count);
 };
@@ -89,6 +94,8 @@ exports.getUnreadCount = async (user_id) => {
    Distinct from alert_preferences (company-wide: does an alarm/offline/low
    OEE event create a notification at all). This is per-user: of the
    notifications that exist, which types does this person want surfaced.
+   Settings exposes the working alarm receive preference. Other legacy
+   fields remain compatible with existing clients and stored choices.
 ───────────────────────────────────────────────────────── */
 
 const DEFAULT_PREFS = {

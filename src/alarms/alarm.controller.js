@@ -1,4 +1,23 @@
 const service = require('./alarm.service');
+const notificationRules = require('./alarm-notification.service');
+
+exports.getNotificationRules = async (req, res) => {
+  try {
+    const result = await notificationRules.getRules(req.user, req.query);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.updateNotificationRule = async (req, res) => {
+  try {
+    const data = await notificationRules.updateRule(req.user, req.params.machineId, req.body);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
 
 exports.getAlarms = async (req, res) => {
   try {

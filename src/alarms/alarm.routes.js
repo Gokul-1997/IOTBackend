@@ -4,6 +4,10 @@ const access = require('../middleware/access.middleware');
 const role = require('../middleware/role.middleware');
 const ctrl = require('./alarm.controller');
 
+const alarmPageAccess = access.any('page:alarms:view', 'page:analytics-alarms:view', 'page:dashboard:view');
+router.get('/notification-rules', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.getNotificationRules);
+router.put('/notification-rules/:machineId', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.updateNotificationRule);
+
 /* The Alarms page's own keys (APP_MODULES "alarms": view, resolve). Every
    route used to check only that the caller was signed in, so any role could
    list and resolve alarms through the API — the mobile app offered Resolve

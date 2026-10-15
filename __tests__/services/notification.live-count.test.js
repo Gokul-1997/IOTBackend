@@ -32,7 +32,8 @@ describe('announceUnread', () => {
 
     expect(mockDb.calls()).toHaveLength(1);
     expect(mockDb.calls()[0].params).toEqual([[7, 8]]);
-    expect(mockDb.calls()[0].text).toMatch(/user_id = ANY\(\$1::int\[\]\) AND is_read = false/);
+    expect(mockDb.calls()[0].text).toMatch(/n.user_id = ANY\(\$1::int\[\]\) AND n.is_read = false/);
+    expect(mockDb.calls()[0].text).toMatch(/JOIN users u ON u.id = n.user_id AND n.company_id IS NOT DISTINCT FROM u.company_id/);
     expect(emitted).toEqual([
       { room: 'user:7', event: 'unreadCount', payload: { count: 3 } },
       { room: 'user:8', event: 'unreadCount', payload: { count: 0 } }
