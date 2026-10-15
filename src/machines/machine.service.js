@@ -1,6 +1,7 @@
 const pool = require('../db');
 const crypto = require('crypto');
 const { cleanHourRate } = require('./hour-rate');
+const { cleanSpecs } = require('./machine-specs');
 const { pagination } = require('../lib/pagination');
 const { idOrNull, resolvePlantId } = require('../lib/plant-scope');
 const placements = require('../lib/machine-placement');
@@ -49,6 +50,7 @@ exports.createMachine = async (req) => {
   const serial = String(req.body.machine_serial_no || '').trim();
   if (!serial || serial.length > 100) throw { status: 400, message: 'Machine serial number is required (maximum 100 characters)' };
   const hourRate = cleanHourRate(req.body.hour_rate);
+  const specs = cleanSpecs(req.body);
   const client = await pool.connect();
   let routingWrite;
   try {
@@ -61,7 +63,7 @@ exports.createMachine = async (req) => {
       'x_axis', 'y_axis', 'z_axis', 'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table',
       'atc_tool_capacity', 'model', 'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'api_key'];
     const params = [plantId, req.user.company_id, lineId, serial,
-      ...columns.slice(4, 17).map(key => key === 'image_url' ? imageUrl : req.body[key] ?? null), hourRate, crypto.randomBytes(16).toString('hex')];
+      ...columns.slice(4, 17).map(key => key === 'image_url' ? imageUrl : specs[key] ?? null), hourRate, crypto.randomBytes(16).toString('hex')];
     const { rows } = await client.query(
       `INSERT INTO machines (${columns.join(', ')}) VALUES (${params.map((_, i) => '$' + (i + 1)).join(', ')})
        RETURNING id, plant_id, machine_serial_no, api_key`, params
@@ -229,6 +231,7 @@ exports.deleteMachine = async (req) => {
 exports.updateMachine = async (req) => {
   const patch = Object.fromEntries(EDITABLE.filter(key => req.body[key] !== undefined).map(key => [key, req.body[key]]));
   if ('hour_rate' in patch) patch.hour_rate = cleanHourRate(patch.hour_rate);
+  Object.assign(patch, cleanSpecs(patch));
   if (!Object.keys(patch).length) throw { status: 400, message: 'No fields provided for update' };
   if ('machine_serial_no' in patch) {
     patch.machine_serial_no = String(patch.machine_serial_no || '').trim();
