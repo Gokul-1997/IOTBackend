@@ -1,186 +1,162 @@
 const db = require('../db');
 const notifications = require('../notifications/notification.service');
-
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 function positive(value, label, fallback) {
   if (value === undefined || value === null || value === '') {
     if (fallback !== undefined) return fallback;
     fail(400, `${label} must be a positive whole number`);
   }
-  if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) {
-    fail(400, `${label} must be a positive whole number`);
-  }
+  if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) fail(400, `${label} must be a positive whole number`);
   return Number(value);
 }
 function companyAdmin(actor = {}) {
-  if (actor.is_snt_super || !actor.company_id ||
-      !(actor.roles || []).some(role => role === 'COMPANY_ADMIN' || role === 'ADMIN')) {
-    fail(403, 'Alarm notification rules are managed by your company administrator');
+  if (actor.is_snt_super || !actor.company_id || !(actor.roles || []).some(role => role === 'COMPANY_ADMIN' || role === 'ADMIN')) {
+    fail(403, 'Critical alarm notifications are managed by your company administrator');
   }
   return positive(actor.company_id, 'Company');
 }
-
-const RULE_COLUMNS = `m.id AS machine_id, m.machine_serial_no, p.plant_name,
-  COALESCE(r.enabled, FALSE) AS enabled, COALESCE(r.delay_seconds, 600) AS delay_seconds`;
-
-/** Every active machine appears, including machines which have never opted in. */
-exports.getRules = async (actor, query = {}) => {
-  const companyId = companyAdmin(actor);
-  const page = positive(query.page, 'page', 1);
-  const limit = Math.min(50, positive(query.limit, 'limit', 20));
-  if (!Number.isSafeInteger((page - 1) * limit)) fail(400, 'page is too large');
-  if (query.search !== undefined && typeof query.search !== 'string') fail(400, 'search must be text');
-  const search = (query.search || '').trim();
-  if (search.length > 100) fail(400, 'search must be at most 100 characters');
-  const params = [companyId, search ? `%${search.replace(/[\\%_]/g, '\\$&')}%` : null];
-  const where = `WHERE m.company_id = $1 AND m.is_active = TRUE
-    AND ($2::text IS NULL OR m.machine_serial_no ILIKE $2 ESCAPE '\\' OR p.plant_name ILIKE $2 ESCAPE '\\')`;
-  const joins = `FROM machines m LEFT JOIN plants p ON p.id = m.plant_id AND p.company_id = m.company_id
-    LEFT JOIN alarm_notification_rules r ON r.machine_id = m.id AND r.company_id = m.company_id`;
-  const [count, rows] = await Promise.all([
-    db.query(`SELECT COUNT(*)::int AS total ${joins} ${where}`, params),
-    db.query(`SELECT ${RULE_COLUMNS} ${joins} ${where}
-      ORDER BY m.machine_serial_no, m.id LIMIT $3 OFFSET $4`, [...params, limit, (page - 1) * limit])
-  ]);
-  const total = Number(count.rows[0]?.total || 0);
-  return { data: rows.rows, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } };
-};
-
-exports.updateRule = async (actor, machineId, body = {}) => {
-  const companyId = companyAdmin(actor);
-  const id = positive(machineId, 'machine_id');
-  if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
-    fail(400, 'enabled must be true or false');
-  }
-  if (typeof body.delay_seconds !== 'number' || !Number.isInteger(body.delay_seconds) ||
-      body.delay_seconds < 1 || body.delay_seconds > 86400) {
-    fail(400, 'delay_seconds must be a whole number between 1 and 86400');
-  }
+async function transaction(work) {
   const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-    const machine = await client.query(`SELECT m.id, m.machine_serial_no, p.plant_name
-      FROM machines m LEFT JOIN plants p ON p.id = m.plant_id AND p.company_id = m.company_id
-      WHERE m.id = $1 AND m.company_id = $2 AND m.is_active = TRUE FOR SHARE OF m`, [id, companyId]);
-    if (!machine.rows.length) fail(404, 'Machine not found');
-    const { rows } = await client.query(`INSERT INTO alarm_notification_rules
-      (company_id, machine_id, enabled, delay_seconds, updated_by)
-      VALUES ($1,$2,$3,$4,$5)
-      ON CONFLICT (company_id, machine_id) DO UPDATE SET
-        enabled = EXCLUDED.enabled, delay_seconds = EXCLUDED.delay_seconds,
-        enabled_since = CASE
-          WHEN alarm_notification_rules.enabled IS DISTINCT FROM EXCLUDED.enabled
-            OR alarm_notification_rules.delay_seconds IS DISTINCT FROM EXCLUDED.delay_seconds
-          THEN NOW() ELSE alarm_notification_rules.enabled_since END,
-        updated_by = EXCLUDED.updated_by, updated_at = NOW()
-      RETURNING enabled, delay_seconds`, [companyId, id, body.enabled, body.delay_seconds, actor.id]);
-    await client.query('COMMIT');
-    return { machine_id: machine.rows[0].id, machine_serial_no: machine.rows[0].machine_serial_no,
-      plant_name: machine.rows[0].plant_name, ...rows[0] };
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally { client.release(); }
+  try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
+  catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+  finally { client.release(); }
+}
+exports.getPolicy = async actor => {
+  const companyId = companyAdmin(actor);
+  const [{ rows }, { rows: counts }] = await Promise.all([
+    db.query('SELECT enabled,version,updated_at FROM alarm_notification_policies WHERE company_id=$1', [companyId]),
+    db.query('SELECT COUNT(*)::int AS machines FROM machines WHERE company_id=$1 AND is_active=TRUE', [companyId])
+  ]);
+  return { enabled: rows[0]?.enabled || false, configured: !!rows.length,
+    version: rows[0]?.version || 0, updated_at: rows[0]?.updated_at || null, counts: counts[0] || { machines: 0 } };
+};
+exports.updatePolicy = async (actor, body = {}) => {
+  const companyId = companyAdmin(actor);
+  if (typeof body?.enabled !== 'boolean') fail(400, 'enabled must be true or false');
+  if (typeof body.expected_version !== 'number' || !Number.isSafeInteger(body.expected_version) || body.expected_version < 0) {
+    fail(400, 'expected_version must be a non-negative whole number');
+  }
+  await transaction(async client => {
+    // The company lock also protects dispatch while this configuration changes.
+    await client.query('SELECT id FROM companies WHERE id=$1 FOR UPDATE', [companyId]);
+    const { rows } = await client.query('SELECT version FROM alarm_notification_policies WHERE company_id=$1 FOR UPDATE', [companyId]);
+    if ((rows[0]?.version || 0) !== body.expected_version) fail(409, 'This setting changed in another session. Reload before saving.');
+    await client.query(`INSERT INTO alarm_notification_policies(company_id,enabled,updated_by) VALUES($1,$2,$3)
+      ON CONFLICT(company_id) DO UPDATE SET enabled=EXCLUDED.enabled,
+      version=CASE WHEN alarm_notification_policies.enabled IS DISTINCT FROM EXCLUDED.enabled THEN alarm_notification_policies.version+1 ELSE alarm_notification_policies.version END,
+      enabled_since=CASE WHEN alarm_notification_policies.enabled IS DISTINCT FROM EXCLUDED.enabled THEN NOW() ELSE alarm_notification_policies.enabled_since END,
+      updated_by=EXCLUDED.updated_by,updated_at=NOW()`, [companyId, body.enabled, actor.id]);
+  });
+  return exports.getPolicy(actor);
 };
 
-/* A current role and a current company grant must agree on the same page.
-   A company with no grant rows is unrestricted, matching access.middleware.
-   Admin means the reserved system role, never a similarly named owned role. */
 const RECIPIENT_SQL = `WITH pages(permission_key, link, rank) AS (VALUES
-    ('page:alarms:view', '/alarms', 1),
-    ('page:analytics-alarms:view', '/alarm-report', 2),
-    ('page:dashboard:view', '/dashboard', 3)
+    ('page:alarms:view', '/alarms', 1),('page:analytics-alarms:view', '/alarm-report', 2),('page:dashboard:view', '/dashboard', 3)
   ), allowed AS (
-    SELECT u.id, pages.link, pages.rank
-    FROM users u
-    JOIN companies c ON c.id = u.company_id AND c.is_active = TRUE
-    CROSS JOIN pages
-    JOIN permissions p ON p.permission_key = pages.permission_key
-    LEFT JOIN notification_preferences np ON np.user_id = u.id
-    WHERE u.company_id = $1 AND u.is_active = TRUE AND COALESCE(np.notify_alarm, TRUE)
-      AND (NOT EXISTS (SELECT 1 FROM company_permissions cp WHERE cp.company_id = u.company_id)
-        OR EXISTS (SELECT 1 FROM company_permissions cp WHERE cp.company_id = u.company_id AND cp.permission_id = p.id))
-      AND (EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
-          WHERE ur.user_id = u.id AND r.company_id IS NULL AND r.role_name IN ('COMPANY_ADMIN', 'ADMIN'))
-        OR (u.plant_id IS NULL OR u.plant_id = $2))
-      AND (EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
-          WHERE ur.user_id = u.id AND r.company_id IS NULL AND r.role_name IN ('COMPANY_ADMIN', 'ADMIN'))
-        OR EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
-          JOIN role_permissions rp ON rp.role_id = r.id
-          WHERE ur.user_id = u.id AND (r.company_id IS NULL OR r.company_id = u.company_id)
-            AND rp.permission_id = p.id))
-  ) SELECT DISTINCT ON (id) id, link FROM allowed ORDER BY id, rank`;
+    SELECT u.id,pages.link,pages.rank FROM users u
+    JOIN companies c ON c.id=u.company_id AND c.is_active=TRUE CROSS JOIN pages
+    JOIN permissions p ON p.permission_key=pages.permission_key
+    LEFT JOIN notification_preferences np ON np.user_id=u.id
+    WHERE u.company_id=$1 AND u.is_active=TRUE AND COALESCE(np.notify_alarm,TRUE)
+      AND (NOT EXISTS(SELECT 1 FROM company_permissions cp WHERE cp.company_id=u.company_id)
+        OR EXISTS(SELECT 1 FROM company_permissions cp WHERE cp.company_id=u.company_id AND cp.permission_id=p.id))
+      AND (EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.company_id IS NULL AND r.role_name IN('COMPANY_ADMIN','ADMIN'))
+        OR (u.plant_id IS NULL OR u.plant_id=$2))
+      AND (EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.company_id IS NULL AND r.role_name IN('COMPANY_ADMIN','ADMIN'))
+        OR EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id JOIN role_permissions rp ON rp.role_id=r.id
+          WHERE ur.user_id=u.id AND (r.company_id IS NULL OR r.company_id=u.company_id) AND rp.permission_id=p.id))
+  ) SELECT DISTINCT ON(id) id,link FROM allowed ORDER BY id,rank`;
+const ACTIVE = `m.is_active=TRUE AND c.is_active=TRUE AND (m.plant_id IS NULL OR EXISTS(
+  SELECT 1 FROM plants plant WHERE plant.id=m.plant_id AND plant.company_id=m.company_id AND plant.is_active=TRUE))`;
 
-/**
- * A durable inbox, independent of open browsers or the MQTT process. Each
- * occurrence is delivered once after fresh accepted observations confirm the
- * configured duration. Missing observations restart the qualification window.
- */
+/** Durably dispatch a bounded amount of accepted events and due active alarms. */
 exports.processDueAlarms = async ({ batchSize = 100 } = {}) => {
   const limit = Math.min(500, positive(batchSize, 'batchSize', 100));
-  const client = await db.connect();
   const recipients = new Set();
-  let delivered = 0;
-  let checked = 0;
-  try {
-    await client.query('BEGIN');
-    const { rows: alarms } = await client.query(`SELECT a.id, a.company_id, a.machine_id,
-        a.alarm_type, a.alarm_code, a.message, m.machine_serial_no, m.plant_id, r.delay_seconds
-      FROM machine_alarms a
-      JOIN alarm_notification_rules r ON r.company_id = a.company_id AND r.machine_id = a.machine_id AND r.enabled = TRUE
-      JOIN machines m ON m.id = a.machine_id AND m.company_id = a.company_id AND m.is_active = TRUE
-      JOIN companies c ON c.id = a.company_id AND c.is_active = TRUE
-      JOIN LATERAL (
-        SELECT t.alarm, t.device_time, t.received_at FROM telemetry_raw t
-        WHERE t.company_id = a.company_id AND t.machine_id = a.machine_id
-          AND t.received_at >= NOW() - INTERVAL '120 seconds'
-        ORDER BY t.received_at DESC, t.device_time DESC LIMIT 1
-      ) observed ON observed.alarm = TRUE
-        AND observed.received_at <= NOW()
-        AND observed.device_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '120 seconds')
-        AND observed.device_time <= EXTRACT(EPOCH FROM NOW())
-      LEFT JOIN LATERAL (
-        SELECT g.resumed_at FROM ingest_gaps g
-        WHERE g.company_id = a.company_id AND g.machine_id = a.machine_id AND g.resumed_at >= a.started_at
-        ORDER BY g.resumed_at DESC LIMIT 1
-      ) gap ON TRUE
-      WHERE a.ended_at IS NULL AND a.notification_sent_at IS NULL
-        AND (m.plant_id IS NULL OR EXISTS (SELECT 1 FROM plants plant
-          WHERE plant.id = m.plant_id AND plant.company_id = m.company_id AND plant.is_active = TRUE))
-        AND to_timestamp(observed.device_time) >=
-          GREATEST(a.started_at, r.enabled_since, gap.resumed_at, a.notification_continuity_started_at)
-            + make_interval(secs => r.delay_seconds)
-      ORDER BY a.notification_checked_at NULLS FIRST, a.started_at, a.id
-      LIMIT $1 FOR UPDATE OF a SKIP LOCKED FOR SHARE OF r, m, c SKIP LOCKED`, [limit]);
+  let checked = 0, delivered = 0, progressed = 0;
+  await transaction(async client => {
+    const dispatched = new Set();
+    async function deliver(alarm) {
+      const key = `${alarm.alarm_id || alarm.id}:${alarm.severity_class}`;
+      if (dispatched.has(key) || alarm.notification_delivered_priorities?.includes(alarm.severity_class)) return true;
+      const { rows: users } = await client.query(RECIPIENT_SQL, [alarm.company_id, alarm.plant_id]);
+      if (!users.length) return false;
+      const title = `Critical alarm — ${alarm.machine_serial_no}`.slice(0,200);
+      const message = `${alarm.alarm_code || alarm.alarm_type || 'Controller alarm'}: ${alarm.message || 'Controller alarm'}.`;
+      const inserted = await client.query(`INSERT INTO notifications(company_id,user_id,type,title,message,link,alarm_id,alarm_priority)
+        SELECT $1,recipient.user_id,'ALARM',$2,$3,recipient.link,$4,$5
+        FROM unnest($6::int[],$7::text[]) AS recipient(user_id,link)
+        ON CONFLICT(alarm_id,user_id,alarm_priority) WHERE alarm_id IS NOT NULL DO NOTHING RETURNING user_id`,
+      [alarm.company_id, title, message, alarm.alarm_id || alarm.id, alarm.severity_class, users.map(user => user.id), users.map(user => user.link)]);
+      await client.query(`UPDATE machine_alarms SET notification_sent_at=NOW(),
+        notification_delivered_priorities=array_append(notification_delivered_priorities,$2) WHERE id=$1
+        AND NOT ($2=ANY(notification_delivered_priorities))`, [alarm.alarm_id || alarm.id, alarm.severity_class]);
+      delivered++;
+      dispatched.add(key);
+      for (const user of inserted.rows) recipients.add(user.user_id);
+      return true;
+    }
+    // Lock alarm first, then its events. The same order in the active scan
+    // prevents concurrent workers from delivering two priority changes twice.
+    const { rows: events } = await client.query(`SELECT e.*,a.notification_delivered_priorities,m.machine_serial_no,m.plant_id,
+        COALESCE(p.enabled,FALSE) AS enabled,
+        (${ACTIVE}) AS eligible,
+        (e.occurred_at>=NOW()-INTERVAL '120 seconds' AND e.occurred_at<=NOW()
+          AND e.received_at>=NOW()-INTERVAL '120 seconds' AND e.received_at<=NOW()
+          AND e.received_at>=p.enabled_since
+          AND e.occurred_at>=date_trunc('second',p.enabled_since)) AS fresh
+      FROM alarm_notification_events e JOIN machine_alarms a ON a.id=e.alarm_id AND a.company_id=e.company_id AND a.machine_id=e.machine_id
+      JOIN machines m ON m.id=a.machine_id AND m.company_id=a.company_id JOIN companies c ON c.id=a.company_id
+      LEFT JOIN alarm_notification_policies p ON p.company_id=m.company_id WHERE e.processed_at IS NULL
+      ORDER BY e.checked_at NULLS FIRST,e.id LIMIT $1 FOR UPDATE OF a,e SKIP LOCKED FOR SHARE OF m,c SKIP LOCKED`, [limit]);
+    for (const event of events) {
+      checked++;
+      await client.query('UPDATE alarm_notification_events SET checked_at=NOW() WHERE id=$1', [event.id]);
+      let outcome = 'history';
+      if (event.severity_class === 'critical' && event.enabled && event.eligible && event.fresh) {
+        if (!await deliver(event)) continue; // remains durable until an eligible recipient exists or event expires
+        outcome = 'delivered';
+      } else if (event.severity_class === 'critical') outcome = 'disabled_stale_or_inactive';
+      await client.query('UPDATE alarm_notification_events SET processed_at=NOW(),outcome=$2 WHERE id=$1', [event.id, outcome]);
+      progressed++;
+    }
+    const remaining = limit - checked;
+    if (remaining < 1) return;
+    const { rows: alarms } = await client.query(`SELECT a.*,a.id AS alarm_id,m.machine_serial_no,m.plant_id,'critical' AS severity_class
+      FROM machine_alarms a JOIN machines m ON m.id=a.machine_id AND m.company_id=a.company_id
+      JOIN companies c ON c.id=a.company_id JOIN alarm_notification_policies p ON p.company_id=a.company_id AND p.enabled=TRUE
+      JOIN LATERAL(SELECT t.alarm,t.device_time,t.received_at FROM telemetry_raw t
+        WHERE t.company_id=a.company_id AND t.machine_id=a.machine_id AND t.received_at>=NOW()-INTERVAL '120 seconds'
+        ORDER BY t.received_at DESC,t.device_time DESC LIMIT 1) observed
+        ON observed.alarm=TRUE AND observed.received_at<=NOW()
+        AND observed.device_time>=EXTRACT(EPOCH FROM NOW()-INTERVAL '120 seconds') AND observed.device_time<=EXTRACT(EPOCH FROM NOW())
+      LEFT JOIN LATERAL(SELECT g.resumed_at FROM ingest_gaps g WHERE g.company_id=a.company_id AND g.machine_id=a.machine_id
+        AND g.resumed_at>=a.started_at ORDER BY g.resumed_at DESC LIMIT 1) gap ON TRUE
+      WHERE a.ended_at IS NULL AND ${ACTIVE}
+        AND UPPER(BTRIM(a.severity)) IN('CRITICAL','FATAL','EMERGENCY')
+        AND NOT ('critical'=ANY(a.notification_delivered_priorities))
+        AND to_timestamp(observed.device_time)>=GREATEST(a.started_at,p.enabled_since,gap.resumed_at,
+          a.notification_continuity_started_at,a.notification_priority_changed_at)
+      ORDER BY a.notification_checked_at NULLS FIRST,a.started_at,a.id
+      LIMIT $1 FOR UPDATE OF a SKIP LOCKED FOR SHARE OF m,c SKIP LOCKED`, [remaining]);
     for (const alarm of alarms) {
       checked++;
-      // A failed/no-recipient occurrence moves behind unchecked occurrences,
-      // so an inaccessible old alarm cannot starve other machines' alerts.
-      await client.query('UPDATE machine_alarms SET notification_checked_at = NOW() WHERE id = $1', [alarm.id]);
-      const { rows: users } = await client.query(RECIPIENT_SQL, [alarm.company_id, alarm.plant_id]);
-      if (!users.length) continue;
-      const duration = alarm.delay_seconds < 60 ? `${alarm.delay_seconds} seconds`
-        : alarm.delay_seconds % 60 === 0 ? `${alarm.delay_seconds / 60} minutes` : `${alarm.delay_seconds} seconds`;
-      const title = `Alarm active — ${alarm.machine_serial_no}`.slice(0, 200);
-      const message = `${alarm.alarm_code || alarm.alarm_type}: ${alarm.message || 'Controller alarm'}. Still active after ${duration}.`;
-      const inserted = await client.query(`INSERT INTO notifications (company_id, user_id, type, title, message, link, alarm_id)
-        SELECT $1, recipient.user_id, 'ALARM', $2, $3, recipient.link, $4
-        FROM unnest($5::int[], $6::text[]) AS recipient(user_id, link)
-        ON CONFLICT (alarm_id, user_id) WHERE alarm_id IS NOT NULL DO NOTHING RETURNING user_id`,
-      [alarm.company_id, title, message, alarm.id, users.map(user => user.id), users.map(user => user.link)]);
-      await client.query('UPDATE machine_alarms SET notification_sent_at = NOW() WHERE id = $1', [alarm.id]);
-      delivered++;
-      for (const user of inserted.rows) recipients.add(user.user_id);
+      await client.query('UPDATE machine_alarms SET notification_checked_at=NOW() WHERE id=$1', [alarm.id]);
+      await deliver(alarm);
     }
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally { client.release(); }
-  // Socket delivery is advisory. Its failure cannot undo committed inbox rows.
+  });
   if (recipients.size) {
     try { await notifications.announceUnread([...recipients]); }
     catch (error) { console.error('Alarm unread announcement failed:', error.message); }
   }
-  return { checked, delivered, recipients: recipients.size };
+  return { checked, delivered, recipients: recipients.size, progressed: progressed + delivered };
+};
+
+// Events are operational delivery work, not a second permanent alarm history.
+// Deduplication remains on the alarm and inbox when processed events expire.
+exports.pruneProcessedEvents = async () => {
+  const result = await db.query(`DELETE FROM alarm_notification_events WHERE id IN(
+    SELECT id FROM alarm_notification_events WHERE processed_at<NOW()-INTERVAL '7 days'
+    ORDER BY processed_at,id LIMIT 1000 FOR UPDATE SKIP LOCKED)`);
+  return result.rowCount;
 };

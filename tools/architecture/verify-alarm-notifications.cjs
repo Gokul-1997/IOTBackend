@@ -14,6 +14,9 @@ const repo = path.resolve(__dirname, '../..');
 const pgBin = process.env.ALARM_FIXTURE_PG_BIN || '/opt/homebrew/bin';
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cnc-alarm-fixture-'));
 const migration = fs.readFileSync(path.join(repo, 'src/migrations/047_alarm_notifications.sql'), 'utf8');
+const policyMigration = fs.readFileSync(path.join(repo, 'src/migrations/048_alarm_notification_policies.sql'), 'utf8');
+const policyRollback = fs.readFileSync(path.join(repo, 'src/migrations/rollback/048_alarm_notification_policies_down.sql'), 'utf8');
+const alarmColumns = ['notification_continuity_started_at', 'notification_priority_changed_at', 'severity_observed_at', 'severity_received_at', 'ended_received_at'];
 const rollback = fs.readFileSync(path.join(repo, 'src/migrations/rollback/047_alarm_notifications_down.sql'), 'utf8');
 let pool, running = false, delivered = [], socketFailure = false;
 let assertions = 0;
@@ -76,245 +79,298 @@ INSERT INTO notification_preferences VALUES(7,FALSE);`;
     execFileSync(path.join(pgBin, 'pg_ctl'), ['-D', path.join(directory, 'data'), '-l', path.join(directory, 'postgres.log'),
       '-o', `-F -k ${directory} -p 55447 -c listen_addresses=''`, '-w', 'start'], { stdio: 'pipe' });
     running = true;
-    pool = new Pool({ host: directory, port: 55447, user: 'alarm_fixture', database: 'postgres', max: 6 });
+    pool = new Pool({ host: directory, port: 55447, user: 'alarm_fixture', database: 'postgres', max: 8 });
     await pool.query(schema);
-    const { missingAlarmColumns } = await import(pathToFileURL(path.resolve(repo,
-      '../pms-backend/src/lib/schema-check.js')).href);
-    check(await missingAlarmColumns(pool), ['notification_continuity_started_at'], 'The collector startup probe rejects the schema before migration 047');
+    const { missingAlarmColumns } = await import(pathToFileURL(path.resolve(repo, '../pms-backend/src/lib/schema-check.js')).href);
+    check(await missingAlarmColumns(pool), alarmColumns, 'The collector refuses the pre-047/048 alarm schema');
     await pool.query(migration); await pool.query(migration);
-    check(await missingAlarmColumns(pool), [], 'The collector startup probe accepts the migrated schema');
+    check(await missingAlarmColumns(pool), alarmColumns.slice(1), 'Migration 047 alone cannot satisfy the critical event collector');
+    await pool.query(rollback); await pool.query(rollback);
+    check((await pool.query("SELECT to_regclass('alarm_notification_rules') AS name")).rows[0].name, null, 'Empty 047 rollback is repeatable');
+    check((await pool.query('SELECT COUNT(*)::int AS count FROM machines')).rows[0].count, 5, 'Rollback preserves every machine');
+    await pool.query(migration);
+    // A previously enabled delayed rule is retained for history; migration
+    // must not silently enroll the company in the new critical-only feature.
+    await pool.query('INSERT INTO alarm_notification_rules(company_id,machine_id,enabled,delay_seconds) VALUES(4,7,TRUE,30)');
+    await pool.query(policyMigration); await pool.query(policyMigration);
+    check(await missingAlarmColumns(pool), [], 'Migration 048 satisfies the collector priority schema guard');
+    check((await pool.query('SELECT COUNT(*)::int AS count FROM alarm_notification_policies')).rows[0].count, 0,
+      'Migration does not silently enable company-wide critical notifications');
+    check((await pool.query('SELECT enabled,delay_seconds FROM alarm_notification_rules')).rows, [{ enabled: true, delay_seconds: 30 }],
+      'Migration preserves the old configuration without driving new notification behavior');
+    await pool.query('TRUNCATE alarm_notification_rules');
+    await pool.query(policyRollback); await pool.query(policyRollback);
+    check((await pool.query("SELECT to_regclass('alarm_notification_events') AS name")).rows[0].name, null, 'Empty 048 rollback is repeatable');
+    await pool.query(policyMigration);
     const shadowClient = await pool.connect();
     try {
-      await shadowClient.query(`CREATE SCHEMA alarm_shadow;
-        CREATE TABLE alarm_shadow.machine_alarms(id BIGINT);
-        SET search_path TO alarm_shadow,public`);
-      check(await missingAlarmColumns(shadowClient), ['notification_continuity_started_at'],
-        'A migrated public table cannot hide a missing column on the actual search-path target');
-    } finally {
-      await shadowClient.query('RESET search_path; DROP SCHEMA IF EXISTS alarm_shadow CASCADE');
-      shadowClient.release();
-    }
-    await pool.query(rollback); await pool.query(rollback);
-    check((await pool.query("SELECT to_regclass('alarm_notification_rules') AS name")).rows[0].name, null, 'Empty rollback removes the rule table');
-    check((await pool.query('SELECT COUNT(*)::int AS count FROM machines')).rows[0].count, 5, 'Rollback preserves machines');
-    await pool.query(migration);
+      await shadowClient.query('CREATE SCHEMA alarm_shadow; CREATE TABLE alarm_shadow.machine_alarms(id BIGINT); SET search_path TO alarm_shadow,public');
+      check(await missingAlarmColumns(shadowClient), alarmColumns, 'The collector checks the actual search-path table rather than another migrated table');
+    } finally { await shadowClient.query('RESET search_path; DROP SCHEMA IF EXISTS alarm_shadow CASCADE'); shadowClient.release(); }
     inject('src/db.js', pool);
     inject('src/notifications/notification.service.js', { announceUnread: async ids => {
       delivered.push([...ids].sort((a, b) => a - b));
       if (socketFailure) throw new Error('Injected socket failure');
     } });
     const service = require(path.join(repo, 'src/alarms/alarm-notification.service'));
-    const { alarmTransition, writeAlarmTransition } = await import(pathToFileURL(path.resolve(repo,
-      '../pms-backend/src/lib/alarm-transition.js')).href);
+    const { alarmTransition, writeAlarmTransition } = await import(pathToFileURL(path.resolve(repo, '../pms-backend/src/lib/alarm-transition.js')).href);
     const actor = { id: 1, user_id: 1, company_id: 4, plant_id: null, roles: ['COMPANY_ADMIN'] };
-    const epoch = Math.floor(Date.now() / 1000) - 10;
+    const epoch = Math.floor(Date.now() / 1000) - 20;
+    const eventCount = async () => (await pool.query('SELECT COUNT(*)::int AS count FROM alarm_notification_events')).rows[0].count;
+    const count = async () => (await pool.query('SELECT COUNT(*)::int AS count FROM notifications')).rows[0].count;
+    const inbox = async () => (await pool.query('SELECT alarm_id,user_id,link,type,alarm_priority FROM notifications ORDER BY alarm_id,user_id')).rows;
+    const run = options => service.processDueAlarms(options);
     async function reset() {
-      await pool.query('TRUNCATE machine_alarms,notifications,alarm_notification_rules,telemetry_raw,ingest_gaps RESTART IDENTITY CASCADE');
+      await pool.query('TRUNCATE machine_alarms,notifications,alarm_notification_rules,alarm_notification_policies,telemetry_raw,ingest_gaps RESTART IDENTITY CASCADE');
       delivered = []; socketFailure = false;
     }
-    async function rule({ machine = 7, company = 4, delay = 30, enabled = true, since = epoch - 3600 } = {}) {
-      await pool.query(`INSERT INTO alarm_notification_rules(company_id,machine_id,enabled,delay_seconds,enabled_since)
-        VALUES($1,$2,$3,$4,to_timestamp($5)) ON CONFLICT(company_id,machine_id) DO UPDATE SET
-        enabled=EXCLUDED.enabled,delay_seconds=EXCLUDED.delay_seconds,enabled_since=EXCLUDED.enabled_since`,
-      [company, machine, enabled, delay, since]);
+    async function enable(enabled = true, since = epoch - 3600) {
+      const current = await service.getPolicy(actor);
+      const result = await service.updatePolicy(actor, { enabled, expected_version: current.version });
+      await pool.query('UPDATE alarm_notification_policies SET enabled_since=to_timestamp($1) WHERE company_id=4', [since]);
+      return result;
     }
-    async function reading({ machine = 7, company = 4, at = epoch, received = epoch, alarm = true } = {}) {
+    async function reading({ machine = 7, company = 4, at = epoch, received = at, alarm = true } = {}) {
       await pool.query('INSERT INTO telemetry_raw(company_id,machine_id,device_time,received_at,alarm)VALUES($1,$2,$3,to_timestamp($4),$5)',
-        [company, machine, at, received, alarm]);
+        [company,machine,at,received,alarm]);
     }
-    async function alarm({ machine = 7, company = 4, start = epoch - 30, end = null, resolved = false, code = 'EX1046' } = {}) {
-      const { rows } = await pool.query(`INSERT INTO machine_alarms(company_id,machine_id,alarm_type,alarm_code,message,started_at,ended_at,is_resolved)
-        VALUES($1,$2,'Door open',$3,'Close machine door',to_timestamp($4),to_timestamp($5),$6) RETURNING id`,
-        [company, machine, code, start, end, resolved]);
-      return rows[0].id;
+    async function alarm({ machine = 7, company = 4, start = epoch - 30, end = null, code = 'EX1000', severity = 'CRITICAL', resolved = false } = {}) {
+      return (await pool.query(`INSERT INTO machine_alarms(company_id,machine_id,alarm_type,alarm_code,severity,message,started_at,ended_at,is_resolved)
+        VALUES($1,$2,'Fixture controller alarm',$3,$4,'Controller details',to_timestamp($5),to_timestamp($6),$7) RETURNING id`,
+      [company,machine,code,severity,start,end,resolved])).rows[0].id;
     }
-    const inbox = async () => (await pool.query('SELECT alarm_id,user_id,link,type FROM notifications ORDER BY alarm_id,user_id')).rows;
-    const count = async () => (await pool.query('SELECT COUNT(*)::int AS count FROM notifications')).rows[0].count;
-    const marker = async id => (await pool.query('SELECT notification_sent_at FROM machine_alarms WHERE id=$1', [id])).rows[0].notification_sent_at;
-    const run = options => service.processDueAlarms(options);
-
-    await reset(); await rule(); const first = await alarm({ start: epoch - 29 }); await reading();
-    await run(); check(await count(), 0, 'A 29-second confirmed alarm does not meet a 30-second policy');
-    await reading({ at: epoch + 1, received: epoch + 1 });
-    await Promise.all([run(), run(), run()]);
-    check((await inbox()).map(row => row.user_id), [1, 2, 4], 'Only authorized, active own-plant/company recipients get the alarm');
-    check((await inbox()).every(row => row.type === 'ALARM'), true, 'The inbox uses the alarm category');
-    check(Boolean(await marker(first)), true, 'The completed dispatch has a durable marker');
-    check(delivered.flat().every(id => [1, 2, 4].includes(Number(id))), true, 'Live unread updates are only sent to eligible recipients');
-    await run(); check(await count(), 3, 'Repeated worker passes do not repeat the occurrence');
-    await pool.query('UPDATE machine_alarms SET ended_at=to_timestamp($2) WHERE id=$1', [first, epoch + 2]);
-    const second = await alarm({ start: epoch - 30 }); await run();
-    check(await count(), 6, 'Clearing and recurring creates a separate alarm occurrence');
-    check(Boolean(await marker(second)), true, 'The new occurrence has its own marker');
-
-    await reset(); await rule({ delay: 600 }); await alarm({ start: epoch - 599 }); await reading();
-    await run(); check(await count(), 0, 'Ten-minute rules wait for 600 confirmed seconds');
-    await reading({ at: epoch + 1, received: epoch + 1 }); await run();
-    check(await count(), 3, 'A ten-minute confirmed alarm notifies once');
-
-    await reset(); await rule(); await alarm({ start: epoch - 300, end: epoch - 297 }); await reading({ alarm: false });
-    await run(); check(await count(), 0, 'A three-second transient that cleared never notifies');
-    await reset(); await rule(); await alarm({ resolved: true }); await reading(); await run();
-    check(await count(), 3, 'Acknowledgement alone does not claim that a controller alarm cleared');
-
-    const suppressionCases = [
-      ['disabled rule', { enabled: false }, {}, {}],
-      ['inactive machine', { machine: 10 }, { machine: 10 }, { machine: 10 }],
-      ['inactive company', { machine: 11, company: 6 }, { machine: 11, company: 6 }, { machine: 11, company: 6 }],
-      ['device observation is stale', {}, { start: epoch - 600 }, { at: epoch - 121 }],
-      ['network arrival is stale', {}, { start: epoch - 600 }, { received: epoch - 121 }],
-      ['queued historical observations', {}, { start: epoch - 1000 }, { at: epoch - 600, received: epoch }],
-      ['future device observation', {}, {}, { at: epoch + 1000 }],
-      ['latest telemetry cleared its alarm', {}, {}, { alarm: false }],
-      ['no confirmed telemetry', {}, {}, null]
-    ];
-    for (const [name, ruleOptions, alarmOptions, readingOptions] of suppressionCases) {
-      await reset(); await rule(ruleOptions); await alarm(alarmOptions); if (readingOptions) await reading(readingOptions);
-      await run(); check(await count(), 0, `${name} does not create a false alarm notification`);
-    }
-    await reset(); await rule(); await alarm({ start: epoch - 3600 }); await reading();
-    await pool.query(`INSERT INTO ingest_gaps VALUES(4,7,to_timestamp($1),to_timestamp($2),$3)`, [epoch - 600, epoch - 29, 571]);
-    await run(); check(await count(), 0, 'An offline gap resets confirmed duration without changing reporting history');
-    await reading({ at: epoch + 1, received: epoch + 1 }); await run();
-    check(await count(), 3, 'After reconnect, a fresh complete threshold can qualify');
-
-    await reset(); await rule({ since: epoch - 29 }); await alarm({ start: epoch - 3600 }); await reading();
-    await run(); check(await count(), 0, 'Enabling a rule does not flood the inbox with old alarms');
-    await reading({ at: epoch + 1, received: epoch + 1 }); await run();
-    check(await count(), 3, 'An old alarm qualifies only after confirmed duration since enabling');
-
-    await reset(); await rule(); const coldAlarm = await alarm({ start: epoch - 3600 });
-    const coldAt = epoch - 40;
-    const coldTransition = at => alarmTransition({ companyId: 4, machineId: 7, shiftId: null,
-      prev: null, isAlarm: true, alarms: [{ alarm_code: 'EX1046', alarm_type: 'Door open' }], deviceTime: at });
-    await writeAlarmTransition(pool, coldTransition(coldAt));
-    const coldState = (await pool.query(`SELECT EXTRACT(EPOCH FROM started_at)::bigint AS started,
-      EXTRACT(EPOCH FROM notification_continuity_started_at)::bigint AS confirmed FROM machine_alarms WHERE id=$1`, [coldAlarm])).rows[0];
-    check(Number(coldState.started), epoch - 3600, 'Unknown-baseline reconciliation preserves reporting start time');
-    check(Number(coldState.confirmed), coldAt, 'Cold collector starts notification continuity at its first confirmed observation');
-    await writeAlarmTransition(pool, coldTransition(coldAt - 10));
-    check(Number((await pool.query('SELECT EXTRACT(EPOCH FROM notification_continuity_started_at)::bigint AS confirmed FROM machine_alarms WHERE id=$1', [coldAlarm])).rows[0].confirmed),
-      coldAt, 'Replaying an older journal transition cannot move the continuity boundary backwards');
-    await reading({ at: coldAt, received: coldAt }); await run();
-    check(await count(), 0, 'An old alarm with no persisted ingest gap cannot notify immediately after cold startup');
-    await reading({ at: coldAt + 29, received: coldAt + 29 }); await run();
-    check(await count(), 0, 'A cold-start alarm still waits for all 30 confirmed seconds');
-    await reading({ at: coldAt + 30, received: coldAt + 30 }); await run();
-    check(await count(), 3, 'A cold-start alarm can notify after its new confirmed qualification window');
-
-    for (const latest of [{ at: epoch + 1000 }, { received: epoch + 1000 }, { at: epoch - 600 }, { alarm: false }]) {
-      await reset(); await rule(); await alarm({ start: epoch - 3600 }); await reading({ received: epoch - 1 });
-      await reading({ received: epoch, ...latest }); await run();
-      check(await count(), 0, 'A newer invalid or cleared observation cannot fall back to an older alarm sample');
+    async function transition({ code = 'EX1000', severity = 'CRITICAL', machine = 7, company = 4,
+      at = epoch - 3, received = at + 0.125, prev = { alarm: false, alarm_codes: [], alarm_severities: {} }, active = true, client = pool } = {}) {
+      const item = { alarm_code: code, alarm_type: 'Fixture controller alarm', alarm_severity: severity, alarm_message: `Observed ${severity}` };
+      const change = alarmTransition({ companyId: company, machineId: machine, shiftId: null, prev,
+        isAlarm: active, alarms: active ? [item] : [], deviceTime: at, receivedAt: new Date(received * 1000).toISOString() });
+      if (change) await writeAlarmTransition(client, change);
+      return { alarm: active, alarm_codes: active ? [code] : [], alarm_severities: active ? { [code]: severity.trim().toUpperCase() } : {} };
     }
 
-    await reset(); await rule(); const failed = await alarm(); await reading();
-    await pool.query(`CREATE FUNCTION refuse_alarm_inbox() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-      BEGIN RAISE EXCEPTION 'Injected notification insert failure'; END $$;
-      CREATE TRIGGER refuse_alarm_inbox BEFORE INSERT ON notifications FOR EACH ROW EXECUTE FUNCTION refuse_alarm_inbox();`);
-    try { await run(); } catch (error) { assert.match(error.message, /Injected notification insert failure/); }
-    check(await count(), 0, 'A rejected inbox insert leaves no partial recipients');
-    check(await marker(failed), null, 'The failed transaction does not mark an alarm delivered');
-    await pool.query('DROP TRIGGER refuse_alarm_inbox ON notifications'); await run();
-    check(await count(), 3, 'A failed dispatch retries successfully after database recovery');
-
-    await reset(); await rule(); const durable = await alarm(); await reading(); socketFailure = true;
-    try { await run(); } catch (error) { assert.match(error.message, /Injected socket failure/); }
-    check(await count(), 3, 'A socket failure cannot undo durable inbox rows');
-    check(Boolean(await marker(durable)), true, 'A socket failure cannot undo the occurrence marker');
-    socketFailure = false; await run(); check(await count(), 3, 'Retry after socket failure does not duplicate notifications');
-
-    // API services use a real pool too. No HTTP server or auth bypass is needed
-    // to verify validation, tenancy, and transactional configuration semantics.
     await reset();
-    for (const body of [{ delay_seconds: 0 }, { delay_seconds: 86401 }, { delay_seconds: 0.5 },
-      { delay_seconds: '30' }, { enabled: 'true' }]) {
-      await assert.rejects(() => service.updateRule(actor, 7, { enabled: true, delay_seconds: 30, ...body }), error => error.status === 400,
-        `Invalid rule patch ${JSON.stringify(body)} must be rejected`); assertions++;
+    check((await service.getPolicy(actor)).enabled, false, 'Critical notifications are off until a company administrator enables them');
+    check((await service.getPolicy(actor)).configured, false, 'A missing company configuration is visible as unconfigured');
+    await transition(); await run(); check(await count(), 0, 'An unconfigured company never receives a critical alert');
+    const saved = await enable();
+    check(saved.enabled, true, 'The company administrator can enable critical alerts for the fleet');
+    check(saved.counts.machines, 2, 'Company configuration counts only active company machines');
+    const beforeSameSave = (await pool.query('SELECT version,enabled_since FROM alarm_notification_policies WHERE company_id=4')).rows[0];
+    await service.updatePolicy(actor, { enabled: true, expected_version: saved.version });
+    check((await pool.query('SELECT version,enabled_since FROM alarm_notification_policies WHERE company_id=4')).rows[0], beforeSameSave,
+      'Saving the same value does not restart eligibility or increment its version');
+    await assert.rejects(() => service.updatePolicy(actor, { enabled: false, expected_version: 0 }), error => error.status === 409); assertions++;
+    for (const body of [{ enabled: 'true', expected_version: 1 }, { enabled: true, expected_version: -1 },
+      { enabled: true, expected_version: '1' }, { enabled: true }]) {
+      await assert.rejects(() => service.updatePolicy(actor, body), error => error.status === 400); assertions++;
     }
-    await assert.rejects(() => service.updateRule(actor, 9, { enabled: true, delay_seconds: 30 }), error => error.status === 404); assertions++;
-    await service.updateRule(actor, 7, { enabled: true, delay_seconds: 30 });
-    check((await pool.query('SELECT enabled,delay_seconds FROM alarm_notification_rules WHERE company_id=4 AND machine_id=7')).rows,
-      [{ enabled: true, delay_seconds: 30 }], 'A company can save a 30-second machine rule');
-    const before = (await pool.query('SELECT enabled_since FROM alarm_notification_rules WHERE company_id=4 AND machine_id=7')).rows[0].enabled_since;
-    await pool.query("UPDATE alarm_notification_rules SET enabled_since=NOW()-INTERVAL '1 hour'");
-    await service.updateRule(actor, 7, { enabled: true, delay_seconds: 60 });
-    const after = (await pool.query('SELECT enabled_since,delay_seconds FROM alarm_notification_rules WHERE company_id=4 AND machine_id=7')).rows[0];
-    check(after.delay_seconds, 60, 'One-minute policy is supported');
-    check(after.enabled_since >= before, true, 'Changing the threshold starts a fresh observation window');
-    await service.updateRule(actor, 7, { enabled: true, delay_seconds: 60 });
-    check((await pool.query('SELECT enabled_since FROM alarm_notification_rules WHERE company_id=4 AND machine_id=7')).rows[0].enabled_since,
-      after.enabled_since, 'Saving an unchanged rule does not indefinitely restart qualification');
-    const scoped = await service.getRules(actor, { page: 1, limit: 100 });
-    const serialized = JSON.stringify(scoped);
-    check(serialized.includes('CNC-7'), true, 'Rule listing includes the authorized machine');
-    check(serialized.includes('CNC-8'), true, 'Company administrators can configure both company plants');
-    check(serialized.includes('CNC-9') || serialized.includes('CNC-10'), false, 'Rule listing hides foreign and inactive machines');
-    await assert.rejects(() => service.getRules({ ...actor, roles: ['ENGINEER'] }), error => error.status === 403); assertions++;
-    await assert.rejects(() => service.getRules({ ...actor, is_snt_super: true }), error => error.status === 403); assertions++;
-    await assert.rejects(() => pool.query(`INSERT INTO alarm_notification_rules(company_id,machine_id,delay_seconds)VALUES(5,7,30)`), error => error.code === '23503'); assertions++;
-    await assert.rejects(() => pool.query('UPDATE alarm_notification_rules SET delay_seconds=0'), error => error.code === '23514'); assertions++;
+    await assert.rejects(() => service.getPolicy({ ...actor, roles: ['ENGINEER'] }), error => error.status === 403); assertions++;
+    await assert.rejects(() => service.getPolicy({ ...actor, is_snt_super: true }), error => error.status === 403); assertions++;
+    await assert.rejects(() => pool.query('INSERT INTO alarm_notification_policies(company_id,enabled) VALUES(999,TRUE)'), error => error.code === '23503'); assertions++;
 
-    await reset(); await rule(); await alarm(); await reading();
-    await pool.query('DELETE FROM company_permissions WHERE company_id=4 AND permission_id IN (1,3)');
-    await run(); check(await count(), 0, 'Revoking company alarm pages also prevents administrator delivery');
-    await pool.query('INSERT INTO company_permissions VALUES(4,1),(4,3)');
-    await run(); check(await count(), 3, 'Restoring an authorized page allows the pending occurrence to deliver');
+    await reset(); await enable();
+    let state = await transition();
+    const shortId = (await pool.query('SELECT id FROM machine_alarms')).rows[0].id;
+    await transition({ active: false, at: epoch, prev: state });
+    check((await pool.query('SELECT ended_at IS NOT NULL AS cleared FROM machine_alarms WHERE id=$1', [shortId])).rows[0].cleared, true,
+      'A three-second critical alarm has physically cleared before dispatch');
+    await Promise.all([run(),run(),run()]);
+    check((await inbox()).map(row => row.user_id), [1,2,4], 'Only authorized active own-plant/company recipients receive the accepted critical occurrence');
+    check((await inbox()).every(row => row.type === 'ALARM' && row.alarm_priority === 'critical'), true, 'The inbox contains only the critical alarm priority');
+    check(delivered.flat().every(id => [1,2,4].includes(Number(id))), true, 'Socket unread updates target only eligible recipients');
+    check((await pool.query('SELECT message FROM notifications LIMIT 1')).rows[0].message.includes('Still active after'), false,
+      'Immediate messages never claim a cleared alarm remains active');
+    await run(); check(await count(), 3, 'Repeated workers never repeat the physical occurrence');
 
-    // Use the real inbox reader against the same database. The worker keeps
-    // its earlier captured announcement stub, so no external service is used.
+    for (const [label, received, expected] of [
+      ['received after enabling within the same device second', epoch + 0.75, 3],
+      ['received before enabling within the same device second', epoch + 0.25, 0]
+    ]) {
+      await reset(); await enable(true, epoch + 0.5);
+      state = await transition({ at: epoch, received });
+      await transition({ active: false, at: epoch + 1, received: epoch + 1.125, prev: state });
+      check((await pool.query('SELECT ended_at IS NOT NULL AS cleared FROM machine_alarms')).rows[0].cleared, true,
+        `The fractional-enable boundary alarm already cleared: ${label}`);
+      await run(); check(await count(), expected,
+        `True network receipt distinguishes a critical event ${label}`);
+    }
+
+    for (const severity of ['NORMAL','HIGH','MEDIUM','LOW','INFO','INFORMATION','INFORMATIONAL','MESSAGE','UNKNOWN']) {
+      await reset(); await enable(); await transition({ severity }); await reading(); await run();
+      check(await count(), 0, `${severity} stays in history and cannot create a notification`);
+      check(await eventCount(), 0, `${severity} creates no unused critical outbox work`);
+      check((await pool.query('SELECT COUNT(*)::int AS count FROM machine_alarms')).rows[0].count, 1, `${severity} remains recorded for reporting`);
+    }
+    for (const severity of [' critical ','FATAL',' emergency ']) {
+      await reset(); await enable(); await transition({ severity }); await run();
+      check(await count(), 3, `${severity} uses the shared normalized critical classification`);
+    }
+    await reset(); await enable();
+    await pool.query('INSERT INTO alarm_notification_rules(company_id,machine_id,enabled,delay_seconds)VALUES(4,7,TRUE,1)');
+    await transition({ severity: 'NORMAL' }); await reading(); await run();
+    check(await count(), 0, 'Old enabled per-machine delayed rules cannot send noncritical notifications in this phase');
+
+    await reset(); await enable();
+    await pool.query("INSERT INTO machines VALUES(12,4,8,'CNC-12','Future fleet machine',TRUE)");
+    await transition({ machine: 12 }); await run(); check(await count(), 3, 'Future company machines inherit critical notifications automatically');
+    await pool.query('DELETE FROM machine_alarms WHERE machine_id=12'); await pool.query('DELETE FROM machines WHERE id=12');
+
+    await reset(); await enable();
+    state = await transition({ severity: 'NORMAL', at: epoch - 6 });
+    const originalId = (await pool.query('SELECT id FROM machine_alarms')).rows[0].id;
+    await run(); check(await count(), 0, 'A normal alarm starts without an alert');
+    state = await transition({ severity: 'CRITICAL', at: epoch - 5, prev: state });
+    await run(); check(await count(), 3, 'A same-code escalation from normal to critical alerts immediately');
+    check((await pool.query('SELECT id FROM machine_alarms')).rows.map(row => row.id), [originalId], 'Escalation retains one physical alarm identity');
+    const initialEvents = await eventCount();
+    state = await transition({ severity: 'CRITICAL', at: epoch - 4, prev: state });
+    check(await eventCount(), initialEvents, 'Unchanged readings create no additional events or writes');
+    state = await transition({ severity: 'FATAL', at: epoch - 3, prev: state });
+    check(await eventCount(), initialEvents, 'Changing a critical alias does not create another critical event');
+    state = await transition({ severity: 'NORMAL', at: epoch - 2, prev: state });
+    state = await transition({ severity: 'EMERGENCY', at: epoch - 1, prev: state });
+    await run(); check(await count(), 3, 'Repeated critical escalation within one occurrence does not spam notifications');
+    await transition({ active: false, at: epoch, prev: state });
+    await transition({ at: epoch + 1 }); await run(); check(await count(), 6, 'A physically cleared then recurring critical alarm alerts again');
+
+    await reset(); await enable();
+    state = await transition({ at: epoch - 4, received: epoch - 3.9 });
+    await transition({ active: false, at: epoch - 4, received: epoch - 3.8, prev: state });
+    await transition({ at: epoch - 4, received: epoch - 3.7 });
+    check((await pool.query('SELECT COUNT(*)::int AS count FROM machine_alarms')).rows[0].count, 2,
+      'Clear and recur within the same device second preserve two real alarm occurrences');
+    await Promise.all([run(),run()]); check(await count(), 6, 'Each distinct same-second critical occurrence notifies once');
+    await transition({ at: epoch - 4, received: epoch - 3.9 });
+    check((await pool.query('SELECT COUNT(*)::int AS count FROM machine_alarms')).rows[0].count, 2,
+      'Replaying the older same-second open cannot create a third occurrence');
+
+    await reset(); await enable();
+    state = await transition({ severity: 'NORMAL', at: epoch - 4, received: epoch - 3.8 });
+    state = await transition({ at: epoch - 4, received: epoch - 3.7, prev: state });
+    await transition({ severity: 'NORMAL', at: epoch - 4, received: epoch - 3.9,
+      prev: { alarm: true, alarm_codes: ['EX1000'], alarm_severities: { EX1000: 'CRITICAL' } } });
+    check((await pool.query('SELECT severity FROM machine_alarms')).rows[0].severity, 'CRITICAL', 'Older same-device-second replay cannot demote the newer critical snapshot');
+    await run(); check(await count(), 3, 'Correctly ordered critical escalation remains deliverable once');
+    await transition({ active: false, at: epoch - 2, prev: state });
+    await transition({ severity: 'NORMAL', at: epoch - 4, received: epoch - 3.8 });
+    check((await pool.query('SELECT COUNT(*)::int AS count FROM machine_alarms')).rows[0].count, 1, 'Replay of a known closed occurrence cannot invent a new open period');
+
+    await reset(); await enable(false);
+    state = await transition({ at: epoch - 10 }); await reading({ at: epoch - 8 }); await run();
+    check(await count(), 0, 'A disabled company does not deliver critical events');
+    await enable(true, epoch - 5); await run(); check(await count(), 0, 'Enabling waits for an accepted observation after the enable boundary');
+    await reading({ at: epoch - 4 }); await run(); check(await count(), 3, 'An already-active critical alarm alerts on fresh confirmation after enabling');
+    await run(); check(await count(), 3, 'The activation fallback is also once per physical occurrence');
+    await enable(false); await transition({ at: epoch, code: 'EX2000' }); await run(); check(await count(), 3, 'Disabling stops new critical notifications');
+
+    await reset(); await enable(false);
+    state = await transition({ at: epoch - 10 }); await transition({ active: false, at: epoch - 7, prev: state });
+    await reading({ at: epoch - 6, alarm: false }); await enable(true, epoch - 5); await run();
+    check(await count(), 0, 'Enabling cannot flood the inbox with historical cleared critical alarms');
+    await reset(); await enable();
+    const historical = await alarm({ start: epoch - 3600 }); await transition({ prev: null });
+    check(await eventCount(), 0, 'Cold discovery of unchanged historical critical state creates no fake new occurrence event');
+    check((await pool.query('SELECT id FROM machine_alarms')).rows.map(row => row.id), [historical], 'Cold reconciliation preserves reporting history');
+    await run(); check(await count(), 0, 'A cold collector alone cannot dispatch without a fresh accepted observation');
+    await reading(); await run(); check(await count(), 3, 'Fresh physically-active critical confirmation can notify after cold reconciliation');
+
+    for (const [label, options] of [
+      ['stale device', { at: epoch - 600, received: epoch }], ['stale arrival', { at: epoch, received: epoch - 600 }],
+      ['future device', { at: epoch + 1000, received: epoch }], ['future arrival', { at: epoch, received: epoch + 1000 }],
+      ['foreign company without opt-in', { machine: 9, company: 5 }], ['inactive machine', { machine: 10 }],
+      ['inactive company', { machine: 11, company: 6 }]
+    ]) {
+      await reset(); await enable(); await transition(options); await run();
+      check(await count(), 0, `${label} cannot manufacture a critical notification`);
+    }
+    for (const latest of [{ at: epoch + 1000 }, { received: epoch + 1000 }, { at: epoch - 600 }, { alarm: false }]) {
+      await reset(); await enable(); await alarm({ start: epoch - 3600 });
+      await reading({ received: epoch - 1 }); await reading({ received: epoch, ...latest }); await run();
+      check(await count(), 0, 'The active-alarm fallback cannot skip a newer invalid or cleared observation');
+    }
+    await reset(); await enable(); await transition();
+    await pool.query('UPDATE plants SET is_active=FALSE WHERE id=8'); await run();
+    check(await count(), 0, 'An inactive assigned plant does not notify');
+    await pool.query('UPDATE plants SET is_active=TRUE WHERE id=8');
+    await reset(); await enable(); await transition();
+    await pool.query('DELETE FROM company_permissions WHERE company_id=4 AND permission_id IN(1,3)'); await run();
+    check(await count(), 0, 'Revoking company alarm page grants prevents administrator delivery too');
+    await pool.query('INSERT INTO company_permissions VALUES(4,1),(4,3)'); await run();
+    check(await count(), 3, 'Restored permission can deliver the still-fresh pending critical event');
+    await reset(); await enable(); await alarm({ resolved: true }); await reading(); await run();
+    check(await count(), 3, 'Manual acknowledgement does not falsely clear a physically active critical alarm');
+
+    await reset(); await enable();
+    const listener = await pool.connect(), producer = await pool.connect(), wakeups = [];
+    const onNotification = notification => wakeups.push(notification.channel);
+    listener.on('notification', onNotification);
+    try {
+      await listener.query('LISTEN cnc_alarm_events'); await producer.query('BEGIN'); await transition({ client: producer });
+      check(await eventCount(), 0, 'Uncommitted alarm events are invisible to dispatch');
+      await new Promise(resolve => setTimeout(resolve,30)); check(wakeups, [], 'NOTIFY cannot escape before COMMIT');
+      await producer.query('ROLLBACK'); await new Promise(resolve => setTimeout(resolve,30));
+      check(await eventCount(), 0, 'ROLLBACK removes alarm and event together'); check(wakeups, [], 'ROLLBACK discards the wakeup');
+      await producer.query('BEGIN'); await transition({ client: producer }); await producer.query('COMMIT');
+      await new Promise(resolve => setTimeout(resolve,30));
+      check(wakeups, ['cnc_alarm_events'], 'Committed accepted events wake the API through PostgreSQL NOTIFY');
+      check(await eventCount(), 1, 'Every committed wakeup has a durable event behind it');
+    } finally { await listener.query('UNLISTEN cnc_alarm_events'); listener.removeListener('notification', onNotification); listener.release(); producer.release(); }
+    await Promise.all([run(),run()]); check(await count(), 3, 'Concurrent recovery dispatch consumes a committed critical event once');
+
+    await reset(); await enable(); await transition();
+    await pool.query(`CREATE FUNCTION refuse_alarm_inbox() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Injected notification insert failure'; END $$;
+      CREATE TRIGGER refuse_alarm_inbox BEFORE INSERT ON notifications FOR EACH ROW EXECUTE FUNCTION refuse_alarm_inbox();`);
+    await assert.rejects(() => run(), /Injected notification insert failure/); assertions++;
+    check(await count(), 0, 'A failed inbox insert leaves no partial recipients');
+    check((await pool.query('SELECT processed_at FROM alarm_notification_events')).rows[0].processed_at, null, 'Failed dispatch leaves the event retryable');
+    check((await pool.query('SELECT notification_sent_at FROM machine_alarms')).rows[0].notification_sent_at, null, 'Failed dispatch leaves the occurrence undelivered');
+    await pool.query('DROP TRIGGER refuse_alarm_inbox ON notifications'); await run(); check(await count(), 3, 'Retry after recovery delivers once');
+    await reset(); await enable(); await transition(); socketFailure = true; await run();
+    check(await count(), 3, 'Socket failure cannot undo durable inbox rows');
+    socketFailure = false; await run(); check(await count(), 3, 'Retry after socket failure does not duplicate delivery');
+
+    // Read isolation survives an account being reassigned to another company.
     const unreadEvents = [];
-    inject('src/lib/realtime.js', { isLive: () => true,
-      emitToUser: (id, event, payload) => unreadEvents.push({ id, event, payload }) });
-    const notificationPath = require.resolve(path.join(repo, 'src/notifications/notification.service'));
-    delete require.cache[notificationPath];
+    inject('src/lib/realtime.js', { isLive: () => true, emitToUser: (id,event,payload) => unreadEvents.push({ id,event,payload }) });
+    const notificationPath = require.resolve(path.join(repo,'src/notifications/notification.service')); delete require.cache[notificationPath];
     const notificationReads = require(notificationPath);
     const oldNotification = (await pool.query('SELECT id FROM notifications WHERE user_id=2 AND company_id=4')).rows[0].id;
-    check(await notificationReads.getUnreadCount(2, 4), 1, 'The original company inbox has its expected unread alarm');
+    check(await notificationReads.getUnreadCount(2,4), 1, 'The original company badge contains its critical alarm');
     await pool.query('UPDATE users SET company_id=5,plant_id=9 WHERE id=2');
-    const emptyNewInbox = await notificationReads.getNotifications({ user_id: 2, company_id: 5 });
-    check(emptyNewInbox.data, [], 'A moved account cannot read its historical company inbox');
-    check(emptyNewInbox.pagination.total, 0, 'The moved account list total excludes historical company rows');
-    check(emptyNewInbox.unread_count, 0, 'The moved account list badge excludes historical company rows');
-    check(await notificationReads.getUnreadCount(2, 5), 0, 'The dedicated unread count uses the authenticated company');
-    await notificationReads.announceUnread([2]);
-    check(unreadEvents.at(-1), { id: 2, event: 'unreadCount', payload: { count: 0 } },
-      'Live badges do not include rows belonging to the account previous company');
-    const temporaryRows = (await pool.query(`INSERT INTO notifications(company_id,user_id,type,title)
-      VALUES(5,2,'INFO','Current company notice'),(5,6,'INFO','Another user notice') RETURNING id,user_id`)).rows;
-    const ownNewId = temporaryRows.find(row => row.user_id === 2).id;
-    const otherUserId = temporaryRows.find(row => row.user_id === 6).id;
-    const currentInbox = await notificationReads.getNotifications({ user_id: 2, company_id: 5 });
-    check(currentInbox.data.map(row => row.id), [ownNewId], 'Only the current company and current user inbox rows are visible');
-    check(currentInbox.unread_count, 1, 'Current company unread rows are counted normally');
-    await notificationReads.markRead({ user_id: 2, company_id: 5, notification_id: oldNotification });
-    check((await pool.query('SELECT is_read FROM notifications WHERE id=$1', [oldNotification])).rows[0].is_read,
-      false, 'A current-company single read cannot change a historical foreign-company row');
-    await notificationReads.markAllRead(2, 5);
-    const readStates = (await pool.query('SELECT id,is_read FROM notifications WHERE id=ANY($1::bigint[]) ORDER BY id',
-      [[oldNotification, ownNewId, otherUserId]])).rows;
-    check(readStates.find(row => row.id === oldNotification).is_read, false, 'Mark-all-read preserves historical company rows');
-    check(readStates.find(row => row.id === ownNewId).is_read, true, 'Mark-all-read marks the authenticated company row');
-    check(readStates.find(row => row.id === otherUserId).is_read, false, 'Mark-all-read preserves another user rows');
-    const unreadOnly = await notificationReads.getNotifications({ user_id: 2, company_id: 5, unread_only: 'true' });
-    check(unreadOnly.data, [], 'Unread filtering stays inside the authenticated user and company');
-    check(await notificationReads.getUnreadCount(2, 5), 0, 'The current company badge clears after reading');
-    await pool.query('DELETE FROM notifications WHERE id=ANY($1::bigint[])', [temporaryRows.map(row => row.id)]);
+    const movedInbox = await notificationReads.getNotifications({ user_id: 2,company_id: 5 });
+    check(movedInbox.data, [], 'A reassigned account cannot read its former company inbox');
+    check(movedInbox.pagination.total, 0, 'Moved-account totals exclude former company records');
+    check(movedInbox.unread_count, 0, 'Moved-account badges exclude former company records');
+    check(await notificationReads.getUnreadCount(2,5), 0, 'Dedicated unread counts use authenticated company scope');
+    await notificationReads.announceUnread([2]); check(unreadEvents.at(-1), { id: 2,event: 'unreadCount',payload: { count: 0 } }, 'Live badges remain company scoped after reassignment');
+    const temporaryRows = (await pool.query("INSERT INTO notifications(company_id,user_id,type,title)VALUES(5,2,'INFO','Current company'),(5,6,'INFO','Another user') RETURNING id,user_id")).rows;
+    const ownNew = temporaryRows.find(row => row.user_id === 2).id, foreignUser = temporaryRows.find(row => row.user_id === 6).id;
+    const currentInbox = await notificationReads.getNotifications({ user_id: 2,company_id: 5 });
+    check(currentInbox.data.map(row => row.id), [ownNew], 'Only the current company/user rows are readable');
+    check(currentInbox.unread_count, 1, 'Current company unread counts continue normally');
+    await notificationReads.markRead({ user_id: 2,company_id: 5,notification_id: oldNotification });
+    check((await pool.query('SELECT is_read FROM notifications WHERE id=$1',[oldNotification])).rows[0].is_read, false, 'Single read cannot modify a former company row');
+    await notificationReads.markAllRead(2,5);
+    const readStates = (await pool.query('SELECT id,is_read FROM notifications WHERE id=ANY($1::bigint[])',[[oldNotification,ownNew,foreignUser]])).rows;
+    check(readStates.find(row => row.id === oldNotification).is_read, false, 'Mark all preserves former company rows');
+    check(readStates.find(row => row.id === ownNew).is_read, true, 'Mark all updates current user/company rows');
+    check(readStates.find(row => row.id === foreignUser).is_read, false, 'Mark all preserves another user rows');
+    check((await notificationReads.getNotifications({ user_id: 2,company_id: 5,unread_only: 'true' })).data, [], 'Unread filtering stays within company/user scope');
+    check(await notificationReads.getUnreadCount(2,5), 0, 'The current company badge clears after reading');
+    await pool.query('DELETE FROM notifications WHERE id=ANY($1::bigint[])',[temporaryRows.map(row => row.id)]);
     await pool.query('UPDATE users SET company_id=4,plant_id=8 WHERE id=2');
-    check(await notificationReads.getUnreadCount(2, 4), 1, 'Historical alarms remain intact when the original company scope is restored');
+    check(await notificationReads.getUnreadCount(2,4), 1, 'The historical critical inbox remains intact');
     const rollbackClient = await pool.connect();
-    try {
-      await assert.rejects(() => rollbackClient.query(rollback), /Cannot roll back 047/); assertions++;
-      await rollbackClient.query('ROLLBACK');
-    } finally { rollbackClient.release(); }
-    check(await count(), 3, 'Rollback preserves existing inbox history');
-    check((await pool.query('SELECT COUNT(*)::int AS count FROM machine_alarms')).rows[0].count, 1, 'Rollback preserves alarm history');
-    check((await pool.query('SELECT COUNT(*)::int AS count FROM alarm_notification_rules')).rows[0].count, 1, 'Refused rollback preserves company configuration');
-
-    console.log(`Alarm notification PostgreSQL fixture passed (${assertions} assertions): migration/reapply/rollback, 30-second and ten-minute confirmed thresholds, transient clear, recurrence, concurrent exactly-once inbox, tenant/plant/permission/personal preferences, stale/future/queued/offline protection, cold-start reconciliation and journal replay, enable/change reset, transactional failure retry, socket durability, rule validation, scoped reads and company reassignment inbox isolation.`);
+    try { await assert.rejects(() => rollbackClient.query(policyRollback), /Cannot roll back 048/); assertions++; await rollbackClient.query('ROLLBACK'); }
+    finally { rollbackClient.release(); }
+    check(await count(), 3, 'Refused rollback preserves inbox history');
+    check(await eventCount(), 1, 'Refused rollback preserves accepted critical events');
+    check((await pool.query('SELECT COUNT(*)::int AS count FROM machine_alarms')).rows[0].count, 1, 'Refused rollback preserves alarm history');
+    check((await pool.query('SELECT enabled FROM alarm_notification_policies WHERE company_id=4')).rows[0].enabled, true, 'Refused rollback preserves company configuration');
+    console.log(`Critical alarm PostgreSQL fixture passed (${assertions} assertions): 047/048 migration/reapply/rollback, explicit fleet opt-in/future machines, normal/info history only, 3-second critical after clear, same-code escalation and same-second recurrence, shared aliases, monotonic replay, active confirmation after enable, transactional outbox/NOTIFY, concurrent exactly-once delivery, stale/future/inactive protection, tenant/plant/permission/personal preferences, inbox reassignment isolation, failed-dispatch retry and socket durability.`);
   } finally {
     if (pool) await pool.end();
-    if (running) execFileSync(path.join(pgBin, 'pg_ctl'), ['-D', path.join(directory, 'data'), '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
-    fs.rmSync(directory, { recursive: true, force: true });
+    if (running) execFileSync(path.join(pgBin,'pg_ctl'),['-D',path.join(directory,'data'),'-m','immediate','-w','stop'],{ stdio: 'pipe' });
+    fs.rmSync(directory,{ recursive: true,force: true });
   }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

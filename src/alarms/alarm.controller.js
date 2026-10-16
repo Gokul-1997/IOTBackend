@@ -1,22 +1,16 @@
 const service = require('./alarm.service');
 const notificationRules = require('./alarm-notification.service');
 
-exports.getNotificationRules = async (req, res) => {
-  try {
-    const result = await notificationRules.getRules(req.user, req.query);
-    res.json({ success: true, ...result });
-  } catch (error) {
-    res.status(error.status || 500).json({ success: false, message: error.message });
-  }
+const configuration = (method, args) => async (req, res) => {
+  try { res.json({ success: true, data: await notificationRules[method](req.user, ...args(req)) }); }
+  catch (error) { res.status(error.status || 500).json({ success: false, message: error.message }); }
 };
-
-exports.updateNotificationRule = async (req, res) => {
-  try {
-    const data = await notificationRules.updateRule(req.user, req.params.machineId, req.body);
-    res.json({ success: true, data });
-  } catch (error) {
-    res.status(error.status || 500).json({ success: false, message: error.message });
-  }
+exports.getNotificationPolicy = configuration('getPolicy', () => []);
+exports.updateNotificationPolicy = configuration('updatePolicy', req => [req.body]);
+// Keep a clear response for old deployed clients rather than silently saving
+// delay rules which no longer control this critical-only phase.
+exports.retiredNotificationRules = (_req, res) => {
+  res.status(410).json({ success: false, message: 'Machine delay rules are not available in this phase. Use company critical alert settings.' });
 };
 
 exports.getAlarms = async (req, res) => {

@@ -1,119 +1,119 @@
-# Sustained alarm notifications
+# Critical alarm notifications
 
-The company administrator chooses which machines should notify and how long
-their controller alarms must remain active. Short alarms remain in alarm
-history; they do not create inbox messages unless they reach the configured
-delay. This feature does not delay recording or displaying machine alarms.
+This phase sends **critical alarm notifications only**. Normal and informational
+alarms continue to appear in alarm history without creating inbox messages.
+Advanced rules, configurable delays and machine exceptions are deferred.
 
-## Use Settings
+## Settings
 
-1. Open **Settings → Alarm notifications** as a company administrator.
-2. Find the machine by its serial number or plant name.
-3. Enable **Alarm alerts**, choose **30 seconds**, **1 minute**, **5 minutes**,
-   **10 minutes**, or custom whole seconds, then select **Save**.
-4. Keep **Receive alarm notifications** on for your own account. Other users
-   who can view alarms can manage their own receive switch.
+1. A company administrator opens **Settings → Alarm notifications**.
+2. Enable **Critical alarm alerts** for the company and save. This applies to all
+   active machines, including newly added machines.
+3. Each recipient keeps their personal **Receive alarm notifications** switch on.
 
-Rules start disabled. The suggested starting value is 10 minutes; choose the
-delay appropriate to the machine and the action an operator should take.
-Custom values range from 1 to 86,400 seconds. Enabling a rule or changing its
-delay starts a new waiting period; saving identical values does not restart it.
+The company setting starts disabled until explicitly saved. A suggested switch
+state is not activation. Existing per-machine delay records from migration 047
+remain preserved but do not control this phase. Their old rules do not silently
+activate company-wide critical alerts. Reload a conflicting version before
+replacing another administrator's saved setting.
 
-For a 30-second rule:
+Critical alarms notify without an intentional waiting period. There is no delay
+editor, normal/information delivery control or machine exception screen in this
+phase. Turning the company switch off stops new delivery; existing history stays.
 
-| Controller observation | Inbox result |
+Priority comes from accepted controller telemetry, not message-text guesses.
+Case and surrounding spaces are normalized: `CRITICAL`, `FATAL` and `EMERGENCY`
+are critical. Other values do not notify. Verify the device adapter reports the
+intended severity; the existing FOCAS adapter can also infer critical priority
+from supported controller alarm types and emergency-stop signals.
+
+| Controller observations | Result when company alerts are enabled |
 | --- | --- |
-| Alarm clears after 3 seconds | No notification |
-| Alarm clears before 30 seconds | No notification |
-| Fresh observations confirm the same alarm at 30 seconds | One notification becomes due |
-| The same occurrence remains active | No repeated notification |
-| Alarm clears, then occurs again | A new waiting period |
+| A normal or information alarm occurs | History only |
+| A critical alarm clears after three seconds | One notification from its committed event, even if already cleared when processed |
+| The same alarm code changes from normal to critical | One critical notification |
+| The same physical occurrence reports critical repeatedly | No repeat notification |
+| An alarm clears and later occurs again as critical | A new notification |
+| Company alerts are enabled while a critical alarm is active | A fresh confirming observation can qualify it |
 
-The server checks every 15 seconds. Delivery follows confirmation of the delay,
-normally on the next check; service outages or a fleet-wide backlog can add
-latency. Timers run on the server with the dashboard closed.
+## Delivery and access
 
-## Recipients and continuity
+PMS writes critical events to `alarm_notification_events` in the same PostgreSQL
+transaction as accepted telemetry and the journal checkpoint. Unchanged readings
+do not create repeated events. Transactional `NOTIFY` wakes a dedicated API
+`LISTEN` connection after commit. A bounded worker drains the durable outbox.
+A 15-second recovery scan handles missed wakeups and confirms currently active
+critical alarms after activation. Listener reconnects do not discard queued work.
 
-Notifications go to active users in the machine's company who have enabled
-their personal alarm preference and can currently view Alarms, Alarm Report or
-Live Dashboard. Both role permissions and company page grants are checked.
-Plant-assigned users receive only their own plant's alerts; company
-administrators can receive alerts across their company. Each link opens a page
-the recipient is allowed to view. Inactive machines, companies and assigned
-plants do not generate alerts. Inbox reads and read markers also require the
-authenticated company, so reassigned accounts cannot access former-company
-messages.
+Immediate delivery is event driven, not a hard real-time safety guarantee.
+Database outages, collector disconnects and queued work can add latency. Events
+and confirming observations must be fresh; historical replay, future timestamps
+and offline time do not generate a flood of alerts. Events must also follow the
+company's activation boundary. A resolved controller occurrence does not qualify
+as a new active alarm when settings are enabled.
 
-The controller clearing an alarm (`ended_at`) cancels qualification. A person's
-Resolve action is acknowledgement, so it does not pretend the controller alarm
-has cleared. Different reported alarm codes are separate occurrences and can
-each notify once.
+Inbox insertion and the occurrence's critical-delivery marker commit together.
+Row locks and a unique index protect retries and concurrent workers. Socket
+unread updates follow commit. Socket failure leaves the inbox message available
+on reconnect. Processed transport events expire in bounded cleanup batches after
+seven days; machine alarm and inbox history remain.
 
-Duration comes from accepted device timestamps. The latest received telemetry
-must still confirm the alarm, and both its device and arrival timestamps must
-be fresh (within 120 seconds, with future timestamps excluded). A recorded gap
-of more than 60 seconds starts qualification again at the confirmed resume.
-When a collector has no trustworthy previous baseline, reconciliation also
-starts a new qualification period without rewriting historical alarm start time.
-Offline time is not silently used to make an old alarm become due.
+Recipients must be active users in the machine's company, have their personal
+alarm preference enabled and currently have access to Alarms, Alarm Report or
+Live Dashboard. Role permissions and company grants must agree. Plant-assigned
+users receive their plant's alerts; company administrators can receive company-wide
+alerts. Links open an allowed page. Inactive companies, machines and assigned
+plants do not notify. Inbox reads and read markers also bind the authenticated
+company, protecting account reassignment.
 
-Inbox insertion and the occurrence's delivered marker commit in one PostgreSQL
-transaction. Row locks and a unique alarm/user index protect concurrent runs,
-retries and restarts from creating duplicates. Socket unread updates follow the
-commit; a socket failure leaves the inbox record available on reconnect.
-
-The worker uses bounded batches and recent telemetry queries. Settings loads
-20 machines per page, with server search and no telemetry polling. No extra MQTT
-consumer, cloud service or browser timer is needed.
-
-Web and mobile apps display these messages in their notification inbox. The
-shared socket updates unread badges while connected; existing refresh paths
-recover them after network interruptions. Email and background iOS/Android
-push delivery are not part of this feature.
+Web and mobile inboxes use the existing notification API and unread socket.
+Email and native background iOS/Android push are not connected by this feature.
+No new cloud service, MQTT consumer or frontend polling timer is needed.
 
 ## Deployment
 
-Back up and review the target database and pending migration status first.
-Apply **047 before deploying/restarting the updated collector**:
+Back up and review target migration status. Apply **047 and 048 before restarting
+the updated collector**, using the target server's configured database:
 
 ```sh
-# Backend repository, using the target server's configured database
 npm run migrate -- --status
-npm run migrate -- --through 047_alarm_notifications.sql
+npm run migrate -- --through 048_alarm_notification_policies.sql
 ```
 
-Then restart the API and collector with their new code, and deploy the web UI.
-The production API must have scheduled jobs enabled (`CRON_ENABLED` must not be
-`false`). Developer processes connected to a shared database should keep jobs
-disabled. The scheduler uses a PostgreSQL advisory lock, so only one process
-runs a given job at a time.
+Then deploy/restart the API and collector, and deploy the web UI. The collector
+checks required schema before admission; do not bypass this guard. Keep scheduled
+delivery enabled on the server (`CRON_ENABLED` must not be `false`). Developer
+processes connected to shared databases must keep it off; the listener is also
+disabled in those processes. Include the listener's one held connection in API
+pool sizing. The scheduler uses PostgreSQL advisory locks.
 
-The updated collector refuses to start before the continuity column exists,
-with an explicit migration 047 message. Do not bypass this guard: it prevents a
-schema deployment error from being treated as a bad machine reading.
-
-To stop new alerts, disable the machine rule in Settings. Existing alarm and
-notification history remain. Rollback 047 refuses to discard saved rules or
-delivery history; it is not a reset command.
+Migration 048 conditionally grants the existing `machine_api_user` collector role
+SELECT/INSERT on the outbox and USAGE on its sequence. A different collector role
+needs equivalent narrow grants before restart. Existing alarm-table read/write
+privileges remain necessary. Guarded rollbacks refuse to discard saved settings
+or delivery history. Migration 047 remains unchanged for deployed installations.
 
 ## API examples
 
-Company identity always comes from the authenticated account. Rule management
-requires a company administrator with an alarm-related page grant.
+Company identity comes from the authenticated account. Company settings require
+a company administrator with an alarm-related page grant.
 
 ```http
-GET /api/alarms/notification-rules?page=1&limit=20&search=CNC
+GET /api/alarms/notification-policy
 Authorization: Bearer <access-token>
 ```
 
+Use the returned version when saving (`0` if unconfigured):
+
 ```http
-PUT /api/alarms/notification-rules/15
+PUT /api/alarms/notification-policy
 Authorization: Bearer <access-token>
 Content-Type: application/json
 
-{"enabled":true,"delay_seconds":30}
+{"enabled":true,"expected_version":0}
 ```
+
+Stale versions return HTTP 409. Personal changes affect only the signed-in user:
 
 ```http
 PUT /api/notifications/preferences
@@ -123,10 +123,10 @@ Content-Type: application/json
 {"notify_alarm":true}
 ```
 
-The rule list returns machine ID, serial number, plant name, enabled state and
-`delay_seconds`, plus pagination. The update returns the saved rule. Personal
-preference changes affect only the authenticated user. Devices continue posting
-telemetry through the existing MQTT flow; they do not call notification APIs.
+The retired per-machine delay-rule endpoints return HTTP 410 with guidance to
+use company critical alert settings. Deploy the matching frontend with the API.
+Devices continue publishing accepted telemetry through MQTT; they do not call
+notification settings APIs.
 
 ## Isolated verification
 
@@ -134,8 +134,7 @@ telemetry through the existing MQTT flow; they do not call notification APIs.
 node tools/architecture/verify-alarm-notifications.cjs
 ```
 
-This creates and removes its own private PostgreSQL cluster and verifies actual
-SQL, thresholds, clear/recur, concurrency, scope, continuity, rollback and retry.
+This creates and removes a private PostgreSQL cluster and exercises real SQL.
 It never reads application `.env`, sends email or connects to production services.
-Set `ALARM_FIXTURE_PG_BIN` to another PostgreSQL binary directory when checking
-the target major version. See the project audit for the versions and checks run.
+Set `ALARM_FIXTURE_PG_BIN` to a target PostgreSQL binary directory when checking
+another major version. See the project audit for executed checks.

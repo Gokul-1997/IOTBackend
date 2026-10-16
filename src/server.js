@@ -9,6 +9,7 @@ const redis = require('./redis'); // ioredis instance
 const realtime = require('./lib/realtime');
 const socketServer = require('./lib/socket-server');
 const { startListening } = require('./lib/start-listening');
+const { startAlarmNotifications } = require('./alarms/alarm-notification-listener');
 
 const PORT = process.env.PORT || 8000;
 
@@ -59,11 +60,14 @@ subscriber.on('message', (channel, message) => {
 /* ===============================
    🚀 Start Server
 ================================ */
+const stopAlarmNotifications = startAlarmNotifications({ pool: db });
+
 startListening(httpServer, db, PORT).then(() => {
   console.log(`Server-2 running on port ${PORT}`);
 }).catch(async (err) => {
   console.error('Startup failed; API listener remains closed:', err.message);
   require('./cron').stop?.();
+  await stopAlarmNotifications();
   await Promise.allSettled([subscriber.quit(), redis.quit(), db.end()]);
   io.close();
   process.exit(1);
@@ -77,6 +81,7 @@ const shutdown = async (signal) => {
 
   try {
     require('./cron').stop?.();
+    await stopAlarmNotifications();
     await subscriber.unsubscribe('machine_updates');
     await subscriber.quit();
     await redis.quit();

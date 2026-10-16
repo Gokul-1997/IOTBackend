@@ -5,8 +5,10 @@ const role = require('../middleware/role.middleware');
 const ctrl = require('./alarm.controller');
 
 const alarmPageAccess = access.any('page:alarms:view', 'page:analytics-alarms:view', 'page:dashboard:view');
-router.get('/notification-rules', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.getNotificationRules);
-router.put('/notification-rules/:machineId', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.updateNotificationRule);
+router.get('/notification-policy', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.getNotificationPolicy);
+router.put('/notification-policy', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.updateNotificationPolicy);
+router.get('/notification-rules', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.retiredNotificationRules);
+router.put('/notification-rules/:machineId', auth, role(['COMPANY_ADMIN', 'ADMIN']), alarmPageAccess, ctrl.retiredNotificationRules);
 
 /* The Alarms page's own keys (APP_MODULES "alarms": view, resolve). Every
    route used to check only that the caller was signed in, so any role could
