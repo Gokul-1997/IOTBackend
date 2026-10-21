@@ -15,7 +15,7 @@ router.get('/meta', auth, OeeController.getMeta);
 // Get OEE reports with filters and pagination
 router.get('/reports', auth, access('page:oee-reports:view'), heavy, OeeController.getReports);
 
-// Export to CSV
-router.get('/export', auth, access('page:oee-reports:export'), heavy, OeeController.exportCSV);
+// Export: every record for the filters, CSV or Excel (?format=)
+router.get('/export', auth, access('page:oee-reports:export'), heavy, OeeController.exportRecords);
 
 module.exports = router;

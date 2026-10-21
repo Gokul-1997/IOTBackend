@@ -14,6 +14,15 @@
 
 const MAX_DIRECT_DAYS = 92;          // a full quarter, inclusive
 
+/*
+ * Rows a download may carry. A file larger than this is not downloaded: it
+ * is built in the background and emailed, attached, to the person who asked
+ * (report.mailer.js) — 20,000 rows is about 1 MB of Excel, built in a second
+ * or two. REPORT_DIRECT_ROWS changes it.
+ */
+const MAX_DIRECT_ROWS = Number.parseInt(process.env.REPORT_DIRECT_ROWS, 10) > 0
+  ? Number.parseInt(process.env.REPORT_DIRECT_ROWS, 10) : 20000;
+
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseDate(value, field) {
@@ -69,4 +78,4 @@ function assertDirectRange(date_from, date_to) {
   return days;
 }
 
-module.exports = { MAX_DIRECT_DAYS, rangeDays, exceedsDirectLimit, assertDirectRange };
+module.exports = { MAX_DIRECT_DAYS, MAX_DIRECT_ROWS, rangeDays, exceedsDirectLimit, assertDirectRange };

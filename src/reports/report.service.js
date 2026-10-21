@@ -10,22 +10,8 @@ function secToHHMM(sec) {
   return `${h}:${m}`;
 }
 
-/* ─── operator CTE used in all queries ───
-   Gets the most recent active operator assigned to each machine.
-   Using DISTINCT ON (machine_id) to get one row per machine.
-*/
-const OPERATOR_CTE = `
-  op_map AS (
-    SELECT DISTINCT ON (oma.machine_id)
-      oma.machine_id,
-      o.id            AS operator_id,
-      o.operator_name
-    FROM operator_machine_assignments oma
-    JOIN operators o ON o.id = oma.operator_id AND o.is_active = TRUE
-    WHERE oma.is_active = TRUE
-    ORDER BY oma.machine_id, oma.id DESC
-  )
-`;
+/* ─── the operator a row names: one rule for every report (operator-map.js) ─── */
+const { OPERATOR_CTE } = require('./operator-map');
 
 /* ─────────────────────────────────────────────────────────
    DROPDOWNS
@@ -253,120 +239,30 @@ exports.shiftOeeData = async (company_id, date_from, date_to, machine_id, shift_
   };
 };
 
-/* ─────────────────────────────────────────────────────────
-   LEGACY EXCEL helpers
-───────────────────────────────────────────────────────── */
-
-exports.hourlyOee = async (company_id, date) => {
-  const { rows } = await db.query(`
-    WITH ${OPERATOR_CTE}
-    SELECT
-      m.machine_serial_no                                                         AS "Machine",
-      COALESCE(op.operator_name, '--')                                            AS "Operator",
-      TO_CHAR(o.hour_start AT TIME ZONE 'Asia/Kolkata', 'DD-Mon-YYYY HH24:MI')   AS "Hour",
-      ROUND(o.availability::numeric, 2)                                           AS "Availability %",
-      ROUND(o.performance::numeric,  2)                                           AS "Performance %",
-      ROUND(o.quality::numeric,      2)                                           AS "Quality %",
-      ROUND(o.oee::numeric,          2)                                           AS "OEE %"
-    FROM oee_hourly o
-    JOIN machines m ON m.id = o.machine_id
-    LEFT JOIN shifts s ON s.id = o.shift_id
-    LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1${plantSql('m.id')}
-      AND (
-        s.start_time IS NULL
-        OR (
-          o.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-          AND o.hour_start < (
-                CASE WHEN s.start_time > s.end_time
-                     THEN ($2::date + INTERVAL '1 day' + s.end_time)
-                     ELSE ($2::date + s.end_time)
-                END
-              ) AT TIME ZONE 'Asia/Kolkata'
-        )
-      )
-    ORDER BY m.machine_serial_no, o.hour_start
-  `, [company_id, date]);
-  return rows;
-};
-
-exports.shiftOee = async (company_id, date) => {
-  const { rows } = await db.query(`
-    WITH ${OPERATOR_CTE}
-    SELECT
-      m.machine_serial_no                        AS "Machine",
-      COALESCE(op.operator_name, '--')           AS "Operator",
-      s.shift_code                               AS "Shift",
-      TO_CHAR(o.shift_date, 'DD-Mon-YYYY')       AS "Date",
-      ROUND(o.availability::numeric, 2)          AS "Availability %",
-      ROUND(o.performance::numeric,  2)          AS "Performance %",
-      ROUND(o.quality::numeric,      2)          AS "Quality %",
-      ROUND(o.oee::numeric,          2)          AS "OEE %"
-    FROM oee_shift_summary o
-    JOIN machines m ON m.id = o.machine_id
-    JOIN shifts   s ON s.id = o.shift_id
-    LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1${plantSql('m.id')}
-      AND o.shift_date = $2
-    ORDER BY s.shift_code, m.machine_serial_no
-  `, [company_id, date]);
-  return rows;
-};
-
-exports.production = async (company_id, date) => {
-  const { rows } = await db.query(`
-    WITH ${OPERATOR_CTE}
-    SELECT
-      m.machine_serial_no                                                         AS "Machine",
-      COALESCE(op.operator_name, '--')                                            AS "Operator",
-      COALESCE(s.shift_code, '--')                                                AS "Shift",
-      TO_CHAR(p.hour_start AT TIME ZONE 'Asia/Kolkata', 'DD-Mon-YYYY HH24:MI')   AS "Hour",
-      p.run_seconds                                                                AS "Run Sec",
-      p.idle_seconds                                                               AS "Idle Sec",
-      COALESCE(p.manual_seconds, 0)                                                AS "Setup Sec",
-      GREATEST(0, 3600 - p.run_seconds - p.idle_seconds)                          AS "Off Sec",
-      p.produced_qty                                                               AS "Parts Made",
-      ROUND(COALESCE(p.energy_kwh, 0)::numeric, 3)                                AS "Energy kWh"
-    FROM production_hourly p
-    JOIN machines m ON m.id = p.machine_id
-    LEFT JOIN shifts   s  ON s.id = p.shift_id
-    LEFT JOIN op_map   op ON op.machine_id = p.machine_id
-    WHERE m.company_id = $1${plantSql('m.id')}
-      AND (
-        s.start_time IS NULL
-        OR (
-          p.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-          AND p.hour_start < (
-                CASE WHEN s.start_time > s.end_time
-                     THEN ($2::date + INTERVAL '1 day' + s.end_time)
-                     ELSE ($2::date + s.end_time)
-                END
-              ) AT TIME ZONE 'Asia/Kolkata'
-        )
-      )
-    ORDER BY m.machine_serial_no, p.hour_start
-  `, [company_id, date]);
-  return rows;
-};
-
-
 /* ─────────────────────────────────────────────────────────────
-   Emailed reports
+   Files — the Excel / CSV of a report
 
-   A range longer than three months is not answered in the response (see
-   report.limits.js); it is built here and sent as a spreadsheet instead.
+   One file for the screen's report: its dates, machine, shift and operator,
+   the columns chosen and the order sorted. Downloaded when it is small;
+   built in the background and emailed when it is large (report.mailer.js).
 ───────────────────────────────────────────────────────────── */
 
 const { createExcel }       = require('./excel.util');
-const { sendEmail }         = require('../utils/nodemailer');
-const { resolveColumns, shapeRows, assertType } = require('./report.columns');
-const generateReportTemplate = require('../utils/nodemailer/emailTemplates/generateReportTemplate');
+const { toCsv }             = require('../utils/export.util');
+const { resolveColumns, shapeRows, sortRows, assertType } = require('./report.columns');
 
 const REPORT_NAMES = {
   'production': 'Production Report',
   'oee-hourly': 'Hourly OEE Report',
   'shift-oee':  'Shift OEE Report'
 };
+exports.REPORT_NAMES = REPORT_NAMES;
+
+const CONTENT_TYPES = {
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  csv:  'text/csv; charset=utf-8'
+};
+exports.CONTENT_TYPES = CONTENT_TYPES;
 
 /** The dataset behind each report type — the same queries the screen uses. */
 async function fetchRows(type, company_id, f) {
@@ -376,51 +272,26 @@ async function fetchRows(type, company_id, f) {
   return exports.shiftOeeData(...args);
 }
 
+/** The report's rows, as the screen reads them. */
+exports.reportRows = async (type, company_id, filters) => (await fetchRows(type, company_id, filters)).rows;
+
 /**
- * Build the report and email it.
- *
- * Returns what was sent rather than nothing, so the caller can log it and
- * the tests can assert on it without reaching into nodemailer.
+ * The report as a file. `rows`: already read (a download measured first);
+ * otherwise read here — in the background, for a report too long to read
+ * while the person waits. (The Excel download used to be the first day only,
+ * every machine and every column, whatever the screen showed.)
  */
-exports.emailReport = async ({ company_id, type, filters, columns, to, requestedBy, labelFor = {} }) => {
+exports.buildFile = async ({ company_id, type, format = 'xlsx', filters, columns, sort, dir, rows = null }) => {
   assertType(type);
-
   const cols = resolveColumns(type, columns);
-  const { rows } = await fetchRows(type, company_id, filters);
-  const shaped = shapeRows(rows, cols);
-
-  const name = REPORT_NAMES[type];
-  const file = `${type}_${filters.date_from}_to_${filters.date_to}.xlsx`;
-  const buffer = await createExcel(name.slice(0, 31), shaped);
-
-  const filterLines = [];
-  if (filters.machine_id)  filterLines.push(`Machine: ${labelFor.machine  || filters.machine_id}`);
-  if (filters.shift_id)    filterLines.push(`Shift: ${labelFor.shift      || filters.shift_id}`);
-  if (filters.operator_id) filterLines.push(`Operator: ${labelFor.operator || filters.operator_id}`);
-
-  await sendEmail({
-    to,
-    subject: `${name} — ${filters.date_from} to ${filters.date_to}`,
-    html: generateReportTemplate({
-      reportName: name,
-      dateFrom: filters.date_from,
-      dateTo: filters.date_to,
-      rowCount: rows.length,
-      columnLabels: cols.map(c => c.label),
-      filterLines,
-      requestedBy
-    }),
-    text: `${name} for ${filters.date_from} to ${filters.date_to}. ${rows.length} rows attached.`,
-    attachments: [{ filename: file, content: buffer }]
-  });
-
-  return { rows: rows.length, columns: cols.map(c => c.key), filename: file, to };
-};
-
-/* The auth middleware builds req.user without an email — it selects id,
-   username, plant_id, company_id and user_type only — so the recipient of an
-   emailed report is looked up rather than assumed. */
-exports.getUserEmail = async (user_id) => {
-  const { rows } = await db.query('SELECT email FROM users WHERE id = $1', [user_id]);
-  return rows[0]?.email || null;
+  const data = rows || await exports.reportRows(type, company_id, filters);
+  const shaped = shapeRows(sortRows(data, type, sort, dir), cols);
+  const labels = cols.map(c => c.label);
+  const body = format === 'csv'
+    ? toCsv(shaped, labels)
+    : await createExcel(REPORT_NAMES[type].slice(0, 31), shaped, labels);
+  return {
+    body, rows: data.length, columnLabels: labels, contentType: CONTENT_TYPES[format],
+    filename: `${type}_${filters.date_from}_to_${filters.date_to}.${format}`
+  };
 };

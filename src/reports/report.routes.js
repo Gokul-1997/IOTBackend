@@ -18,11 +18,10 @@ router.get('/production-data',  ...viewers, heavy, ctrl.productionData);
 router.get('/oee-hourly-data',  ...viewers, heavy, ctrl.oeeHourlyData);
 router.get('/shift-oee-data',   ...viewers, heavy, ctrl.shiftOeeData);
 
-/* ── Column definitions + emailed reports ── */
+/* ── Column definitions ── */
 router.get('/columns',          ...viewers, ctrl.getColumns);
-router.post('/email',           ...exporters, heavy, ctrl.emailReport);
 
-/* ── Excel downloads ── */
+/* ── Downloads: ?format=xlsx|csv; a large report is emailed instead (report.mailer.js) ── */
 router.get('/hourly-oee',       ...exporters, heavy, ctrl.hourlyOeeExcel);
 router.get('/shift-oee',        ...exporters, heavy, ctrl.shiftOeeExcel);
 router.get('/production',       ...exporters, heavy, ctrl.productionExcel);

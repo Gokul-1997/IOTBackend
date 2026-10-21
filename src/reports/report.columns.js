@@ -20,27 +20,27 @@ const REPORT_COLUMNS = {
     { key: 'idle_time',    label: 'Idle Time',    default: true  },
     { key: 'setup_time',   label: 'Setup Time',   default: false },
     { key: 'off_time',     label: 'Off Time',     default: false },
-    { key: 'produced_qty', label: 'Parts Made',   default: true  },
-    { key: 'energy_kwh',   label: 'Energy (kWh)', default: true  }
+    { key: 'produced_qty', label: 'Parts Made',   default: true, numeric: true },
+    { key: 'energy_kwh',   label: 'Energy (kWh)', default: true, numeric: true }
   ],
   'oee-hourly': [
     { key: 'machine',      label: 'Machine',       default: true },
     { key: 'operator',     label: 'Operator',      default: true },
     { key: 'hour',         label: 'Hour',          default: true },
-    { key: 'availability', label: 'Availability %', default: true },
-    { key: 'performance',  label: 'Performance %', default: true },
-    { key: 'quality',      label: 'Quality %',     default: true },
-    { key: 'oee',          label: 'OEE %',         default: true }
+    { key: 'availability', label: 'Availability %', default: true, numeric: true },
+    { key: 'performance',  label: 'Performance %', default: true, numeric: true },
+    { key: 'quality',      label: 'Quality %',     default: true, numeric: true },
+    { key: 'oee',          label: 'OEE %',         default: true, numeric: true }
   ],
   'shift-oee': [
     { key: 'machine',      label: 'Machine',       default: true },
     { key: 'operator',     label: 'Operator',      default: true },
     { key: 'shift',        label: 'Shift',         default: true },
     { key: 'date',         label: 'Date',          default: true },
-    { key: 'availability', label: 'Availability %', default: true },
-    { key: 'performance',  label: 'Performance %', default: true },
-    { key: 'quality',      label: 'Quality %',     default: true },
-    { key: 'oee',          label: 'OEE %',         default: true }
+    { key: 'availability', label: 'Availability %', default: true, numeric: true },
+    { key: 'performance',  label: 'Performance %', default: true, numeric: true },
+    { key: 'quality',      label: 'Quality %',     default: true, numeric: true },
+    { key: 'oee',          label: 'OEE %',         default: true, numeric: true }
   ]
 };
 
@@ -83,13 +83,46 @@ function resolveColumns(type, keys) {
   return picked.length ? picked : all.filter(c => c.default);
 }
 
-/** Rows reduced to the chosen columns, keyed by label so the header reads. */
+/**
+ * Rows reduced to the chosen columns, keyed by label so the header reads.
+ *
+ * A numeric column's value becomes a number: Postgres hands ROUND()ed
+ * figures over as text ("82.35"), and a spreadsheet keeps text as text — a
+ * column of percentages that cannot be summed, sorted or charted.
+ */
 function shapeRows(rows, columns) {
   return rows.map(row => {
     const out = {};
-    for (const c of columns) out[c.label] = row[c.key] ?? '';
+    for (const c of columns) out[c.label] = cellValue(row[c.key], c);
     return out;
   });
 }
 
-module.exports = { REPORT_COLUMNS, REPORT_TYPES, assertType, resolveColumns, shapeRows };
+function cellValue(v, column) {
+  if (v === null || v === undefined) return '';
+  if (column.numeric && v !== '' && Number.isFinite(Number(v))) return Number(v);
+  return v;
+}
+
+/**
+ * Rows in the order the table on screen shows them: by one of the report's
+ * columns, a number compared as a number and text as text — the comparison
+ * reports.ts (sortedRows) makes, so a downloaded file reads in the screen's
+ * order. No column: the report's own order.
+ */
+function sortRows(rows, type, key, dir) {
+  if (key === undefined || key === null || key === '') return rows;
+  if (!REPORT_COLUMNS[type].some(c => c.key === key)) {
+    const e = new Error(`Not a column of the ${type} report: ${key}`);
+    e.status = 400; e.code = 'UNKNOWN_COLUMN';
+    throw e;
+  }
+  const sign = String(dir).toLowerCase() === 'desc' ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const av = a[key] ?? '', bv = b[key] ?? '';
+    const cmp = isNaN(Number(av)) ? String(av).localeCompare(String(bv)) : Number(av) - Number(bv);
+    return sign * cmp;
+  });
+}
+
+module.exports = { REPORT_COLUMNS, REPORT_TYPES, assertType, resolveColumns, shapeRows, sortRows };

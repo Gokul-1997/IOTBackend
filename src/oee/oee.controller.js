@@ -1,99 +1,78 @@
 const { effectivePlantId } = require('../lib/plant-scope');
 /**
- * OEE REPORTS CONTROLLER
+ * OEE REPORTS CONTROLLER — the Reports page's OEE Records tab.
+ *
+ * Errors go to the error middleware: a refused filter (400), range (413) or
+ * permission keeps its message; anything unexpected is logged under a
+ * reference instead of being shown.
  */
 
 const OeeService = require('./oee.service');
+const { MAX_DIRECT_DAYS, MAX_DIRECT_ROWS } = require('../reports/report.limits');
+const { emailInstead } = require('../reports/report.mailer');
 
 /* ===============================================
    GET META (Machines, Shifts, Lines)
    GET /oee/meta
    =============================================== */
-exports.getMeta = async (req, res) => {
-
+exports.getMeta = async (req, res, next) => {
   try {
-
     const data = await OeeService.getMeta(effectivePlantId(req.user), req.user.company_id);
-
-    return res.json({
-      status: 'success',
-      data
-    });
-
-  } catch (err) {
-
-    console.error('❌ getMeta error:', err);
-
-    return res.status(500).json({
-      status: 'error',
-      message: 'Failed to load metadata'
-    });
-
-  }
-
+    return res.json({ status: 'success', data });
+  } catch (err) { next(err); }
 };
 
 /* ===============================================
-   GET REPORTS
-   GET /oee/reports?machine_id=1&shift_id=1&page=1
+   GET REPORTS — a page of records
+   GET /oee/reports?from_date=&to_date=&machine_id=&shift_id=&page=1
    =============================================== */
-exports.getReports = async (req, res) => {
-
+exports.getReports = async (req, res, next) => {
   try {
-
     const result = await OeeService.getReports(req.query, effectivePlantId(req.user), req.user.company_id);
-
-    return res.json({
-      status: 'success',
-      ...result
-    });
-
-  } catch (err) {
-
-    console.error('❌ getReports error:', err);
-
-    return res.status(500).json({
-      status: 'error',
-      message: 'Failed to load reports'
-    });
-
-  }
-
+    return res.json({ status: 'success', ...result });
+  } catch (err) { next(err); }
 };
 
 /* ===============================================
-   EXPORT CSV
-   GET /oee/export?machine_id=1&shift_id=1
+   EXPORT — every record for the filters, as CSV or Excel
+   GET /oee/export?format=csv|xlsx&from_date=&to_date=&…&columns=&sort_by=&sort_order=
+   The table's columns under its headings, in its order. No format: CSV, as
+   before Excel was offered. A large export — more than MAX_DIRECT_ROWS
+   records, or a range past three months — is not downloaded: it is answered
+   202 "check your email in 10–15 minutes", then built and emailed (report.mailer).
    =============================================== */
-exports.exportCSV = async (req, res) => {
+const FORMATS = ['csv', 'xlsx'];
 
+exports.exportRecords = async (req, res, next) => {
   try {
-
-    const result = await OeeService.exportCSV(req.query, effectivePlantId(req.user), req.user.company_id);
-
-    // Set CSV headers
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
-
-    // Generate CSV
-    const headers = ['Date', 'Machine', 'Shift', 'Operator', 'OEE', 'Availability', 'Performance', 'Quality'];
-    let csv = headers.join(',') + '\n';
-
-    for (const row of result.data) {
-      csv += `${row.shift_date},${row.machine_serial_no},${row.shift_code},${row.operator_name || '--'},${row.oee},${row.availability},${row.performance},${row.quality}\n`;
+    const format = String(req.query.format || 'csv').toLowerCase();
+    if (!FORMATS.includes(format)) {
+      return res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
     }
 
-    return res.send(csv);
+    const companyId = req.user.company_id;
+    const plan = OeeService.exportPlan(req.query, effectivePlantId(req.user), companyId);
+    const rows = plan.days <= MAX_DIRECT_DAYS ? await OeeService.planRows(plan, MAX_DIRECT_ROWS + 1) : null;
 
-  } catch (err) {
+    if (rows && rows.length <= MAX_DIRECT_ROWS) {
+      if (!rows.length) {
+        return res.status(404).json({ status: 'error', message: 'No OEE records match these filters' });
+      }
+      const file = await OeeService.buildFile(plan, format, rows);
+      res.setHeader('Content-Type', file.contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+      return res.send(file.body);
+    }
 
-    console.error('❌ exportCSV error:', err);
-
-    return res.status(500).json({
-      status: 'error',
-      message: 'Failed to export CSV'
+    const count = await OeeService.planCount(plan);
+    if (!count) {
+      return res.status(404).json({ status: 'error', message: 'No OEE records match these filters' });
+    }
+    return await emailInstead(req, res, {
+      name: 'OEE Records', dateFrom: plan.from, dateTo: plan.to, count,
+      reason: rows ? 'rows' : 'range', link: '/reports?tab=oee-records',
+      filters: plan.filters,
+      build: () => OeeService.buildFile(plan, format)          // read after the answer
     });
-
-  }
-
+  } catch (err) { next(err); }
 };
