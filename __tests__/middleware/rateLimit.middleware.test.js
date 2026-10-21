@@ -33,6 +33,17 @@ test('TC-RL-02 auth limiter lets requests through when Redis times out', async (
   expect(res.status).toBe(200);
 });
 
+test('successful gateway traffic bypasses the shared plant address allowance', async () => {
+  const redis = require('../../src/redis');
+  const app = express();
+  app.use(standardLimiter);
+  app.post('/api/gateway/v1/config', (_req, res) => res.json({ ok: true }));
+  redis.call.mockClear();
+  const res = await request(app).post('/api/gateway/v1/config');
+  expect(res.status).toBe(200);
+  expect(redis.call).not.toHaveBeenCalled();
+});
+
 /*
  * Who a request is counted against. By address alone, a whole factory behind
  * one public address shared one allowance (95 % of 100 users' requests were

@@ -293,7 +293,7 @@ exports.deleteFile = async (req) => {
   );
   if (current.rows.length) throw fail('Upload a new program before deleting the current machine program.', 'CURRENT_PROGRAM', 409);
   const open = await pool.query(
-    `SELECT id FROM program_jobs WHERE file_id = $1 AND status = ANY($2) LIMIT 1`, [file.id, jobs.OPEN]
+    `SELECT id FROM program_jobs WHERE (file_id = $1 OR backup_file_id = $1) AND status = ANY($2) LIMIT 1`, [file.id, jobs.OPEN]
   );
   if (open.rowCount) throw fail('This program is waiting to be sent. Cancel that first.', 'IN_USE', 409);
 
@@ -422,6 +422,7 @@ exports.cancelJob = async (req) => {
     [Number(req.params.id) || 0, req.user.company_id]
   );
   if (!job || job.company_id !== req.user.company_id) throw fail('Job not found.', 'JOB_NOT_FOUND', 404);
+  if (job.protocol_version === 3) return require('./gateway.service').cancel(req);
   const need = job.action === 'SEND' ? 'page:programs:transfer' : 'page:programs:fetch';
   await requireAction(req, need, 'Cancelling this job is not part of your role.');
   if (job.status !== 'QUEUED') {

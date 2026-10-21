@@ -38,9 +38,48 @@ async function getJob(jobId, db = pool) {
 /** The fields a person sees about a job (screen, socket, notification link). */
 function view(job) {
   if (!job) return null;
-  const { company_id, file_stored_name, backup_stored_name, ...rest } = job;
+  const { company_id, file_stored_name, backup_stored_name, lease_token,
+    gateway_token_version, command_parameters, file_folder, controller_ip, ...rest } = job;
+  if (job.protocol_version !== 3 && controller_ip !== undefined) rest.controller_ip = controller_ip;
   return { ...rest, target_file: job.program_name ? targetFile(job.program_path, job.program_name) : null,
-           file_name: file_stored_name || null, backup_name: backup_stored_name || null };
+           file_name: file_stored_name || job.file_name || null, backup_name: backup_stored_name || job.backup_name || null };
+}
+
+/** A gateway operation can finish long after its requester changed company,
+ * plant or permissions. Recheck current access before exposing its status.
+ * The inbox insert uses that same database snapshot; failure never undoes
+ * the already committed controller result. */
+async function announceGateway(job, title, message) {
+  try {
+    const { rows } = await pool.query(`WITH recipient AS (
+      SELECT u.id,COALESCE(np.notify_program_transfer,TRUE) AS notify
+      FROM users u JOIN companies c ON c.id=u.company_id AND c.is_active=TRUE
+      JOIN machines m ON m.id=$6 AND m.company_id=u.company_id AND m.is_active=TRUE
+      JOIN permissions p ON p.permission_key='page:programs:view'
+      LEFT JOIN notification_preferences np ON np.user_id=u.id
+      WHERE u.id=$2 AND u.company_id=$1 AND u.is_active=TRUE
+        AND (m.plant_id IS NULL OR EXISTS(SELECT 1 FROM plants plant
+          WHERE plant.id=m.plant_id AND plant.company_id=m.company_id AND plant.is_active=TRUE))
+        AND (NOT EXISTS(SELECT 1 FROM company_permissions cp WHERE cp.company_id=u.company_id)
+          OR EXISTS(SELECT 1 FROM company_permissions cp WHERE cp.company_id=u.company_id AND cp.permission_id=p.id))
+        AND (EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id
+          WHERE ur.user_id=u.id AND r.company_id IS NULL AND r.role_name IN('COMPANY_ADMIN','ADMIN'))
+          OR ((u.plant_id IS NULL OR u.plant_id=m.plant_id) AND EXISTS(
+            SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id JOIN role_permissions rp ON rp.role_id=r.id
+            WHERE ur.user_id=u.id AND (r.company_id IS NULL OR r.company_id=u.company_id) AND rp.permission_id=p.id)))
+    ), inserted AS (
+      INSERT INTO notifications(company_id,user_id,type,title,message,link)
+      SELECT $1,r.id,$3,$4,$5,'/programs' FROM recipient r WHERE $7::boolean AND r.notify
+      RETURNING user_id
+    ) SELECT r.id,EXISTS(SELECT 1 FROM inserted) AS inserted FROM recipient r`,
+    [job.company_id,job.requested_by,job.status === 'DONE' ? 'INFO' : 'WARNING',title,message,job.machine_id,
+      ['DONE','FAILED'].includes(job.status) && job.action !== 'LIST']);
+    if (!rows.length) return;
+    emitToUser(job.requested_by, 'programJob', view(job));
+    if (rows[0].inserted) await announceUnread([job.requested_by]);
+  } catch (error) {
+    console.error('Program gateway announcement failed:', error.message);
+  }
 }
 
 /**
@@ -51,15 +90,17 @@ function view(job) {
  */
 async function announce(job) {
   if (!job || !job.requested_by) return;
-  emitToUser(job.requested_by, 'programJob', view(job));
-
-  if (!['DONE', 'FAILED'].includes(job.status)) return;
   const ok = job.status === 'DONE';
-  const what = job.action === 'SEND' ? `sent to ${job.machine_serial}` : `received from ${job.machine_serial}`;
+  const what = job.protocol_version === 3
+    ? `${({ SEND: 'sent to', RESTORE: 'restored to', BACKUP: 'backed up from', FETCH: 'retrieved from' })[job.action] || 'received from'} ${job.machine_serial}`
+    : job.action === 'SEND' ? `sent to ${job.machine_serial}` : `received from ${job.machine_serial}`;
   const title = ok ? `Program ${what}` : `Program transfer failed — ${job.machine_serial}`;
   const message = ok
-    ? `"${job.program_name}" was ${what}.` + (job.backup_stored_name ? ` The program it replaced was kept as ${job.backup_stored_name}.` : '')
+    ? `"${job.program_name}" was ${what}.` + ((job.backup_stored_name || job.backup_name) ? ` The program it replaced was kept as ${job.backup_stored_name || job.backup_name}.` : '')
     : `"${job.program_name}" was not ${what}. ${job.message || ''}`.trim();
+  if (job.protocol_version === 3) return announceGateway(job, title, message);
+  emitToUser(job.requested_by, 'programJob', view(job));
+  if (!['DONE', 'FAILED'].includes(job.status)) return;
   try {
     await pool.query(
       `INSERT INTO notifications (company_id, user_id, type, title, message, link)
@@ -109,7 +150,9 @@ async function failStale() {
       ELSE 'The device did not confirm completion. Check the controller before retrying.' END
     WHERE protocol_version=2 AND status=ANY($1) AND expires_at<=NOW() RETURNING id`, [OPEN]);
   for (const { id } of [...rows, ...commands.rows]) await announce(await getJob(id));
-  return rows.length + commands.rows.length;
+  // Lazy require avoids the shared jobs ↔ gateway service import cycle.
+  const gatewayChanges = await require('./gateway.service').expireStale();
+  return rows.length + commands.rows.length + gatewayChanges;
 }
 
 module.exports = {

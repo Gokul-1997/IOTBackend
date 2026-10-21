@@ -221,11 +221,146 @@ Migration **048_alarm_notification_policies.sql** must precede the updated colle
 
 Final local verification passed: **103 backend suites / 2,061 tests**, **36 frontend suites / 289 tests**, **21 ingestion suites / 387 tests**, **37 isolated browser checks**, the production frontend build, the real ingestion PostgreSQL verifier and **137 assertions** in the real critical-notification PostgreSQL fixture. Browser checks include 360px layouts and dark theme; initial web assets remain **523.99 kB / 126.15 kB estimated transfer**, with only the existing initial/component stylesheet warnings. The PostgreSQL fixture uses disposable PostgreSQL **18.3**, not the production database; target-version staging checks and native background push remain release work. The mobile inbox contract is unchanged and has no dependency on the retired delay-rule API. No signed native build was performed for this change.
 
+## Windows / Node-RED gateway transfer redesign — 20 October 2026
+
+The confirmed boundary is the application and its Windows/Node-RED transport;
+the embedded team owns all CNC protocols, controller access, physical write
+interlocks and durable physical-operation recovery. Shared plant/company and
+dedicated machine gateways use the same tenant-scoped assignment and command
+API. Existing MQTT telemetry and unrelated monitoring modules remain intact.
+Use shared plant gateways initially, adding capacity based on measured controller
+latency and network isolation; no additional application server is required per
+machine. See the [architecture decision](GATEWAY_PROGRAM_TRANSFER.md).
+
+Program Transfer now has responsive Server files and Machine files panes,
+drag/drop server uploads, explicit confirmed send/restore, an actual current
+running program backup button, version history and paginated transfer activity.
+Gateway setup is collapsed and restricted to company administrators with machine
+edit access. Unsupported operations remain disabled until the assigned gateway
+reports actual capabilities for that assignment version. Uploading alone does
+not claim that the controller received a file.
+
+Migration **049_gateway_transfer.sql** adds gateway ownership, bounded queue
+concurrency, command leases, immutable capture provenance and transactional audit.
+Legacy writers are fenced when assigning a gateway. Source and capture files
+stream through private disk staging with size/text/SHA-256 verification. Shared
+gateway traffic does not consume browser limits behind a factory NAT; invalid
+credentials and authenticated gateways have separate per-process limits.
+Expired reads fail, while expired or uncertain writes keep machine ownership
+until verified controller reconciliation. Duplicate requests/captures reuse their
+existing durable reference; separate backup clicks create separate versions.
+
+The dependency-free transport client and importable core-node flow are included
+under `tools/gateway-client` and published with the
+[API guide](GATEWAY_PROGRAM_TRANSFER_API.md) under the web application's
+`/integrations/` directory. The flow starts paused and exposes real embedded
+handoff points. It contains no simulated CNC driver or canned success. The
+embedded adapter must persist physical intent/evidence and reconcile controller
+state before acting on redelivered commands, including still-valid leases.
+
+Final local verification passed: **107 backend suites / 2,124 tests**, **38
+frontend files / 318 tests**, **31 transport/Node-RED checks**, **22 isolated
+Chromium scenarios** and **78 assertions** against disposable PostgreSQL **18.3**
+and a loopback HTTP gateway. These checks cover large streamed files, actual
+capture bytes, duplicate requests, shared/dedicated concurrency, tenant scope,
+token rotation/throttling, expired writes, cancel/claim races and guarded rollback.
+The legacy real PostgreSQL command verifier also passed. Browser screenshots
+were inspected at desktop and 390px; both themes and additional widths passed
+the responsive checks. The shared socket test stand-in now retains one state
+across Angular's static and asynchronous mock chunks to avoid order-dependent
+test failures.
+
+The production build passed: initial assets **522.16 kB / 124.18 kB estimated
+transfer**, lazy Program Transfer **69.47 kB / 14.90 kB transfer**. Warning budgets
+still report the initial bundle, Maintenance styles (7.86 kB), and Program
+Transfer styles (6.69 kB); all hard budgets pass without increasing budgets or
+adding dependencies. Downloadable gateway assets match canonical source bytes
+and are not loaded with the page.
+
+Reproduce with Node22 in the respective repositories:
+
+```sh
+# Backend: disposable local listeners/Unix sockets only
+node node_modules/jest/bin/jest.js --runInBand
+node tools/architecture/verify-gateway-transfer.cjs
+node tools/architecture/verify-program-commands.cjs
+node --test tools/gateway-client/client.test.cjs # optional Node-RED sample removed on 21 October
+
+# FrontendIOT
+node node_modules/@angular/cli/bin/ng.js test --watch=false
+node node_modules/@playwright/test/cli.js test --config=playwright.program-transfer.config.ts
+node node_modules/@angular/cli/bin/ng.js build --configuration production
+```
+
+No push, deployment, customer migration or CNC operation was performed. Apply
+reviewed 049 and prerequisites before deploying the updated API/cron and frontend.
+Configure persistent server/gateway storage, reverse-proxy file/long-poll limits
+and trusted HTTPS, then commission the embedded adapter against representative
+controllers. The tests do not certify a Windows/installed Node-RED runtime,
+physical CNC compatibility or automatic gateway failover.
+
+## Gateway clarification and simpler setup — 20 October 2026
+
+The gateway is the company's Windows laptop or PC running its existing Node-RED
+integration. It can handle one machine or several assigned machines. The server
+boundary remains HTTPS APIs for program delivery and actual current-program
+backup; Socket.IO belongs to browser status only. The embedded developer owns all
+CNC communication. No local-folder simulator or additional gateway service was
+introduced. The new [short developer guide](GATEWAY_QUICK_START.md) documents the
+two workflows and six POST endpoints; the transport examples are optional.
+
+Setup now presents gateway selection and program directory first, with Node-RED
+mapping/protocol and capacity options collapsed. New profile defaults use stable
+machine IDs; omitted API mapping fields preserve an existing assignment. A single
+registered gateway is preselected for an unassigned machine. Copied configuration
+now uses the transport's actual `MEXA_SERVER_ORIGIN` and `MEXA_SPOOL_ROOT` names.
+The file panes share one bordered browser area and remain responsive.
+
+Verification passed: **2,126 backend tests**, **321 frontend tests**, the existing
+**78-assertion** real PostgreSQL/HTTP fixture and **23 browser scenarios** (20 on
+the full run, then the three updated wording assertions on a focused rerun).
+Desktop/mobile screenshots were inspected. No production deployment, migration,
+push or live controller operation was performed.
+
+## FileZilla-style Program Transfer — 21 October 2026
+
+Replaced the card lists with compact server/machine file tables and central Send
+and Retrieve controls. Server search is debounced and covers all stored versions;
+name/size/date sorting runs before pagination using fixed SQL allowlists and an ID
+tie-breaker. Machine search and sorting work on its bounded returned directory.
+Single selection matches the existing one-operation-per-machine constraint.
+Current-running-program backup remains a separate fresh controller read.
+
+The page keeps actual byte progress, error messages, history, retry/cancel,
+confirmation for controller writes and role/capability checks. Phone layout stacks
+the file panes and keeps request/status columns visible in the activity table.
+No UI library or dependency was added; no new idle polling was introduced.
+Fixed directory retry tracking, stale listings after connection changes and
+pagination after deleting the last item on the final page. Search or machine/path
+changes invalidate the selected retrieval target.
+
+Removed the obsolete Python gateway sample and its tests/curl examples, optional
+Node-RED handoff sample/flow/tests and their published frontend copies, the stale
+public legacy device guide and an unused frontend cache key. Current public API
+guides match canonical backend documentation. The internal transport client and
+its tests remain because the real HTTP verification fixture imports it. Mounted
+legacy endpoints, historical database migrations and active storage compatibility
+were retained. Earlier sections describing the removed samples are historical.
+
+Validation: 107 backend suites / **2,142 tests**, 38 frontend files / **325 tests**,
+**25 Chromium scenarios**, **78 real PostgreSQL/HTTP assertions** and **10 retained
+transport-client tests** passed. Production build passed without increasing
+budgets: initial **522.12 kB / 124.17 kB** estimated transfer; lazy Program Transfer
+**80.73 kB / 16.98 kB**. Warning budgets remain for the initial bundle, Program
+Transfer styles (**7.93 kB**) and Maintenance styles (**7.86 kB**); hard budgets
+pass. Production migration, deployment and physical CNC tests were not performed.
+The embedded team connects its Node-RED implementation using the API guides.
+
 ## Remaining release gates
 
 1. Export and review the real core schema, PostgreSQL/Timescale versions, constraints, indexes and grants; package a verified complete base schema so a new installation is reproducible. Resolve legacy invalid placements/references and duplicate operational entries without deleting history blindly.
-2. Verify a full matching-version backup restore, image/program-file recovery and journal checkpoint continuity before target migrations. Apply reviewed migrations 040–048 and all prerequisites in staging, then rehearse rollback. No such target mutation was performed here.
-3. Implement/verify the actual controller adapter: selected/running-program read, path syntax, read/write support, write interlocks and safe reconciliation after interruption. The reference agent must run on the device; a server upload alone cannot place bytes in a CNC.
+2. Verify a full matching-version backup restore, image/program-file recovery and journal checkpoint continuity before target migrations. Apply reviewed migrations 040–049 and all prerequisites in staging, then rehearse rollback. No such target mutation was performed here.
+3. The embedded team must implement/verify the actual controller adapter: selected/running-program read, path syntax, read/write support, write interlocks, durable physical-operation ledger and safe reconciliation after interruption. Connect Node-RED to the documented HTTPS API and commission it; a server upload alone cannot place bytes in a CNC.
 4. Run signed Android/iOS builds and representative low-memory physical-device/browser/tablet tests. Expo 57 targets Android 7+ and iOS 16.4+; it cannot support every historic model. Native APNs/FCM registration/delivery remains future work; the unused permission prompt was removed. [Versioned Expo 57 reference](https://docs.expo.dev/versions/v57.0.0/).
 5. Recheck the two upstream mobile tooling advisories before release. Do not downgrade Expo to an incompatible SDK merely to silence npm audit.
 6. Confirm actual broker device ACL/TLS enforcement, persistent QoS1 publisher behavior, target SSD throughput, sustained ingestion/query load, pool headroom, disk alerts and backup age. Agree retention and RPO/RTO before applying deletion policies or advertising an SLA.

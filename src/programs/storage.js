@@ -7,7 +7,8 @@
 const path = require('path');
 const net = require('net');
 const crypto = require('crypto');
-const { Readable } = require('stream');
+const { Readable, Transform } = require('stream');
+const fs = require('node:fs');
 const local = require('../files/local-storage');
 
 const ROOT = local.ROOT;
@@ -59,17 +60,6 @@ function safeProgramName(name) {
   return base;
 }
 
-/**
- * The machine's IP: the one set on the machine, else the one its controller
- * reports (the collector keeps machines.controller_ip up to date — on
- * production no machine has ip_address set). Null when neither is an IP.
- */
-function machineIp(machine) {
-  return [machine.ip_address, machine.controller_ip]
-    .map(v => String(v || '').trim())
-    .find(v => net.isIP(v)) || null;
-}
-
 function positiveId(value) {
   if (typeof value !== 'number' && (typeof value !== 'string' || !/^[1-9]\d*$/.test(value))) {
     throw fail('A valid company and machine ID are required.', 'BAD_ID');
@@ -108,39 +98,37 @@ function resolveInside(folder, storedName) {
 
 const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
 
-/**
- * Checks a program's bytes before anything is written: not empty, not over
- * the limit, and text — a NUL byte means an executable or an archive, which
- * has no business going to a CNC.
- */
-function checkContent(buffer) {
-  if (!buffer || !buffer.length) throw fail('The file is empty.', 'EMPTY');
-  if (buffer.length > MAX_BYTES) {
-    throw fail(`The file is larger than ${Math.round(MAX_BYTES / 1048576)} MB.`, 'TOO_LARGE', 413);
-  }
-  if (buffer.indexOf(0) !== -1) throw fail('The file is not a text NC program.', 'NOT_TEXT');
-}
-
-/**
- * Keep a program under its machine and purpose, using the shared immutable
- * fsynced writer. A same-second clash takes the next available name.
- */
-async function save({ machine, kind, programName, buffer, at = new Date() }) {
-  if (typeof kind !== 'string' || !Object.hasOwn(PURPOSES, kind)) throw fail('Unknown program file kind.', 'BAD_KIND');
-  checkContent(buffer);
+/** Disk staging and a bounded stream keep CNC files out of the JS heap. */
+async function saveStream({ machine, kind, programName, filename, at = new Date(), expectedSha256 }) {
+  if (!Object.hasOwn(PURPOSES, kind)) throw fail('Unknown program file kind.', 'BAD_KIND');
   const name = safeProgramName(programName);
   const folder = `${machineFolder(machine)}/${PURPOSES[kind]}`;
-  const base = `${stamp(at)}_${kind}_`;
-  for (let n = 1; n < 100; n++) {
-    const storedName = n === 1 ? base + name : `${base}${n}_${name}`;
-    try {
-      await local.write(folder, storedName, buffer);
-      return { folder, storedName, programName: name, size: buffer.length, sha256: sha256(buffer) };
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
+  const storedName = `${stamp(at)}_${kind}_${crypto.randomUUID()}_${name}`;
+  const hash = crypto.createHash('sha256'); let size = 0;
+  const validate = new Transform({ transform(chunk, encoding, callback) {
+    size += chunk.length;
+    if (size > MAX_BYTES) return callback(fail('The program exceeds the configured size limit.', 'TOO_LARGE', 413));
+    if (chunk.includes(0)) return callback(fail('The file is not a text NC program.', 'NOT_TEXT'));
+    hash.update(chunk); callback(null, chunk);
+  }, flush(callback) {
+    if (!size) return callback(fail('The file is empty.', 'EMPTY'));
+    const sha = hash.digest('hex'); this.sha256 = sha;
+    if (expectedSha256 && expectedSha256 !== sha) return callback(fail('The uploaded checksum does not match the file.', 'CHECKSUM_MISMATCH', 422));
+    callback();
+  } });
+  const input = fs.createReadStream(filename);
+  input.once('error', error => validate.destroy(error));
+  validate.once('error', () => input.destroy());
+  input.pipe(validate);
+  try {
+    await local.writeStream(folder, storedName, validate);
+    return { folder, storedName, programName: name, size, sha256: validate.sha256 };
+  } finally {
+    // Directory/open failures can happen before the writer starts consuming
+    // the input iterator. Close its staging descriptor on those paths too.
+    input.destroy();
+    validate.destroy();
   }
-  throw fail('Could not find a free file name.', 'NAME_CLASH', 500);
 }
 
 function open(folder, storedName) {
@@ -172,6 +160,6 @@ async function remove(folder, storedName) {
 
 module.exports = {
   ROOT, LEGACY_ROOT, MAX_BYTES, ALLOWED_EXTENSIONS,
-  safeProgramName, machineIp, machineFolder, stamp, checkContent, sha256,
-  save, open, read, remove, resolveInside
+  safeProgramName, machineFolder, stamp, sha256,
+  saveStream, open, read, remove, resolveInside
 };

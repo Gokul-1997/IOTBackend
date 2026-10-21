@@ -109,6 +109,41 @@ function createStore(rootPath) {
     }
   }
 
+  /** Publish a streamed upload only after every byte and fsync completes. */
+  async function writeStream(folder, name, source) {
+    filename(name);
+    const dir = await ensureDirectory(folder);
+    const destination = resolveInside(folder, name);
+    const temporary = path.join(dir, `.upload-${crypto.randomUUID()}`);
+    let handle, published = false;
+    try {
+      handle = await fs.promises.open(temporary, 'wx', 0o640);
+      // FileHandle stream close semantics differ across Node versions. Keep
+      // ownership of the descriptor explicit and honor backpressure per chunk.
+      let position = 0;
+      for await (const chunk of source) {
+        let offset = 0;
+        while (offset < chunk.length) {
+          const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset, position);
+          if (!bytesWritten) throw new Error('Storage write made no progress.');
+          offset += bytesWritten;
+          position += bytesWritten;
+        }
+      }
+      await handle.sync(); await handle.close(); handle = null;
+      assertDirectorySync(folder);
+      await fs.promises.link(temporary, destination); published = true;
+      await syncDirectory(dir);
+      return { path: destination };
+    } catch (error) {
+      if (published) await fs.promises.unlink(destination).catch(() => {});
+      throw error;
+    } finally {
+      await handle?.close();
+      await fs.promises.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    }
+  }
+
   function openSync(folder, name) {
     assertDirectorySync(folder);
     const file = resolveInside(folder, filename(name));
@@ -152,7 +187,7 @@ function createStore(rootPath) {
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 
-  return { ROOT: root, resolveInside, assertDirectorySync, ensureDirectory, write, open, openSync, read, remove };
+  return { ROOT: root, resolveInside, assertDirectorySync, ensureDirectory, write, writeStream, open, openSync, read, remove };
 }
 
 module.exports = { ...createStore(ROOT), createStore };

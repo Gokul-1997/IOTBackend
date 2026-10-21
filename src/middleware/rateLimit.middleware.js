@@ -24,8 +24,10 @@ const isRedisReady = () => redis.status === 'ready';
    devices all reach the server from its one public address, and a few
    dozen of them asking for work every 15 seconds would use up the
    allowance of everyone working in that factory. They are counted per
-   device instead (deviceLimiter). */
-const isDeviceApi = (req) => (req.originalUrl || req.url || '').startsWith('/api/device/');
+   device instead (deviceLimiter). Gateway traffic has its own authenticated
+   gateway allowance and failed-token limiter for the same reason. */
+const isDeviceApi = (req) => ['/api/device/', '/api/gateway/'].some(prefix =>
+  (req.originalUrl || req.url || '').startsWith(prefix));
 
 /*
  * Who is asking: the signed-in user when the request carries a valid token,

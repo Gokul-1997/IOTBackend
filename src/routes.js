@@ -34,7 +34,9 @@ module.exports = app => {
   app.use('/api/downtime',         require('./downtime/downtime.routes'));
   app.use('/api/maintenance',      require('./maintenance/maintenance.routes'));
   app.use('/api/tickets',          require('./tickets/ticket.routes'));
+  app.use('/api/programs/v3',      require('./programs/gateway-operator.routes'));
   app.use('/api/programs',         require('./programs/program.routes'));
+  app.use('/api/gateway/v1',       require('./programs/gateway.routes'));
 
   // ── Machine-side devices (own token, not a user's sign-in) ────
   app.use('/api/device/v1',        require('./programs/device.routes'));

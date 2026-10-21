@@ -5,6 +5,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-'));
 process.env.STORAGE_ROOT = path.join(ROOT, 'unified');
@@ -15,6 +16,17 @@ const storage = require('../../src/programs/storage');
 afterAll(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 
 const machine = { id: 7, company_id: 5, ip_address: '192.168.200.3' };
+
+// Exercise the same staged, bounded streaming writer as gateway uploads.
+async function save({ buffer, ...options }) {
+  const filename = path.join(ROOT, `${randomUUID()}.nc`);
+  fs.writeFileSync(filename, buffer);
+  try {
+    return await storage.saveStream({ ...options, filename });
+  } finally {
+    fs.rmSync(filename, { force: true });
+  }
+}
 
 describe('program names', () => {
   test.each([
@@ -51,16 +63,10 @@ describe('the machine\'s folder', () => {
     // production: ip_address is empty on every machine, controller_ip is filled by the collector
     const prod = { id: 19, company_id: 4, ip_address: null, controller_ip: '192.168.200.1' };
     expect(storage.machineFolder(prod)).toBe('company-4/programs/machine-19');
-    expect(storage.machineIp(prod)).toBe('192.168.200.1');
   });
   test.each([undefined, null, 0, -1, true, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, '../5', '5.1', ''])('invalid ID %p is rejected before choosing a folder', id => {
     expect(() => storage.machineFolder({ ...machine, id })).toThrow(expect.objectContaining({ code: 'BAD_ID' }));
     expect(() => storage.machineFolder({ ...machine, company_id: id })).toThrow(expect.objectContaining({ code: 'BAD_ID' }));
-  });
-  test('the IP set on the machine wins; one that is not an IP does not block the fallback', () => {
-    expect(storage.machineIp({ ip_address: '10.0.0.5', controller_ip: '192.168.200.1' })).toBe('10.0.0.5');
-    expect(storage.machineIp({ ip_address: 'VMC-2', controller_ip: ' 192.168.200.1 ' })).toBe('192.168.200.1');
-    expect(storage.machineIp({ ip_address: '', controller_ip: '../x' })).toBeNull();
   });
 });
 
@@ -69,10 +75,11 @@ test('file stamps are plant time (IST)', () => {
 });
 
 describe('content checks', () => {
-  test('empty, binary and oversized files are refused', () => {
-    expect(() => storage.checkContent(Buffer.alloc(0))).toThrow(/empty/);
-    expect(() => storage.checkContent(Buffer.from([0x4f, 0x00, 0x31]))).toThrow(/not a text NC program/);
-    expect(() => storage.checkContent(Buffer.alloc(1024 * 1024 + 1, 0x41))).toThrow(expect.objectContaining({ status: 413 }));
+  test('empty, binary and oversized files are refused during streaming', async () => {
+    const options = { machine, kind: 'NEW', programName: 'O_INVALID.nc' };
+    await expect(save({ ...options, buffer: Buffer.alloc(0) })).rejects.toMatchObject({ code: 'EMPTY' });
+    await expect(save({ ...options, buffer: Buffer.from([0x4f, 0x00, 0x31]) })).rejects.toMatchObject({ code: 'NOT_TEXT' });
+    await expect(save({ ...options, buffer: Buffer.alloc(1024 * 1024 + 1, 0x41) })).rejects.toMatchObject({ status: 413 });
   });
 });
 
@@ -81,9 +88,9 @@ describe('saving', () => {
   const body = Buffer.from('%\nO1234\nG0 X0 Y0\nM30\n%\n');
 
   test('the file lands in the machine folder with its stamp, kind and name', async () => {
-    const saved = await storage.save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: body, at });
+    const saved = await save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: body, at });
     expect(saved).toMatchObject({
-      folder: 'company-5/programs/machine-7/uploads', storedName: '20261005-103012_NEW_O1234.nc',
+      folder: 'company-5/programs/machine-7/uploads', storedName: expect.stringMatching(/^20261005-103012_NEW_[a-f0-9-]+_O1234\.nc$/),
       programName: 'O1234.nc', size: body.length, sha256: storage.sha256(body)
     });
     const onDisk = fs.readFileSync(path.join(storage.ROOT, saved.folder, saved.storedName));
@@ -93,14 +100,15 @@ describe('saving', () => {
   });
 
   test('a second file in the same second never replaces the first', async () => {
-    const again = await storage.save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: Buffer.from('G1\n'), at });
-    expect(again.storedName).toBe('20261005-103012_NEW_2_O1234.nc');
-    const first = fs.readFileSync(path.join(storage.ROOT, again.folder, '20261005-103012_NEW_O1234.nc'));
-    expect(first.equals(body)).toBe(true);
+    const first = await save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: body, at });
+    const again = await save({ machine, kind: 'NEW', programName: 'O1234.nc', buffer: Buffer.from('G1\n'), at });
+    expect(again.storedName).not.toBe(first.storedName);
+    expect(await storage.read(first.folder, first.storedName)).toEqual(body);
+    expect(await storage.read(again.folder, again.storedName)).toEqual(Buffer.from('G1\n'));
   });
 
   test('read and remove; removing twice is not an error', async () => {
-    const s = await storage.save({ machine, kind: 'BACKUP', programName: 'O9.nc', buffer: Buffer.from('M30\n'), at });
+    const s = await save({ machine, kind: 'BACKUP', programName: 'O9.nc', buffer: Buffer.from('M30\n'), at });
     expect((await storage.read(s.folder, s.storedName)).toString()).toBe('M30\n');
     await storage.remove(s.folder, s.storedName);
     await expect(storage.remove(s.folder, s.storedName)).resolves.toBeUndefined();
@@ -112,25 +120,25 @@ describe('saving', () => {
   });
 
   test.each([['NEW', 'uploads'], ['BACKUP', 'backups'], ['FETCHED', 'fetched']])('%s has its own purpose directory', async (kind, purpose) => {
-    const saved = await storage.save({ machine, kind, programName: 'O_PURPOSE.nc', buffer: body, at });
+    const saved = await save({ machine, kind, programName: 'O_PURPOSE.nc', buffer: body, at });
     expect(saved.folder).toBe(`${storage.machineFolder(machine)}/${purpose}`);
     expect(saved.folder).not.toContain(machine.ip_address);
   });
 
   test.each(['../BACKUP', 'UNKNOWN', '', null, undefined, 'toString'])('kind %p is refused without writing files', async kind => {
-    await expect(storage.save({ machine, kind, programName: 'O_BAD.nc', buffer: body, at })).rejects.toMatchObject({ code: 'BAD_KIND' });
+    await expect(save({ machine, kind, programName: 'O_BAD.nc', buffer: body, at })).rejects.toMatchObject({ code: 'BAD_KIND' });
   });
 
   test('simultaneous same-name saves preserve every immutable version without temporary files', async () => {
     const buffers = Array.from({ length: 12 }, (_, i) => Buffer.from(`O9999\nG0 X${i}\nM30\n`));
-    const saved = await Promise.all(buffers.map(buffer => storage.save({ machine, kind: 'NEW', programName: 'O_CONCURRENT.nc', buffer, at })));
+    const saved = await Promise.all(buffers.map(buffer => save({ machine, kind: 'NEW', programName: 'O_CONCURRENT.nc', buffer, at })));
     expect(new Set(saved.map(file => file.storedName)).size).toBe(buffers.length);
     await Promise.all(saved.map(async (file, i) => expect(await storage.read(file.folder, file.storedName)).toEqual(buffers[i])));
     expect(fs.readdirSync(path.join(storage.ROOT, saved[0].folder)).filter(name => name.startsWith('.upload-'))).toEqual([]);
   });
 
   test('open stays synchronous and retains its open event and missing-file error contract', async () => {
-    const saved = await storage.save({ machine, kind: 'NEW', programName: 'O_STREAM.nc', buffer: body, at });
+    const saved = await save({ machine, kind: 'NEW', programName: 'O_STREAM.nc', buffer: body, at });
     const stream = storage.open(saved.folder, saved.storedName);
     expect(stream).not.toBeInstanceOf(Promise);
     await new Promise((resolve, reject) => { stream.once('open', resolve); stream.once('error', reject); });
@@ -180,7 +188,7 @@ describe('historical paths and filesystem boundaries', () => {
     fs.writeFileSync(path.join(outside, 'uploads', 'secret.nc'), 'UNCHANGED\n');
     fs.symlinkSync(outside, path.join(storage.ROOT, 'company-5/programs/machine-22'), 'dir');
     const folder = 'company-5/programs/machine-22/uploads';
-    await expect(storage.save({ machine: { ...machine, id: 22 }, kind: 'NEW', programName: 'secret.nc', buffer: Buffer.from('M30') })).rejects.toMatchObject({ code: 'BAD_PATH' });
+    await expect(save({ machine: { ...machine, id: 22 }, kind: 'NEW', programName: 'secret.nc', buffer: Buffer.from('M30') })).rejects.toMatchObject({ code: 'BAD_PATH' });
     await expect(storage.read(folder, 'secret.nc')).rejects.toMatchObject({ code: 'BAD_PATH' });
     expect(() => storage.open(folder, 'secret.nc')).toThrow(expect.objectContaining({ code: 'BAD_PATH' }));
     await expect(storage.remove(folder, 'secret.nc')).rejects.toMatchObject({ code: 'BAD_PATH' });
