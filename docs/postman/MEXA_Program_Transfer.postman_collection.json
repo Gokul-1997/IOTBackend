@@ -1,0 +1,1511 @@
+{
+  "info": {
+    "_postman_id": "f1d8654b-d90a-5a3c-9b4f-358cf0bee233",
+    "name": "MEXA Program Transfer — Gateway API",
+    "description": "The machine's gateway (Node-RED PC, laptop, any program) and the MEXA server: **4 HTTPS calls**.\n\n| Call | |\n|---|---|\n| `GET /api/device/v1/status` | New program? Backup asked for? |\n| `GET /api/device/v1/program` | Download the machine's program |\n| `POST /api/device/v1/backup` | Upload a backup (multipart `file`) |\n| `POST /api/device/v1/report` | Program written / refused, backup could not be read |\n\n**Set the variables** (collection → Variables): `baseUrl` = the server, e.g. `https://stmapi.stmcnc.com`; `token` = the machine's token (`mxd_…`, from Program Transfer → the machine → Gateway token).\n\nHow the gateway talks to the CNC (FTP, FOCAS, a folder, anything) is up to the gateway. Full guide: docs/PROGRAM_TRANSFER_API.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Gateway — the 4 calls (give this to the gateway team)",
+      "item": [
+        {
+          "name": "1. Status — poll every 15 s",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/device/v1/status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "device",
+                "v1",
+                "status"
+              ]
+            },
+            "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "if (body.program) {",
+                  "  pm.collectionVariables.set('fileId', body.program.file_id);",
+                  "  pm.collectionVariables.set('sha256', body.program.sha256);",
+                  "  if (body.program.status === 'WAITING') console.log('New program waiting:', body.program.program_name, '→ call 2. Download the program');",
+                  "} else console.log('No program uploaded for this machine yet.');",
+                  "if (body.backup_request) {",
+                  "  pm.collectionVariables.set('backupRequestId', body.backup_request.id);",
+                  "  console.log('Backup asked for → read the program from the CNC and call 4a. Upload a backup (or 4b on failure)');",
+                  "} else pm.collectionVariables.unset('backupRequestId');",
+                  "pm.test('poll_seconds is given', () => pm.expect(body.poll_seconds).to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "New program waiting, backup asked for",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "status"
+                  ]
+                },
+                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"machine\": {\n    \"id\": 15,\n    \"serial\": \"VMC-15\"\n  },\n  \"program\": {\n    \"file_id\": 42,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-21T08:00:00.000Z\",\n    \"status\": \"WAITING\",\n    \"message\": null\n  },\n  \"backup_request\": {\n    \"id\": 9,\n    \"requested_at\": \"2026-10-21T08:05:00.000Z\"\n  },\n  \"poll_seconds\": 15\n}"
+            },
+            {
+              "name": "Nothing new (program already written)",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "status"
+                  ]
+                },
+                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"machine\": {\n    \"id\": 15,\n    \"serial\": \"VMC-15\"\n  },\n  \"program\": {\n    \"file_id\": 42,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-21T08:00:00.000Z\",\n    \"status\": \"DONE\",\n    \"message\": null\n  },\n  \"backup_request\": null,\n  \"poll_seconds\": 15\n}"
+            },
+            {
+              "name": "No program uploaded yet",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "status"
+                  ]
+                },
+                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"machine\": {\n    \"id\": 15,\n    \"serial\": \"VMC-15\"\n  },\n  \"program\": null,\n  \"backup_request\": null,\n  \"poll_seconds\": 15\n}"
+            },
+            {
+              "name": "Wrong or revoked token",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "status"
+                  ]
+                },
+                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"TOKEN_INVALID\",\n  \"message\": \"This device token is not valid. Ask an admin for a new one.\"\n}"
+            },
+            {
+              "name": "Machine switched off in MEXA",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "status"
+                  ]
+                },
+                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_INACTIVE\",\n  \"message\": \"Machine VMC-15 is switched off in the platform.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "2. Download the program",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/device/v1/program",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "device",
+                "v1",
+                "program"
+              ]
+            },
+            "description": "The machine's program as a file. Check `X-Sha256` against the file before writing it to the CNC.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Sha256 is the program /status announced', () => pm.expect(pm.response.headers.get('X-Sha256')).to.eql(pm.collectionVariables.get('sha256')));",
+                  "pm.collectionVariables.set('fileId', pm.response.headers.get('X-File-Id'));",
+                  "console.log('Program', decodeURIComponent(pm.response.headers.get('X-Program-Name') || ''), '— write it to the CNC, then report with 3a or 3b');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "The program file",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ]
+                },
+                "description": "The machine's program as a file. Check `X-Sha256` against the file before writing it to the CNC.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason)."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/octet-stream"
+                },
+                {
+                  "key": "Content-Disposition",
+                  "value": "attachment; filename=\"O1001.nc\""
+                },
+                {
+                  "key": "X-Program-Name",
+                  "value": "O1001.nc"
+                },
+                {
+                  "key": "X-File-Id",
+                  "value": "42"
+                },
+                {
+                  "key": "X-Sha256",
+                  "value": "9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e"
+                }
+              ],
+              "body": "%\nO1001 (SHAFT OP10)\nG21 G90 G40\nT1 M06\nG0 X25. Y0.\nM30\n%\n"
+            },
+            {
+              "name": "No program uploaded yet",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ]
+                },
+                "description": "The machine's program as a file. Check `X-Sha256` against the file before writing it to the CNC.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason)."
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_PROGRAM\",\n  \"message\": \"No program has been uploaded for this machine yet.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "3a. Report — program written (DONE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/device/v1/report",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "device",
+                "v1",
+                "report"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('DONE recorded', () => pm.expect(pm.response.json().status).to.eql('DONE'));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Recorded",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"file_id\": 42,\n  \"status\": \"DONE\"\n}"
+            },
+            {
+              "name": "Same report again (retry)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"file_id\": 42,\n  \"status\": \"DONE\",\n  \"unchanged\": true\n}"
+            },
+            {
+              "name": "Not this machine's program",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"FILE_NOT_FOUND\",\n  \"message\": \"No such program for this machine.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "3b. Report — machine refused it (FAILED)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/device/v1/report",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "device",
+                "v1",
+                "report"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('FAILED recorded', () => pm.expect(pm.response.json().status).to.eql('FAILED'));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Recorded",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"file_id\": 42,\n  \"status\": \"FAILED\"\n}"
+            },
+            {
+              "name": "No reason given",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_MESSAGE\",\n  \"message\": \"Say what went wrong in \\\"message\\\".\"\n}"
+            },
+            {
+              "name": "Unknown status",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"BAD_STATUS\",\n  \"message\": \"status must be DONE or FAILED.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "4a. Upload a backup",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/device/v1/backup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "device",
+                "v1",
+                "backup"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "The program read from the CNC (required). In Postman: choose a file here."
+                },
+                {
+                  "key": "program_name",
+                  "value": "O1001.nc",
+                  "type": "text",
+                  "description": "Its name on the CNC (optional; otherwise the file's name)."
+                }
+              ]
+            },
+            "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "console.log('Saved backup', body.file.file_id, body.answered_request ? '— answered request ' + body.answered_request : '— no request was open');"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Saved, answered the open request",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/backup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "backup"
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "The program read from the CNC (required). In Postman: choose a file here."
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "O1001.nc",
+                      "type": "text",
+                      "description": "Its name on the CNC (optional; otherwise the file's name)."
+                    }
+                  ]
+                },
+                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"file\": {\n    \"file_id\": 43,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-21T08:06:10.000Z\"\n  },\n  \"answered_request\": 9\n}"
+            },
+            {
+              "name": "No file attached",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/backup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "backup"
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "The program read from the CNC (required). In Postman: choose a file here."
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "O1001.nc",
+                      "type": "text",
+                      "description": "Its name on the CNC (optional; otherwise the file's name)."
+                    }
+                  ]
+                },
+                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_FILE\",\n  \"message\": \"Attach the program file as \\\"file\\\".\"\n}"
+            },
+            {
+              "name": "Not a program file",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/backup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "backup"
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "The program read from the CNC (required). In Postman: choose a file here."
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "O1001.nc",
+                      "type": "text",
+                      "description": "Its name on the CNC (optional; otherwise the file's name)."
+                    }
+                  ]
+                },
+                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"BAD_TYPE\",\n  \"message\": \"\\\".pdf\\\" files are not NC programs. Allowed: .nc, .prg, .cnc, .txt, .tap, .eia, .min, .gcode, .ptp, .mpf, .spf, or no extension.\"\n}"
+            },
+            {
+              "name": "Binary, not text",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/backup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "backup"
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "The program read from the CNC (required). In Postman: choose a file here."
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "O1001.nc",
+                      "type": "text",
+                      "description": "Its name on the CNC (optional; otherwise the file's name)."
+                    }
+                  ]
+                },
+                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NOT_TEXT\",\n  \"message\": \"The file is not a text NC program.\"\n}"
+            },
+            {
+              "name": "Too large",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/backup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "backup"
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "The program read from the CNC (required). In Postman: choose a file here."
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "O1001.nc",
+                      "type": "text",
+                      "description": "Its name on the CNC (optional; otherwise the file's name)."
+                    }
+                  ]
+                },
+                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+              },
+              "status": "Payload Too Large",
+              "code": 413,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"TOO_LARGE\",\n  \"message\": \"The file is larger than 20 MB.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "4b. Report — backup could not be read (FAILED)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/device/v1/report",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "device",
+                "v1",
+                "report"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"backup_request_id\": {{backupRequestId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC not reachable\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "Recorded",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"backup_request_id\": {{backupRequestId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC not reachable\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"backup_request_id\": 9,\n  \"status\": \"FAILED\"\n}"
+            },
+            {
+              "name": "Already closed (retry)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"backup_request_id\": {{backupRequestId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC not reachable\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"backup_request_id\": 9,\n  \"status\": \"FAILED\",\n  \"unchanged\": true\n}"
+            },
+            {
+              "name": "Not this machine's request",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"backup_request_id\": {{backupRequestId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC not reachable\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"REQUEST_NOT_FOUND\",\n  \"message\": \"No backup request with this id for this machine.\"\n}"
+            },
+            {
+              "name": "DONE is not reported here",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"backup_request_id\": {{backupRequestId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC not reachable\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"BAD_STATUS\",\n  \"message\": \"A backup that worked is answered by sending the file to POST /backup. Report only FAILED here.\"\n}"
+            }
+          ]
+        }
+      ],
+      "description": "Every call sends the machine's token: `Authorization: Bearer {{token}}` (set on the collection). One token per machine; it says which machine the call is about.\n\n**The gateway loop**\n\n```\nevery 15 s:  GET /status\n  program.status == WAITING and sha256 is new  → GET /program → write to the CNC\n                                                 → POST /report {file_id, status: DONE}\n                                                   or {file_id, status: FAILED, message}\n  backup_request != null                       → read the program from the CNC\n                                                 → POST /backup (file)\n                                                   or POST /report {backup_request_id, status: FAILED, message}\n```\n\nErrors are always JSON: `{\"status\":\"error\",\"code\":\"…\",\"message\":\"…\"}`. 429 = too many calls: wait and try again."
+    },
+    {
+      "name": "Web side — to test the flow without the page (internal, do not share)",
+      "item": [
+        {
+          "name": "a. Sign in (a company admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "A person's sign-in (company admin), to play the web page's part. Saves `userToken`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('userToken', pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "b. Machines",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/programs/machines",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "programs",
+                "machines"
+              ]
+            },
+            "description": "The company's machines, each with its gateway, program (and what the gateway reported), last backup and open backup request. Saves the first machine as `machineId` unless one is set."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const list = pm.response.json().data;",
+                  "if (!pm.collectionVariables.get('machineId') && list.length) pm.collectionVariables.set('machineId', list[0].id);",
+                  "console.log(list.map(m => m.id + ' ' + m.machine_serial_no).join('\\n'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "c. Make the machine's gateway token",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/programs/machines/{{machineId}}/device-token",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "programs",
+                "machines",
+                "{{machineId}}",
+                "device-token"
+              ]
+            },
+            "description": "Makes (or replaces) the machine's gateway token and saves it as `token` for the gateway folder. Shown once — the old one stops at once."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('token', pm.response.json().data.token);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "d. Upload a program (as the page does)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/programs/files",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "programs",
+                "files"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "machine_id",
+                  "value": "{{machineId}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "A program file, e.g. O1001.nc"
+                }
+              ]
+            },
+            "description": "What **Upload program** on the page does: the file becomes the machine's program, and `/status` shows it as WAITING."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "e. Backup now (as the page does)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/programs/machines/{{machineId}}/backup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "programs",
+                "machines",
+                "{{machineId}}",
+                "backup"
+              ]
+            },
+            "description": "What **Backup now** on the page does: `/status` then shows a `backup_request`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 or 200', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ],
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{userToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "description": "Plays the person's part, to run the whole flow from Postman: a → b → c (gets the gateway token) → d (upload) → then the gateway calls 1, 2, 3a/3b → e (Backup now) → 1, 4a/4b.\n\nUses a person's login: remove this folder before sending the collection to the gateway team."
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://stmapi.stmcnc.com",
+      "type": "string",
+      "description": "The MEXA server (no trailing slash)"
+    },
+    {
+      "key": "token",
+      "value": "mxd_paste-the-machine-token-here",
+      "type": "string",
+      "description": "The machine's gateway token"
+    },
+    {
+      "key": "fileId",
+      "value": "",
+      "type": "string",
+      "description": "Set by 1. Status / 2. Download"
+    },
+    {
+      "key": "sha256",
+      "value": "",
+      "type": "string",
+      "description": "Set by 1. Status"
+    },
+    {
+      "key": "backupRequestId",
+      "value": "",
+      "type": "string",
+      "description": "Set by 1. Status"
+    },
+    {
+      "key": "userEmail",
+      "value": "",
+      "type": "string",
+      "description": "Web side folder only"
+    },
+    {
+      "key": "userPassword",
+      "value": "",
+      "type": "string",
+      "description": "Web side folder only"
+    },
+    {
+      "key": "userToken",
+      "value": "",
+      "type": "string",
+      "description": "Set by a. Sign in"
+    },
+    {
+      "key": "machineId",
+      "value": "",
+      "type": "string",
+      "description": "Set by b. Machines (or type it)"
+    }
+  ]
+}

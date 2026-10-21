@@ -71,7 +71,8 @@ test('status: the machine, its program to compare by sha256, a backup request, a
   expect(res.headers['cache-control']).toBe('no-store');
   expect(res.body).toEqual({
     machine: { id: 7, serial: 'VMC-1' },
-    program: { file_id: 81, program_name: 'O8001.nc', size_bytes: 20, sha256: 'a'.repeat(64), uploaded_at: '2026-10-21T05:00:00Z' },
+    program: { file_id: 81, program_name: 'O8001.nc', size_bytes: 20, sha256: 'a'.repeat(64), uploaded_at: '2026-10-21T05:00:00Z',
+               status: 'WAITING', message: null },
     backup_request: { id: 9, requested_at: '2026-10-21T05:10:00Z' },
     poll_seconds: 15
   });
@@ -127,6 +128,19 @@ test.each([
   expect(res.status).toBe(status);
   expect(res.body.code).toBe(code);
   expect(mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text))).toBeUndefined();
+});
+
+test('report: JSON in, the result out; a missing reason is a 400 with a code', async () => {
+  authRow();
+  mockDb.queueResponse(one({ id: '81', program_name: 'O8001.nc', uploaded_by: null }));
+  const done = await request(app).post('/api/device/v1/report').set(AUTH).send({ file_id: 81, status: 'DONE' });
+  expect(done.status).toBe(200);
+  expect(done.body).toEqual({ file_id: 81, status: 'DONE' });
+
+  authRow();
+  const bad = await request(app).post('/api/device/v1/report').set(AUTH).send({ file_id: 81, status: 'FAILED' });
+  expect(bad.status).toBe(400);
+  expect(bad.body).toMatchObject({ status: 'error', code: 'NO_MESSAGE' });
 });
 
 test.each(['/jobs/next', '/ping', '/commands/next'])('the retired %s call is gone', async route => {

@@ -9,6 +9,8 @@
  *     GET  /status   is there a new program? was a backup asked for?
  *     GET  /program  the machine's program
  *     POST /backup   a backup file from the machine
+ *     POST /report   what happened: the program is on the machine, the
+ *                    machine refused it, or a backup could not be read
  *
  * That is all. How the gateway talks to the CNC (FTP, FOCAS, a USB stick…) is
  * the gateway team's business, not the server's: there is no protocol, no
@@ -18,6 +20,7 @@
  * Files are rows in program_files (migration 030). The machine's program is
  * its newest upload (kind NEW); a backup (kind BACKUP) never replaces it.
  * Backup requests are program_backup_requests (050), one open per machine.
+ * The gateway's reports are columns on those two tables (051).
  */
 const pool = require('../db');
 const storage = require('./storage');
@@ -63,7 +66,8 @@ async function getMachine(req, machineId) {
   return rows[0];
 }
 
-const FILE_COLUMNS = `f.id, f.machine_id, f.program_name, f.kind, f.size_bytes, f.sha256, f.created_at`;
+const FILE_COLUMNS = `f.id, f.machine_id, f.program_name, f.kind, f.size_bytes, f.sha256, f.created_at,
+  f.delivery_status, f.delivery_message, f.delivered_at`;
 
 /** The machine's program: its newest upload that has not been deleted. */
 async function currentProgram(machineId, db = pool) {
@@ -111,12 +115,14 @@ exports.listMachines = async (req) => {
             d.token_prefix, d.created_at AS token_created_at, d.last_seen_at,
             COALESCE(d.last_seen_at > NOW() - make_interval(secs => $2), false) AS online,
             p.id AS program_id, p.program_name, p.size_bytes AS program_size, p.created_at AS program_at,
+            p.delivery_status, p.delivery_message, p.delivered_at,
             b.id AS backup_id, b.program_name AS backup_name, b.created_at AS backup_at,
-            r.id AS request_id, r.requested_at
+            r.id AS request_id, r.requested_at,
+            bf.error_message AS backup_error, bf.closed_at AS backup_failed_at
        FROM machines m
        LEFT JOIN program_devices d ON d.machine_id = m.id AND d.revoked_at IS NULL
        LEFT JOIN LATERAL (
-              SELECT id, program_name, size_bytes, created_at FROM program_files
+              SELECT id, program_name, size_bytes, created_at, delivery_status, delivery_message, delivered_at FROM program_files
                WHERE machine_id = m.id AND kind = 'NEW' AND deleted_at IS NULL
                ORDER BY created_at DESC, id DESC LIMIT 1) p ON true
        LEFT JOIN LATERAL (
@@ -125,6 +131,10 @@ exports.listMachines = async (req) => {
                ORDER BY created_at DESC, id DESC LIMIT 1) b ON true
        LEFT JOIN program_backup_requests r
               ON r.machine_id = m.id AND r.closed_at IS NULL AND r.requested_at > NOW() - make_interval(mins => $3)
+       LEFT JOIN LATERAL (
+              SELECT error_message, closed_at FROM program_backup_requests
+               WHERE machine_id = m.id AND error_message IS NOT NULL
+               ORDER BY closed_at DESC LIMIT 1) bf ON true
       WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}
       ORDER BY m.machine_serial_no`,
     [companyId, ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN]
@@ -135,9 +145,14 @@ exports.listMachines = async (req) => {
     gateway: r.token_prefix
       ? { token_prefix: r.token_prefix, token_created_at: r.token_created_at, last_seen_at: r.last_seen_at, online: r.online }
       : null,
-    program: r.program_id ? { id: r.program_id, program_name: r.program_name, size_bytes: r.program_size, created_at: r.program_at } : null,
+    program: r.program_id ? { id: r.program_id, program_name: r.program_name, size_bytes: r.program_size, created_at: r.program_at,
+                              delivery_status: r.delivery_status || null, delivery_message: r.delivery_message || null,
+                              delivered_at: r.delivered_at || null } : null,
     last_backup: r.backup_id ? { id: r.backup_id, program_name: r.backup_name, created_at: r.backup_at } : null,
-    backup_request: r.request_id ? { id: r.request_id, requested_at: r.requested_at } : null
+    backup_request: r.request_id ? { id: r.request_id, requested_at: r.requested_at } : null,
+    // the last backup the gateway could not read — only while no backup has arrived since
+    backup_failure: r.backup_error && !r.request_id && !(r.backup_at && new Date(r.backup_at) > new Date(r.backup_failed_at))
+      ? { message: r.backup_error, at: r.backup_failed_at } : null
   }));
 };
 
@@ -285,6 +300,9 @@ exports.revokeDeviceToken = async (req) => {
 const fileView = f => f && ({ file_id: Number(f.id), program_name: f.program_name, size_bytes: f.size_bytes,
                               sha256: f.sha256, uploaded_at: f.created_at });
 
+/** The program as /status shows it: with what the gateway already reported, so it does not try a refused file again. */
+const programView = f => f && ({ ...fileView(f), status: f.delivery_status || 'WAITING', message: f.delivery_message || null });
+
 /** What the gateway polls: the machine's program (compare sha256 to know it changed) and an open backup request. */
 exports.deviceStatus = async (device) => {
   const [program, request] = await Promise.all([
@@ -298,7 +316,7 @@ exports.deviceStatus = async (device) => {
   const open = request.rows[0];
   return {
     machine: { id: Number(device.machine.id), serial: device.machine.machine_serial_no },
-    program: fileView(program),
+    program: programView(program),
     backup_request: open ? { id: Number(open.id), requested_at: open.requested_at } : null,
     poll_seconds: POLL_SECONDS
   };
@@ -320,24 +338,96 @@ exports.deviceBackup = async (device, staged, body = {}) => {
       RETURNING id, requested_by`,
     [machine.id, file.id]
   );
-  if (request?.requested_by) await tellRequester(machine, request.requested_by, file);
+  if (request?.requested_by) {
+    await tellUser(machine, request.requested_by, 'INFO', `Backup received — ${machine.machine_serial_no}`,
+                   `"${file.program_name}" was saved from ${machine.machine_serial_no}.`);
+  }
   return { file: fileView(file), answered_request: request ? Number(request.id) : null };
 };
 
+const REPORT_STATUSES = ['DONE', 'FAILED'];
+
+/**
+ * What happened, from the gateway:
+ *   { file_id, status: DONE }              the program is on the machine
+ *   { file_id, status: FAILED, message }   the machine refused it
+ *   { backup_request_id, status: FAILED, message }  the backup could not be read
+ * (A backup that worked is answered by POST /backup itself.) Reporting the
+ * same thing twice — a retry after a lost answer — changes nothing and
+ * notifies no one again.
+ */
+exports.deviceReport = async (device, body = {}) => {
+  const machine = { id: device.machine.id, company_id: device.company_id, machine_serial_no: device.machine.machine_serial_no };
+  const status = String(body.status || '').toUpperCase();
+  const message = body.message == null ? null : String(body.message).trim().slice(0, 500) || null;
+  if (!REPORT_STATUSES.includes(status)) throw fail('status must be DONE or FAILED.', 'BAD_STATUS');
+  if (status === 'FAILED' && !message) throw fail('Say what went wrong in "message".', 'NO_MESSAGE');
+
+  if (body.file_id != null) {
+    const id = idOf(body.file_id, 'No such program for this machine.', 'FILE_NOT_FOUND');
+    const { rows: [file] } = await pool.query(
+      `UPDATE program_files SET delivery_status = $3, delivery_message = $4, delivered_at = NOW()
+        WHERE id = $1 AND machine_id = $2 AND kind = 'NEW' AND deleted_at IS NULL
+          AND (delivery_status IS DISTINCT FROM $3 OR delivery_message IS DISTINCT FROM $4)
+        RETURNING id, program_name, uploaded_by`,
+      [id, machine.id, status, status === 'DONE' ? null : message]
+    );
+    if (!file) {
+      const known = await pool.query(
+        `SELECT id FROM program_files WHERE id = $1 AND machine_id = $2 AND kind = 'NEW' AND deleted_at IS NULL`, [id, machine.id]
+      );
+      if (!known.rows.length) throw fail('No such program for this machine.', 'FILE_NOT_FOUND', 404);
+      return { file_id: id, status, unchanged: true };
+    }
+    if (file.uploaded_by) {
+      await (status === 'DONE'
+        ? tellUser(machine, file.uploaded_by, 'INFO', `Program on ${machine.machine_serial_no}`,
+                   `"${file.program_name}" was written to ${machine.machine_serial_no}.`)
+        : tellUser(machine, file.uploaded_by, 'WARNING', `Program not accepted — ${machine.machine_serial_no}`,
+                   `${machine.machine_serial_no} could not use "${file.program_name}": ${message}`));
+    }
+    return { file_id: id, status };
+  }
+
+  if (body.backup_request_id != null) {
+    if (status !== 'FAILED') {
+      throw fail('A backup that worked is answered by sending the file to POST /backup. Report only FAILED here.', 'BAD_STATUS');
+    }
+    const id = idOf(body.backup_request_id, 'No backup request with this id for this machine.', 'REQUEST_NOT_FOUND');
+    const { rows: [request] } = await pool.query(
+      `UPDATE program_backup_requests SET closed_at = NOW(), error_message = $3
+        WHERE id = $1 AND machine_id = $2 AND closed_at IS NULL
+        RETURNING id, requested_by`,
+      [id, machine.id, message]
+    );
+    if (!request) {
+      const known = await pool.query(`SELECT id FROM program_backup_requests WHERE id = $1 AND machine_id = $2`, [id, machine.id]);
+      if (!known.rows.length) throw fail('No backup request with this id for this machine.', 'REQUEST_NOT_FOUND', 404);
+      return { backup_request_id: id, status, unchanged: true };
+    }
+    if (request.requested_by) {
+      await tellUser(machine, request.requested_by, 'WARNING', `Backup failed — ${machine.machine_serial_no}`,
+                     `${machine.machine_serial_no} could not send a backup: ${message}`);
+    }
+    return { backup_request_id: id, status };
+  }
+
+  throw fail('Send file_id (a program) or backup_request_id (a backup request).', 'NOTHING_TO_REPORT');
+};
+
 /** Respects Settings → Program transfer notifications, like transfers always did. */
-async function tellRequester(machine, userId, file) {
+async function tellUser(machine, userId, type, title, message) {
   try {
     await pool.query(
       `INSERT INTO notifications (company_id, user_id, type, title, message, link)
-       SELECT $1, $2, 'INFO', $3, $4, '/programs'
+       SELECT $1, $2, $3, $4, $5, '/programs'
         WHERE NOT EXISTS (SELECT 1 FROM notification_preferences
                            WHERE user_id = $2 AND notify_program_transfer = false)`,
-      [machine.company_id, userId, `Backup received — ${machine.machine_serial_no}`,
-       `"${file.program_name}" was saved from ${machine.machine_serial_no}.`]
+      [machine.company_id, userId, type, title, message]
     );
     await announceUnread([userId]);
   } catch (err) {
-    console.error('Program backup notification failed:', err.message);
+    console.error('Program transfer notification failed:', err.message);
   }
 }
 

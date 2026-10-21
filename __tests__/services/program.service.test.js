@@ -52,11 +52,29 @@ describe('machines and files', () => {
     expect(list).toEqual([
       { id: 7, machine_serial_no: 'VMC-1',
         gateway: { token_prefix: 'mxd_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true },
-        program: { id: '40', program_name: 'O1001.nc', size_bytes: 24, created_at: 'T2' },
+        program: { id: '40', program_name: 'O1001.nc', size_bytes: 24, created_at: 'T2',
+                   delivery_status: null, delivery_message: null, delivered_at: null },
         last_backup: { id: '41', program_name: 'O1001.nc', created_at: 'T3' },
-        backup_request: { id: '9', requested_at: 'T4' } },
-      { id: 8, machine_serial_no: 'VMC-2', gateway: null, program: null, last_backup: null, backup_request: null }
+        backup_request: { id: '9', requested_at: 'T4' },
+        backup_failure: null },
+      { id: 8, machine_serial_no: 'VMC-2', gateway: null, program: null, last_backup: null, backup_request: null, backup_failure: null }
     ]);
+  });
+
+  test("what the gateway reported shows: the program on the machine, a backup it could not read", async () => {
+    mockDb.queueResponse({ rows: [
+      { id: 7, machine_serial_no: 'VMC-1', token_prefix: null, program_id: '40', program_name: 'O1001.nc', program_size: 24, program_at: 'T2',
+        delivery_status: 'FAILED', delivery_message: 'CNC memory full', delivered_at: '2026-10-21T05:00:00Z',
+        backup_id: '41', backup_name: 'O1001.nc', backup_at: '2026-10-21T04:00:00Z', request_id: null,
+        backup_error: 'CNC not reachable', backup_failed_at: '2026-10-21T05:30:00Z' },
+      // a backup arrived after the failure: the failure is old news
+      { id: 8, machine_serial_no: 'VMC-2', token_prefix: null, program_id: null, backup_id: '50', backup_at: '2026-10-21T06:00:00Z',
+        request_id: null, backup_error: 'CNC not reachable', backup_failed_at: '2026-10-21T05:30:00Z' }
+    ], rowCount: 2 });
+    const [failed, recovered] = await svc.listMachines(req());
+    expect(failed.program).toMatchObject({ delivery_status: 'FAILED', delivery_message: 'CNC memory full' });
+    expect(failed.backup_failure).toEqual({ message: 'CNC not reachable', at: '2026-10-21T05:30:00Z' });
+    expect(recovered.backup_failure).toBeNull();
   });
 
   test("a plant user sees only their plant's machines", async () => {
@@ -175,7 +193,8 @@ describe('the gateway side', () => {
       one({ id: '9', requested_at: 'T1' }));
     await expect(svc.deviceStatus(device)).resolves.toEqual({
       machine: { id: 7, serial: 'VMC-1' },
-      program: { file_id: 42, program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), uploaded_at: 'T0' },
+      program: { file_id: 42, program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), uploaded_at: 'T0',
+                 status: 'WAITING', message: null },
       backup_request: { id: 9, requested_at: 'T1' },
       poll_seconds: 15
     });
@@ -198,7 +217,7 @@ describe('the gateway side', () => {
     expect(sql(/UPDATE program_backup_requests SET closed_at = NOW\(\), file_id = \$2/).params).toEqual([7, '43']);
     const note = sql(/INSERT INTO notifications/);
     expect(note.text).toMatch(/notify_program_transfer = false/);
-    expect(note.params).toEqual([5, 2, 'Backup received — VMC-1', '"O1001.nc" was saved from VMC-1.']);
+    expect(note.params).toEqual([5, 2, 'INFO', 'Backup received — VMC-1', '"O1001.nc" was saved from VMC-1.']);
   });
 
   test('a backup nobody asked for is kept, and no one is notified', async () => {
@@ -206,5 +225,66 @@ describe('the gateway side', () => {
     const r = await svc.deviceBackup(device, stage('%\nO1001\nM30\n%\n'));
     expect(r.answered_request).toBeNull();
     expect(sql(/INSERT INTO notifications/)).toBeUndefined();
+  });
+});
+
+describe('the gateway reports what happened', () => {
+  const device = { id: 3, company_id: 5, machine: { id: 7, machine_serial_no: 'VMC-1' } };
+
+  test('DONE: the program is on the machine, and the uploader is told', async () => {
+    mockDb.queueResponse(one({ id: '42', program_name: 'O1001.nc', uploaded_by: 2 }), none);
+    await expect(svc.deviceReport(device, { file_id: 42, status: 'done' })).resolves.toEqual({ file_id: 42, status: 'DONE' });
+    const update = sql(/UPDATE program_files SET delivery_status/);
+    expect(update.params).toEqual([42, 7, 'DONE', null]);
+    expect(update.text).toMatch(/machine_id = \$2 AND kind = 'NEW' AND deleted_at IS NULL/);   // only this machine's uploads
+    expect(sql(/INSERT INTO notifications/).params).toEqual([5, 2, 'INFO', 'Program on VMC-1', '"O1001.nc" was written to VMC-1.']);
+  });
+
+  test('FAILED: the reason is kept, and the uploader is warned', async () => {
+    mockDb.queueResponse(one({ id: '42', program_name: 'O1001.nc', uploaded_by: 2 }), none);
+    await svc.deviceReport(device, { file_id: 42, status: 'FAILED', message: '  CNC memory full  ' });
+    expect(sql(/UPDATE program_files SET delivery_status/).params).toEqual([42, 7, 'FAILED', 'CNC memory full']);
+    expect(sql(/INSERT INTO notifications/).params.slice(2)).toEqual(['WARNING', 'Program not accepted — VMC-1',
+      'VMC-1 could not use "O1001.nc": CNC memory full']);
+  });
+
+  test('the same report again (a retry) changes nothing and tells no one twice', async () => {
+    mockDb.queueResponse(none, one({ id: '42' }));
+    await expect(svc.deviceReport(device, { file_id: 42, status: 'DONE' })).resolves.toEqual({ file_id: 42, status: 'DONE', unchanged: true });
+    expect(sql(/INSERT INTO notifications/)).toBeUndefined();
+  });
+
+  test("a file of another machine, or no file, is not found", async () => {
+    mockDb.queueResponse(none, none);
+    await expect(svc.deviceReport(device, { file_id: 99, status: 'DONE' })).rejects.toMatchObject({ status: 404, code: 'FILE_NOT_FOUND' });
+  });
+
+  test.each([
+    [{ file_id: 42, status: 'OK' }, 'BAD_STATUS'],
+    [{ file_id: 42, status: 'FAILED' }, 'NO_MESSAGE'],
+    [{ status: 'DONE' }, 'NOTHING_TO_REPORT'],
+    [{ backup_request_id: 9, status: 'DONE' }, 'BAD_STATUS']
+  ])('%j is refused with %s', async (body, code) => {
+    await expect(svc.deviceReport(device, body)).rejects.toMatchObject({ status: 400, code });
+    expect(sql(/UPDATE/)).toBeUndefined();
+  });
+
+  test('a backup that could not be read closes the request and warns who asked', async () => {
+    mockDb.queueResponse(one({ id: '9', requested_by: 2 }), none);
+    await expect(svc.deviceReport(device, { backup_request_id: 9, status: 'FAILED', message: 'CNC not reachable' }))
+      .resolves.toEqual({ backup_request_id: 9, status: 'FAILED' });
+    expect(sql(/UPDATE program_backup_requests SET closed_at = NOW\(\), error_message = \$3/).params).toEqual([9, 7, 'CNC not reachable']);
+    expect(sql(/INSERT INTO notifications/).params.slice(2)).toEqual(['WARNING', 'Backup failed — VMC-1',
+      'VMC-1 could not send a backup: CNC not reachable']);
+  });
+
+  test('a backup request already closed: unchanged; another machine\'s: not found', async () => {
+    mockDb.queueResponse(none, one({ id: '9' }));
+    await expect(svc.deviceReport(device, { backup_request_id: 9, status: 'FAILED', message: 'x' }))
+      .resolves.toEqual({ backup_request_id: 9, status: 'FAILED', unchanged: true });
+    resetDb();
+    mockDb.queueResponse(none, none);
+    await expect(svc.deviceReport(device, { backup_request_id: 10, status: 'FAILED', message: 'x' }))
+      .rejects.toMatchObject({ status: 404, code: 'REQUEST_NOT_FOUND' });
   });
 });

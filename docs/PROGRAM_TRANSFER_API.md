@@ -1,6 +1,6 @@
 # Program Transfer — gateway API
 
-Three HTTPS calls between the gateway at a machine (a Node-RED PC, a laptop,
+Four HTTPS calls between the gateway at a machine (a Node-RED PC, a laptop,
 any program) and the MEXA server:
 
 | Call | What it does |
@@ -8,9 +8,28 @@ any program) and the MEXA server:
 | `GET  /api/device/v1/status`  | Ask: is there a new program? Has someone asked for a backup? |
 | `GET  /api/device/v1/program` | Download the machine's program |
 | `POST /api/device/v1/backup`  | Upload a backup file from the machine |
+| `POST /api/device/v1/report`  | Say what happened: program written, machine refused it, backup could not be read |
 
 That is all. How the gateway talks to the CNC (FTP, FOCAS, a shared folder,
 anything) is up to the gateway; the server never connects to a machine.
+
+**Postman:** `docs/postman/MEXA_Program_Transfer.postman_collection.json`
+has every call with example answers and errors. Import it, set `baseUrl`
+and `token`, and run the folder *Gateway — the 4 calls* top to bottom.
+
+## The gateway's loop
+
+```
+every 15 s:  GET /status
+  program.status == WAITING and its sha256 is new
+      → GET /program → write it to the CNC
+      → POST /report {file_id, status: DONE}
+        or POST /report {file_id, status: FAILED, message: "why"}
+  backup_request is not null
+      → read the program from the CNC
+      → POST /backup (the file)
+        or POST /report {backup_request_id, status: FAILED, message: "why"}
+```
 
 ## The token
 
@@ -45,7 +64,9 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
     "program_name": "O1001.nc",
     "size_bytes": 1472,
     "sha256": "9f2c…64 hex characters…",
-    "uploaded_at": "2026-10-21T08:00:00.000Z"
+    "uploaded_at": "2026-10-21T08:00:00.000Z",
+    "status": "WAITING",
+    "message": null
   },
   "backup_request": { "id": 9, "requested_at": "2026-10-21T08:05:00.000Z" },
   "poll_seconds": 15
@@ -54,7 +75,9 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
 
 - `program` is the machine's program: the newest file someone uploaded for
   it. `null` until the first upload. When its `sha256` differs from the one
-  you last wrote to the CNC, download it (call 2).
+  you last wrote to the CNC and `status` is `WAITING`, download it (call 2).
+  `DONE` / `FAILED` mean you already reported this file (call 4): do not try
+  it again. A corrected upload comes with a new `file_id` and `sha256`.
 - `backup_request` is not `null` when someone pressed **Backup** on the page.
   Read the program from the CNC and upload it (call 3). A request nobody
   answers within 30 minutes lapses.
@@ -75,7 +98,8 @@ The body is the file itself. The headers say what it is:
 | `Content-Length` | `1472` |
 
 `404` with code `NO_PROGRAM` means nothing has been uploaded for this machine.
-The same program can be downloaded as often as needed.
+The same program can be downloaded as often as needed. After writing it to
+the CNC, report the result (call 4).
 
 ## 3. POST /backup — upload a backup
 
@@ -103,7 +127,37 @@ curl -H "Authorization: Bearer $TOKEN" \
 The backup is saved on the server and listed on the Program Transfer page.
 It answers an open backup request (the person who asked is notified). A
 backup can also be sent without a request — after a change on the machine,
-or every night.
+or every night. If the CNC cannot be read, report it instead (call 4).
+
+## 4. POST /report — say what happened
+
+JSON. One of three:
+
+```json
+{ "file_id": 42, "status": "DONE" }
+{ "file_id": 42, "status": "FAILED", "message": "CNC memory full" }
+{ "backup_request_id": 9, "status": "FAILED", "message": "CNC not reachable" }
+```
+
+| Report | What the page shows | Who is notified |
+| --- | --- | --- |
+| program `DONE` | ✅ On the machine since 10:42 | the person who uploaded it |
+| program `FAILED` | ❌ The machine could not use it: *message* | the person who uploaded it |
+| backup `FAILED` | ❌ Backup failed: *message*, and Backup now works again | the person who asked |
+
+- `message` is required with `FAILED` (up to 500 characters) — write it for
+  the person at the page: "Program O1001 is running", "CNC memory full".
+- `file_id` is the program from `/status` or the `X-File-Id` header.
+- A backup that worked needs no report: uploading it (call 3) answers the
+  request, so `status: DONE` with `backup_request_id` is refused.
+- The same report sent again (a retry after a lost answer) changes nothing
+  and notifies no one twice: `{"file_id": 42, "status": "DONE", "unchanged": true}`.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"file_id": 42, "status": "FAILED", "message": "CNC memory full"}' \
+     https://SERVER/api/device/v1/report
+```
 
 ## Files
 
@@ -120,6 +174,8 @@ Every error is JSON: `{"status":"error","code":"…","message":"…"}`.
 | 401 | `TOKEN_MISSING` / `TOKEN_INVALID` | No token, a wrong one, or a revoked one |
 | 403 | `MACHINE_INACTIVE` / `COMPANY_DISABLED` | The machine or company is switched off in MEXA |
 | 404 | `NO_PROGRAM` | No program uploaded for this machine yet |
+| 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report about a file or request that is not this machine's |
+| 400 | `BAD_STATUS` / `NO_MESSAGE` / `NOTHING_TO_REPORT` | Report: status must be DONE or FAILED; FAILED needs a message; send file_id or backup_request_id |
 | 400 | `NO_FILE` / `BAD_UPLOAD` | Send the file as multipart field `file` |
 | 400 | `BAD_NAME` / `BAD_TYPE` / `NOT_TEXT` / `EMPTY` | Not a usable program name or text file |
 | 413 | `TOO_LARGE` | Over the size limit |
