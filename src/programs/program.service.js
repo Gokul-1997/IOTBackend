@@ -1,48 +1,61 @@
 /**
- * Program Transfer, the people's side (/api/programs).
+ * Program Transfer — kept simple (21 Oct 2026, the user: "just API, don't
+ * complicate").
  *
- * A person uploads the current program for a machine; the device can read
- * that file repeatedly until another upload replaces the publication.
- * Device backups are kept separately and never change the current file.
- * Legacy queued SEND/FETCH operations remain available for existing agents.
+ *   People (/api/programs, signed in):
+ *     pick a machine of their company, upload a program, download any file,
+ *     delete one, ask the machine for a backup.
+ *   The machine's gateway (/api/device/v1, its own token):
+ *     GET  /status   is there a new program? was a backup asked for?
+ *     GET  /program  the machine's program
+ *     POST /backup   a backup file from the machine
+ *
+ * That is all. How the gateway talks to the CNC (FTP, FOCAS, a USB stick…) is
+ * the gateway team's business, not the server's: there is no protocol, no
+ * command queue and no controller path here. One token per machine
+ * ("mxd_…") says which machine a call is about.
+ *
+ * Files are rows in program_files (migration 030). The machine's program is
+ * its newest upload (kind NEW); a backup (kind BACKUP) never replaces it.
+ * Backup requests are program_backup_requests (050), one open per machine.
  */
 const pool = require('../db');
 const storage = require('./storage');
-const jobs = require('./jobs');
 const deviceToken = require('./device-token');
 const audit = require('../audit/audit.service');
-const currentProgram = require('./current-program');
-const { requireConfig } = require('./commands');
+const { announceUnread } = require('../notifications/notification.service');
 const { plantSql } = require('../lib/read-scope');
 const { effectivePlantId } = require('../lib/plant-scope');
-const { denialFor } = require('../middleware/access.middleware');
 
-const MAX_JOBS_PER_REQUEST = 50;
+/** A device is "online" when it called within this long. */
+const ONLINE_WINDOW_SEC = 60;
+/** A backup request the gateway has not answered by then can be asked again. */
+const BACKUP_WAIT_MIN = 30;
+/** How often a gateway is asked to call /status. */
+const POLL_SECONDS = 15;
 
-const fail = (message, code, status = 400, extra = {}) => Object.assign(new Error(message), { code, status, ...extra });
-
-const allowed = (req, key) => !!req.user?.is_snt_super || (req.user?.permissions || []).includes(key);
-
-async function requireAction(req, key, message) {
-  if (!allowed(req, key)) throw fail(message, 'FORBIDDEN', 403);
-  const denial = await denialFor(req.user, key);
-  if (denial) throw fail(denial === 'COMPANY'
-    ? 'Your plan does not include this program action. Contact S&T to add it.'
-    : message, denial === 'COMPANY' ? 'NOT_IN_PLAN' : 'FORBIDDEN', 403);
-}
+const fail = (message, code, status = 400) => Object.assign(new Error(message), { code, status });
 
 function pageOf(query, defLimit = 20) {
-  const limit = Math.min(200, Math.max(1, parseInt(query.limit, 10) || defLimit));
+  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || defLimit));
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   return { limit, page, offset: (page - 1) * limit };
 }
 
-/** A machine of the caller's company that is switched on, or a 404. */
-async function getMachine(machineId, companyId, plantId) {
-  const id = Number(machineId);
-  if (!Number.isInteger(id) || id <= 0) throw fail('Choose a machine.', 'NO_MACHINE');
+function idOf(value, message, code) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) throw fail(message, code, 404);
+  return id;
+}
+
+const scope = (req) => ({ companyId: req.user.company_id, plantId: effectivePlantId(req.user) });
+
+/** A switched-on machine of the caller's company (and plant, for a plant user), or a 404. */
+async function getMachine(req, machineId) {
+  const id = idOf(machineId, 'Machine not found.', 'MACHINE_NOT_FOUND');
+  const { companyId, plantId } = scope(req);
   const { rows } = await pool.query(
-    `SELECT id, company_id, machine_serial_no, ip_address, controller_ip, program_path
+    `SELECT id, company_id, machine_serial_no
        FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true${plantSql('id', plantId, companyId)}`,
     [id, companyId]
   );
@@ -50,77 +63,33 @@ async function getMachine(machineId, companyId, plantId) {
   return rows[0];
 }
 
-/**
- * Legacy SEND/FETCH jobs need a controller path. Direct publication and
- * device-token creation do not: the machine decides where to use the file.
- */
-function requirePath(machine) {
-  if (!machine.program_path) {
-    throw fail(`Set the program path for ${machine.machine_serial_no} first — the folder on the machine where its device saves programs.`,
-      'NO_PROGRAM_PATH', 409, { machine_id: machine.id });
-  }
-}
+const FILE_COLUMNS = `f.id, f.machine_id, f.program_name, f.kind, f.size_bytes, f.sha256, f.created_at`;
 
-async function getFile(fileId, companyId, plantId) {
-  const id = Number(fileId);
-  if (!Number.isInteger(id) || id <= 0) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
-  const { rows } = await pool.query(
-    `SELECT f.id, f.company_id, f.machine_id, f.folder, f.stored_name, f.program_name, f.kind, f.size_bytes, f.sha256,
-            m.machine_serial_no
-       FROM program_files f LEFT JOIN machines m ON m.id = f.machine_id
-      WHERE f.id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL${plantSql('f.machine_id', plantId, companyId)}`,
-    [id, companyId]
+/** The machine's program: its newest upload that has not been deleted. */
+async function currentProgram(machineId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT ${FILE_COLUMNS}, f.folder, f.stored_name
+       FROM program_files f
+      WHERE f.machine_id = $1 AND f.kind = 'NEW' AND f.deleted_at IS NULL
+      ORDER BY f.created_at DESC, f.id DESC
+      LIMIT 1`,
+    [machineId]
   );
-  if (!rows.length) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
-  return rows[0];
+  return rows[0] || null;
 }
 
-/* "O1234.nc" and "O1234" are the same program to a Fanuc: compare without case or extension */
-const sameProgram = (a, b) => {
-  const k = s => String(s || '').toLowerCase().replace(/\.[^.]+$/, '');
-  return k(a) === k(b);
-};
-
-/**
- * Before a SEND is queued: refuse a second job for the same program while
- * one is still open, and — unless the person confirmed an overwrite — refuse
- * a program the device last reported as already on the controller. The
- * device checks again when it writes (the list may be minutes old).
- */
-async function checkSend(machine, programName, overwrite) {
-  const open = await pool.query(
-    `SELECT program_name FROM program_jobs
-      WHERE machine_id = $1 AND action = 'SEND' AND status = ANY($2)`,
-    [machine.id, jobs.OPEN]
-  );
-  if (open.rows.some(r => sameProgram(r.program_name, programName))) {
-    return { duplicate: true };
-  }
-  if (overwrite) return {};
-  const listed = await pool.query(`SELECT files FROM program_controller_files WHERE machine_id = $1`, [machine.id]);
-  const onController = (listed.rows[0]?.files || []).some(f => sameProgram(f.name, programName));
-  return onController ? { exists: true } : {};
-}
-
-async function insertJob({ companyId, machine, action, programName, fileId = null, overwrite = false, userId }) {
-  const { rows } = await pool.query(
-    `INSERT INTO program_jobs (company_id, machine_id, machine_serial, action, program_name, file_id, overwrite, requested_by, program_path)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-    [companyId, machine.id, machine.machine_serial_no, action, programName, fileId, !!overwrite, userId, machine.program_path]
-  );
-  const job = await jobs.getJob(rows[0].id);
-  await jobs.announce(job);
-  return jobs.view(job);
-}
-
-async function insertFile({ machine, saved, userId, note, db = pool }) {
+async function saveFile({ machine, kind, staged, programName, userId = null, deviceId = null }) {
+  if (!staged) throw fail('Attach the program file as "file".', 'NO_FILE');
+  const saved = await storage.saveStream({
+    machine, kind, programName: programName || staged.originalname, filename: staged.path
+  });
   try {
-    const { rows } = await db.query(
-      `INSERT INTO program_files (company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, uploaded_by, note)
-       VALUES ($1, $2, $3, $4, $5, 'NEW', $6, $7, $8, $9)
-       RETURNING id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, note, created_at`,
-      [machine.company_id, machine.id, saved.folder, saved.storedName, saved.programName,
-       saved.size, saved.sha256, userId, note ? String(note).slice(0, 255) : null]
+    const { rows } = await pool.query(
+      `INSERT INTO program_files (company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, uploaded_by, device_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id, machine_id, program_name, kind, size_bytes, sha256, created_at`,
+      [machine.company_id, machine.id, saved.folder, saved.storedName, saved.programName, kind,
+       saved.size, saved.sha256, userId, deviceId]
     );
     return rows[0];
   } catch (err) {
@@ -129,330 +98,149 @@ async function insertFile({ machine, saved, userId, note, db = pool }) {
   }
 }
 
-/* ─────────────── machines and their devices ─────────────── */
+const auditOf = (req, entry) => audit.log({ user_id: req.user.id, company_id: req.user.company_id,
+                                            ip_address: req.ip, user_agent: req.headers?.['user-agent'], ...entry });
 
+/* ───────────────────────── people ───────────────────────── */
+
+/** The company's machines, each with its gateway, its program, its last backup and an open backup request. */
 exports.listMachines = async (req) => {
+  const { companyId, plantId } = scope(req);
   const { rows } = await pool.query(
-    `SELECT m.id, m.company_id, m.machine_serial_no, m.ip_address, m.controller_ip, m.program_path,
-            d.id AS device_id, d.token_prefix, d.label AS device_label, d.created_at AS device_created_at,
-            d.last_seen_at, d.last_seen_ip, d.agent_version,
+    `SELECT m.id, m.machine_serial_no,
+            d.token_prefix, d.created_at AS token_created_at, d.last_seen_at,
             COALESCE(d.last_seen_at > NOW() - make_interval(secs => $2), false) AS online,
-            (SELECT COUNT(*)::int FROM program_jobs j
-              WHERE j.machine_id = m.id AND j.status IN ('QUEUED', 'DELIVERED')) AS open_jobs,
-            c.reported_at AS controller_reported_at
+            p.id AS program_id, p.program_name, p.size_bytes AS program_size, p.created_at AS program_at,
+            b.id AS backup_id, b.program_name AS backup_name, b.created_at AS backup_at,
+            r.id AS request_id, r.requested_at
        FROM machines m
        LEFT JOIN program_devices d ON d.machine_id = m.id AND d.revoked_at IS NULL
-       LEFT JOIN program_controller_files c ON c.machine_id = m.id
-      WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', effectivePlantId(req.user), req.user.company_id)}
+       LEFT JOIN LATERAL (
+              SELECT id, program_name, size_bytes, created_at FROM program_files
+               WHERE machine_id = m.id AND kind = 'NEW' AND deleted_at IS NULL
+               ORDER BY created_at DESC, id DESC LIMIT 1) p ON true
+       LEFT JOIN LATERAL (
+              SELECT id, program_name, created_at FROM program_files
+               WHERE machine_id = m.id AND kind IN ('BACKUP', 'FETCHED') AND deleted_at IS NULL
+               ORDER BY created_at DESC, id DESC LIMIT 1) b ON true
+       LEFT JOIN program_backup_requests r
+              ON r.machine_id = m.id AND r.closed_at IS NULL AND r.requested_at > NOW() - make_interval(mins => $3)
+      WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}
       ORDER BY m.machine_serial_no`,
-    [req.user.company_id, jobs.ONLINE_WINDOW_SEC]
+    [companyId, ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN]
   );
-  return rows.map(({ company_id, controller_ip, ...m }) => ({
-    ...m,
-    ip_address: storage.machineIp({ ...m, controller_ip }),
-    folder: storage.machineFolder({ ...m, controller_ip, company_id })
+  return rows.map(r => ({
+    id: r.id,
+    machine_serial_no: r.machine_serial_no,
+    gateway: r.token_prefix
+      ? { token_prefix: r.token_prefix, token_created_at: r.token_created_at, last_seen_at: r.last_seen_at, online: r.online }
+      : null,
+    program: r.program_id ? { id: r.program_id, program_name: r.program_name, size_bytes: r.program_size, created_at: r.program_at } : null,
+    last_backup: r.backup_id ? { id: r.backup_id, program_name: r.backup_name, created_at: r.backup_at } : null,
+    backup_request: r.request_id ? { id: r.request_id, requested_at: r.requested_at } : null
   }));
 };
 
-exports.controllerFiles = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
-  const { rows } = await pool.query(
-    `SELECT files, reported_at FROM program_controller_files WHERE machine_id = $1`, [machine.id]
-  );
-  return { files: rows[0]?.files || [], reported_at: rows[0]?.reported_at || null };
-};
-
-/* ─────────────── files in the ProgramTransfer folder ─────────────── */
-
+/** One machine's files, newest first. kind: uploads | backups (default: both). */
 exports.listFiles = async (req) => {
-  const { machine_id, kind, search } = req.query;
-  const { limit, page, offset } = pageOf(req.query, 50);
-  const values = [req.user.company_id];
-  let where = `f.company_id = $1 AND f.deleted_at IS NULL${plantSql('f.machine_id', effectivePlantId(req.user), req.user.company_id)}`;
-  if (machine_id) { values.push(Number(machine_id)); where += ` AND f.machine_id = $${values.length}`; }
-  if (kind) { values.push(String(kind).toUpperCase()); where += ` AND f.kind = $${values.length}`; }
-  if (search) {
-    values.push(`%${String(search).replace(/[%_\\]/g, '\\$&')}%`);
-    where += ` AND (f.program_name ILIKE $${values.length} OR f.stored_name ILIKE $${values.length})`;
-  }
-  const [data, count] = await Promise.all([
+  const machine = await getMachine(req, req.query.machine_id);
+  const { limit, page, offset } = pageOf(req.query, 20);
+  const kinds = { uploads: ['NEW'], backups: ['BACKUP', 'FETCHED'] }[String(req.query.kind || '')] || ['NEW', 'BACKUP', 'FETCHED'];
+  const where = `f.machine_id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL AND f.kind = ANY($3)`;
+  const values = [machine.id, machine.company_id, kinds];
+  const [data, count, current] = await Promise.all([
     pool.query(
-      `SELECT f.id, f.machine_id, m.machine_serial_no, f.folder, f.stored_name, f.program_name, f.kind,
-              f.size_bytes, f.sha256, f.note, f.job_id, f.created_at, u.username AS uploaded_by_name,
-              (c.file_id IS NOT NULL) AS is_current
-         FROM program_files f
-         LEFT JOIN machines m ON m.id = f.machine_id
-         LEFT JOIN users u    ON u.id = f.uploaded_by
-         LEFT JOIN program_current c ON c.file_id = f.id AND c.machine_id = f.machine_id AND c.company_id = f.company_id
+      `SELECT ${FILE_COLUMNS}, u.username AS uploaded_by_name
+         FROM program_files f LEFT JOIN users u ON u.id = f.uploaded_by
         WHERE ${where}
         ORDER BY f.created_at DESC, f.id DESC
-        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        LIMIT $4 OFFSET $5`,
       [...values, limit, offset]
     ),
-    pool.query(`SELECT COUNT(*)::int AS total FROM program_files f WHERE ${where}`, values)
+    pool.query(`SELECT COUNT(*)::int AS total FROM program_files f WHERE ${where}`, values),
+    currentProgram(machine.id)
   ]);
-  return { data: data.rows, total: count.rows[0].total, page, limit };
+  const total = count.rows[0].total;
+  return {
+    data: data.rows.map(f => ({ ...f, is_current: f.id === current?.id })),
+    pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) }
+  };
 };
 
-/** Publish one immutable file for repeated machine downloads. No job is created. */
-exports.publishCurrentProgram = async (req) => {
-  if (!allowed(req, 'page:programs:upload') || !allowed(req, 'page:programs:transfer')) {
-    throw fail('Uploading a program for the machine is not part of your role.', 'FORBIDDEN', 403);
-  }
-  if (!req.file) throw fail('Choose a program file.', 'NO_FILE');
-  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
-  requireConfig(machine);
-  const body = req.body || {};
-  const saved = await storage.save({
-    machine, kind: 'NEW', programName: body.program_name || req.file.originalname, buffer: req.file.buffer
-  });
-  let client;
-  let file;
-  let committing = false;
-  try {
-    client = await pool.connect();
-    await client.query('BEGIN');
-    file = await insertFile({ machine, saved, userId: req.user.id, note: body.note, db: client });
-    await client.query(
-      `INSERT INTO program_current (company_id, machine_id, file_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (machine_id) DO UPDATE
-         SET company_id = EXCLUDED.company_id, file_id = EXCLUDED.file_id, updated_at = NOW()`,
-      [machine.company_id, machine.id, file.id]
-    );
-    committing = true;
-    await client.query('COMMIT');
-  } catch (err) {
-    if (client) await client.query('ROLLBACK').catch(() => {});
-    // A lost COMMIT response is ambiguous: retain the bytes in case the
-    // publication committed. Earlier failures remove only this new upload.
-    if (!committing) await storage.remove(saved.folder, saved.storedName).catch(() => {});
-    throw err;
-  } finally {
-    if (client) client.release();
-  }
-  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'PROGRAM_PUBLISH', resource: 'program_file',
-    resource_id: file.id, new_value: { machine: machine.machine_serial_no, program_name: file.program_name },
-    ip_address: req.ip, user_agent: req.headers['user-agent'] });
-  return { file: { ...file, is_current: true } };
+/** Upload a program: it becomes the machine's program, for its gateway to download. */
+exports.upload = async (req) => {
+  const machine = await getMachine(req, req.body?.machine_id);
+  const file = await saveFile({ machine, kind: 'NEW', staged: req.file, programName: req.body?.program_name, userId: req.user.id });
+  auditOf(req, { action: 'PROGRAM_UPLOAD', resource: 'program_file', resource_id: file.id,
+                 new_value: { machine: machine.machine_serial_no, program: file.program_name, sha256: file.sha256 } });
+  return { ...file, is_current: true };
 };
 
-exports.getCurrentProgram = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
-  return { file: await currentProgram.get(machine.company_id, machine.id) };
+/** A file of the caller's company (and plant), for download. */
+exports.getFile = async (req) => {
+  const id = idOf(req.params.id, 'File not found.', 'FILE_NOT_FOUND');
+  const { companyId, plantId } = scope(req);
+  const { rows } = await pool.query(
+    `SELECT ${FILE_COLUMNS}, f.company_id, f.folder, f.stored_name
+       FROM program_files f
+      WHERE f.id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL${plantSql('f.machine_id', plantId, companyId)}`,
+    [id, companyId]
+  );
+  if (!rows.length) throw fail('File not found.', 'FILE_NOT_FOUND', 404);
+  return rows[0];
 };
 
 /**
- * A new program into the machine's folder — and, with send, straight into a
- * job for its device. The checks run before anything is written, so a
- * refused send ("already on the machine — overwrite?") leaves no file behind
- * to be saved a second time when the person confirms.
+ * Delete a file. Not the machine's program: deleting it would hand the
+ * gateway the upload before it, and the machine would quietly go back to an
+ * older program. Its row stays (deleted_at), so the audit still names it.
  */
-exports.uploadFile = async (req) => {
-  if (!req.file) throw fail('Choose a program file.', 'NO_FILE');
-  const body = req.body || {};
-  const send = String(body.send) === 'true';
-  const overwrite = String(body.overwrite) === 'true';
-  if (send) await requireAction(req, 'page:programs:transfer', 'Sending a program to a machine is not part of your role.');
-
-  const machine = await getMachine(body.machine_id, req.user.company_id, effectivePlantId(req.user));
-  requireConfig(machine);
-  const programName = storage.safeProgramName(body.program_name || req.file.originalname);
-  storage.checkContent(req.file.buffer);
-
-  if (send) {
-    requirePath(machine);
-    const check = await checkSend(machine, programName, overwrite);
-    if (check.duplicate) throw fail(`${programName} is already waiting to go to ${machine.machine_serial_no}.`, 'DUPLICATE_JOB', 409);
-    if (check.exists) {
-      throw fail(`${programName} is already on ${machine.machine_serial_no}.`, 'FILE_EXISTS', 409, { names: [programName] });
-    }
-  }
-
-  const saved = await storage.save({ machine, kind: 'NEW', programName, buffer: req.file.buffer });
-  const file = await insertFile({ machine, saved, userId: req.user.id, note: body.note });
-  const job = send
-    ? await insertJob({ companyId: machine.company_id, machine, action: 'SEND', programName: file.program_name,
-                        fileId: file.id, overwrite, userId: req.user.id })
-    : null;
-
-  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'PROGRAM_UPLOAD', resource: 'program_file',
-              resource_id: file.id, new_value: { machine: machine.machine_serial_no, file: `${file.folder}/${file.stored_name}`, send },
-              ip_address: req.ip, user_agent: req.headers['user-agent'] });
-  return { file, job };
-};
-
-exports.getFileForDownload = async (req) => getFile(req.params.id, req.user.company_id, effectivePlantId(req.user));
-
-/** Delete a file from the folder. Its row stays (deleted_at), so the history still names it. */
 exports.deleteFile = async (req) => {
-  const file = await getFile(req.params.id, req.user.company_id, effectivePlantId(req.user));
-  const current = await pool.query(
-    `SELECT file_id FROM program_current WHERE company_id = $1 AND machine_id = $2 AND file_id = $3`,
-    [req.user.company_id, file.machine_id, file.id]
-  );
-  if (current.rows.length) throw fail('Upload a new program before deleting the current machine program.', 'CURRENT_PROGRAM', 409);
-  const open = await pool.query(
-    `SELECT id FROM program_jobs WHERE (file_id = $1 OR backup_file_id = $1) AND status = ANY($2) LIMIT 1`, [file.id, jobs.OPEN]
-  );
-  if (open.rowCount) throw fail('This program is waiting to be sent. Cancel that first.', 'IN_USE', 409);
-
+  const file = await exports.getFile(req);
+  const current = file.kind === 'NEW' ? await currentProgram(file.machine_id) : null;
+  if (current?.id === file.id) {
+    throw fail("This is the machine's program. Upload the next program first; then this one can be deleted.", 'CURRENT_PROGRAM', 409);
+  }
   await storage.remove(file.folder, file.stored_name);
   await pool.query(`UPDATE program_files SET deleted_at = NOW(), deleted_by = $2 WHERE id = $1`, [file.id, req.user.id]);
-  audit.log({ user_id: req.user.id, company_id: file.company_id, action: 'PROGRAM_DELETE', resource: 'program_file',
-              resource_id: file.id, old_value: { file: `${file.folder}/${file.stored_name}` },
-              ip_address: req.ip, user_agent: req.headers['user-agent'] });
+  auditOf(req, { action: 'PROGRAM_DELETE', resource: 'program_file', resource_id: file.id,
+                 old_value: { program: file.program_name, kind: file.kind, machine_id: file.machine_id } });
 };
-
-/* ─────────────── jobs ─────────────── */
 
 /**
- * SEND: files × machines. A file sent to a machine other than its own is
- * copied into that machine's folder first, so each folder holds every
- * program that went to that machine.
- * FETCH: program names to read off one machine's controller.
- * Every pair is checked before any job is created: one refusal queues none.
+ * Ask the machine's gateway for a backup. One open request per machine: a
+ * second click while one waits returns that one. A request the gateway has
+ * not answered within BACKUP_WAIT_MIN is closed, and a new one is made.
  */
-exports.createJobs = async (req) => {
-  const body = req.body || {};
-  const action = String(body.action || '').toUpperCase();
-  const companyId = req.user.company_id;
-
-  if (action === 'FETCH') {
-    await requireAction(req, 'page:programs:fetch', 'Fetching from a machine is not part of your role.');
-    const machine = await getMachine(body.machine_id, companyId, effectivePlantId(req.user));
-    requirePath(machine);
-    const names = [...new Set((body.program_names || []).map(n => storage.safeProgramName(n)))];
-    if (!names.length) throw fail('Choose a program on the machine.', 'NO_PROGRAM');
-    if (names.length > MAX_JOBS_PER_REQUEST) throw fail(`At most ${MAX_JOBS_PER_REQUEST} programs at a time.`, 'TOO_MANY');
-    const open = await pool.query(
-      `SELECT program_name FROM program_jobs WHERE machine_id = $1 AND action = 'FETCH' AND status = ANY($2)`,
-      [machine.id, jobs.OPEN]
-    );
-    const waiting = names.filter(n => open.rows.some(r => sameProgram(r.program_name, n)));
-    if (waiting.length) throw fail(`Already asked for: ${waiting.join(', ')}.`, 'DUPLICATE_JOB', 409, { names: waiting });
-    const created = [];
-    for (const name of names) {
-      created.push(await insertJob({ companyId, machine, action: 'FETCH', programName: name, userId: req.user.id }));
-    }
-    return { jobs: created };
-  }
-
-  if (action !== 'SEND') throw fail('action must be SEND or FETCH.', 'BAD_ACTION');
-  await requireAction(req, 'page:programs:transfer', 'Sending a program to a machine is not part of your role.');
-
-  const fileIds = [...new Set((body.file_ids || []).map(Number))];
-  const machineIds = [...new Set((body.machine_ids || []).map(Number))];
-  if (!fileIds.length) throw fail('Choose a program to send.', 'NO_PROGRAM');
-  if (!machineIds.length) throw fail('Choose a machine.', 'NO_MACHINE');
-  if (fileIds.length * machineIds.length > MAX_JOBS_PER_REQUEST) {
-    throw fail(`At most ${MAX_JOBS_PER_REQUEST} transfers at a time.`, 'TOO_MANY');
-  }
-  const overwrite = body.overwrite === true || String(body.overwrite) === 'true';
-
-  const files = [];
-  for (const id of fileIds) files.push(await getFile(id, companyId, effectivePlantId(req.user)));
-  const machines = [];
-  for (const id of machineIds) machines.push(await getMachine(id, companyId, effectivePlantId(req.user)));
-  machines.forEach(requirePath);
-
-  const exists = [];
-  const duplicates = [];
-  for (const machine of machines) {
-    for (const file of files) {
-      const check = await checkSend(machine, file.program_name, overwrite);
-      if (check.duplicate) duplicates.push(`${file.program_name} → ${machine.machine_serial_no}`);
-      if (check.exists) exists.push(`${file.program_name} on ${machine.machine_serial_no}`);
-    }
-  }
-  if (duplicates.length) {
-    throw fail(`Already waiting to be sent: ${duplicates.join(', ')}.`, 'DUPLICATE_JOB', 409, { names: duplicates });
-  }
-  if (exists.length) throw fail(`Already on the machine: ${exists.join(', ')}.`, 'FILE_EXISTS', 409, { names: exists });
-
-  const created = [];
-  for (const machine of machines) {
-    for (const file of files) {
-      let fileId = file.id;
-      if (file.machine_id !== machine.id) {
-        const saved = await storage.save({
-          machine, kind: 'NEW', programName: file.program_name,
-          buffer: await storage.read(file.folder, file.stored_name)
-        });
-        fileId = (await insertFile({ machine, saved, userId: req.user.id,
-                                     note: `Copied from ${file.machine_serial_no || 'another machine'}` })).id;
-      }
-      created.push(await insertJob({ companyId, machine, action: 'SEND', programName: file.program_name,
-                                     fileId, overwrite, userId: req.user.id }));
-    }
-  }
-  audit.log({ user_id: req.user.id, company_id: companyId, action: 'PROGRAM_SEND', resource: 'program_job',
-              new_value: { jobs: created.map(j => j.id), overwrite }, ip_address: req.ip, user_agent: req.headers['user-agent'] });
-  return { jobs: created };
-};
-
-exports.listJobs = async (req) => {
-  const { machine_id, status, action } = req.query;
-  const { limit, page, offset } = pageOf(req.query, 20);
-  const values = [req.user.company_id];
-  let where = `j.company_id = $1${plantSql('j.machine_id', effectivePlantId(req.user), req.user.company_id)}`;
-  if (machine_id) { values.push(Number(machine_id)); where += ` AND j.machine_id = $${values.length}`; }
-  if (action) { values.push(String(action).toUpperCase()); where += ` AND j.action = $${values.length}`; }
-  if (status === 'open') { values.push(jobs.OPEN); where += ` AND j.status = ANY($${values.length})`; }
-  else if (status) { values.push(String(status).toUpperCase()); where += ` AND j.status = $${values.length}`; }
-
-  const [data, count] = await Promise.all([
-    pool.query(
-      `SELECT ${jobs.JOB_COLUMNS} FROM program_jobs j ${jobs.JOB_JOINS}
-        WHERE ${where}
-        ORDER BY j.requested_at DESC, j.id DESC
-        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-      [...values, limit, offset]
-    ),
-    pool.query(`SELECT COUNT(*)::int AS total FROM program_jobs j WHERE ${where}`, values)
-  ]);
-  return { data: data.rows.map(jobs.view), total: count.rows[0].total, page, limit };
-};
-
-/** Withdraw a job the device has not taken yet. */
-exports.cancelJob = async (req) => {
-  const { rows: [job] } = await pool.query(
-    `SELECT ${jobs.JOB_COLUMNS}, j.company_id FROM program_jobs j ${jobs.JOB_JOINS}
-      WHERE j.id = $1 AND j.company_id = $2${plantSql('j.machine_id', effectivePlantId(req.user), req.user.company_id)}`,
-    [Number(req.params.id) || 0, req.user.company_id]
+exports.requestBackup = async (req) => {
+  const machine = await getMachine(req, req.params.machineId);
+  await pool.query(
+    `UPDATE program_backup_requests SET closed_at = NOW()
+      WHERE machine_id = $1 AND closed_at IS NULL AND requested_at <= NOW() - make_interval(mins => $2)`,
+    [machine.id, BACKUP_WAIT_MIN]
   );
-  if (!job || job.company_id !== req.user.company_id) throw fail('Job not found.', 'JOB_NOT_FOUND', 404);
-  if (job.protocol_version === 3) return require('./gateway.service').cancel(req);
-  const need = job.action === 'SEND' ? 'page:programs:transfer' : 'page:programs:fetch';
-  await requireAction(req, need, 'Cancelling this job is not part of your role.');
-  if (job.status !== 'QUEUED') {
-    throw fail(job.status === 'DELIVERED'
-      ? 'The machine\'s device has already taken this job; it can no longer be cancelled.'
-      : `This job is already ${job.status.toLowerCase()}.`, 'JOB_NOT_OPEN', 409);
-  }
-  const { rowCount } = await pool.query(
-    `UPDATE program_jobs SET status = 'CANCELLED', finished_at = NOW(), message = $2
-      WHERE id = $1 AND company_id = $3 AND status = 'QUEUED'${plantSql('machine_id', effectivePlantId(req.user), req.user.company_id)}`,
-    [job.id, `Cancelled by ${req.user.username || 'a user'}.`, req.user.company_id]
+  const inserted = await pool.query(
+    `INSERT INTO program_backup_requests (company_id, machine_id, requested_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (machine_id) WHERE closed_at IS NULL DO NOTHING
+     RETURNING id, requested_at`,
+    [machine.company_id, machine.id, req.user.id]
   );
-  if (!rowCount) throw fail('The machine\'s device took this job a moment ago; it can no longer be cancelled.', 'JOB_NOT_OPEN', 409);
-  const done = await jobs.getJob(job.id);
-  await jobs.announce(done);
-  return jobs.view(done);
+  if (inserted.rows.length) {
+    auditOf(req, { action: 'PROGRAM_BACKUP_REQUEST', resource: 'program_backup_request', resource_id: inserted.rows[0].id,
+                   new_value: { machine: machine.machine_serial_no } });
+    return { ...inserted.rows[0], created: true };
+  }
+  const { rows } = await pool.query(
+    `SELECT id, requested_at FROM program_backup_requests WHERE machine_id = $1 AND closed_at IS NULL`, [machine.id]
+  );
+  return { ...rows[0], created: false };
 };
 
-/* ─────────────── device tokens ─────────────── */
-
-/**
- * A new token for the machine's device. Any token it had stops working now:
- * one machine, one live token. The token is in this answer only — it is not
- * stored, and cannot be shown again.
- */
+/** The machine's gateway token: one live token per machine. Shown in this answer only, never stored. */
 exports.createDeviceToken = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
-  const label = req.body?.label ? String(req.body.label).trim().slice(0, 100) : null;
+  const machine = await getMachine(req, req.params.machineId);
   const { token, hash, prefix } = deviceToken.generate();
-
   const client = await pool.connect();
   let device;
   try {
@@ -463,37 +251,94 @@ exports.createDeviceToken = async (req) => {
     );
     ({ rows: [device] } = await client.query(
       `INSERT INTO program_devices (company_id, machine_id, label, token_prefix, token_hash, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, machine_id, label, token_prefix, created_at`,
-      [machine.company_id, machine.id, label, prefix, hash, req.user.id]
+       VALUES ($1, $2, 'Gateway', $3, $4, $5)
+       RETURNING id, token_prefix, created_at`,
+      [machine.company_id, machine.id, prefix, hash, req.user.id]
     ));
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
   }
-
-  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'DEVICE_TOKEN_CREATE', resource: 'program_device',
-              resource_id: device.id, new_value: { machine: machine.machine_serial_no, token_prefix: prefix },
-              ip_address: req.ip, user_agent: req.headers['user-agent'] });
-  return { token, device: { ...device, machine_serial_no: machine.machine_serial_no, program_path: machine.program_path,
-                            folder: storage.machineFolder(machine) } };
+  auditOf(req, { action: 'DEVICE_TOKEN_CREATE', resource: 'program_device', resource_id: device.id,
+                 new_value: { machine: machine.machine_serial_no, token_prefix: prefix } });
+  return { token, token_prefix: device.token_prefix, created_at: device.created_at, machine_serial_no: machine.machine_serial_no };
 };
 
-/** Stop the machine's device at once (a lost or replaced device). */
+/** Stop the machine's gateway token at once (a lost laptop, a leaked token). */
 exports.revokeDeviceToken = async (req) => {
-  const machine = await getMachine(req.params.machineId, req.user.company_id, effectivePlantId(req.user));
+  const machine = await getMachine(req, req.params.machineId);
   const { rows } = await pool.query(
     `UPDATE program_devices SET revoked_at = NOW(), revoked_by = $2
       WHERE machine_id = $1 AND revoked_at IS NULL RETURNING id, token_prefix`,
     [machine.id, req.user.id]
   );
-  if (!rows.length) throw fail('This machine has no device token.', 'NO_DEVICE', 404);
-  audit.log({ user_id: req.user.id, company_id: machine.company_id, action: 'DEVICE_TOKEN_REVOKE', resource: 'program_device',
-              resource_id: rows[0].id, old_value: { machine: machine.machine_serial_no, token_prefix: rows[0].token_prefix },
-              ip_address: req.ip, user_agent: req.headers['user-agent'] });
+  if (!rows.length) throw fail('This machine has no gateway token.', 'NO_TOKEN', 404);
+  auditOf(req, { action: 'DEVICE_TOKEN_REVOKE', resource: 'program_device', resource_id: rows[0].id,
+                 old_value: { machine: machine.machine_serial_no, token_prefix: rows[0].token_prefix } });
 };
 
-exports._internal = { sameProgram, checkSend, requirePath };
+/* ───────────────────────── the machine's gateway ───────────────────────── */
+
+const fileView = f => f && ({ file_id: Number(f.id), program_name: f.program_name, size_bytes: f.size_bytes,
+                              sha256: f.sha256, uploaded_at: f.created_at });
+
+/** What the gateway polls: the machine's program (compare sha256 to know it changed) and an open backup request. */
+exports.deviceStatus = async (device) => {
+  const [program, request] = await Promise.all([
+    currentProgram(device.machine.id),
+    pool.query(
+      `SELECT id, requested_at FROM program_backup_requests
+        WHERE machine_id = $1 AND closed_at IS NULL AND requested_at > NOW() - make_interval(mins => $2)`,
+      [device.machine.id, BACKUP_WAIT_MIN]
+    )
+  ]);
+  const open = request.rows[0];
+  return {
+    machine: { id: Number(device.machine.id), serial: device.machine.machine_serial_no },
+    program: fileView(program),
+    backup_request: open ? { id: Number(open.id), requested_at: open.requested_at } : null,
+    poll_seconds: POLL_SECONDS
+  };
+};
+
+exports.deviceProgram = async (device) => {
+  const program = await currentProgram(device.machine.id);
+  if (!program) throw fail('No program has been uploaded for this machine yet.', 'NO_PROGRAM', 404);
+  return program;
+};
+
+/** A backup from the machine. It answers an open backup request, and the person who asked is told. */
+exports.deviceBackup = async (device, staged, body = {}) => {
+  const machine = { id: device.machine.id, company_id: device.company_id, machine_serial_no: device.machine.machine_serial_no };
+  const file = await saveFile({ machine, kind: 'BACKUP', staged, programName: body.program_name, deviceId: device.id });
+  const { rows: [request] } = await pool.query(
+    `UPDATE program_backup_requests SET closed_at = NOW(), file_id = $2
+      WHERE machine_id = $1 AND closed_at IS NULL
+      RETURNING id, requested_by`,
+    [machine.id, file.id]
+  );
+  if (request?.requested_by) await tellRequester(machine, request.requested_by, file);
+  return { file: fileView(file), answered_request: request ? Number(request.id) : null };
+};
+
+/** Respects Settings → Program transfer notifications, like transfers always did. */
+async function tellRequester(machine, userId, file) {
+  try {
+    await pool.query(
+      `INSERT INTO notifications (company_id, user_id, type, title, message, link)
+       SELECT $1, $2, 'INFO', $3, $4, '/programs'
+        WHERE NOT EXISTS (SELECT 1 FROM notification_preferences
+                           WHERE user_id = $2 AND notify_program_transfer = false)`,
+      [machine.company_id, userId, `Backup received — ${machine.machine_serial_no}`,
+       `"${file.program_name}" was saved from ${machine.machine_serial_no}.`]
+    );
+    await announceUnread([userId]);
+  } catch (err) {
+    console.error('Program backup notification failed:', err.message);
+  }
+}
+
+exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, POLL_SECONDS, currentProgram };

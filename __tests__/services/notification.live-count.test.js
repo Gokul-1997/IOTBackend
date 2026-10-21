@@ -11,7 +11,6 @@ const realtime = require('../../src/lib/realtime');
 const notes = require('../../src/notifications/notification.service');
 const ctrl = require('../../src/notifications/notification.controller');
 const alarms = require('../../src/alarms/alarm.service');
-const jobs = require('../../src/programs/jobs');
 
 let emitted;
 const io = { to: room => ({ emit: (event, payload) => emitted.push({ room, event, payload }) }) };
@@ -91,11 +90,16 @@ describe('when the count changes', () => {
     expect(counts()).toEqual([['user:11', 1], ['user:12', 4]]);
   });
 
-  test('a finished program transfer tells the person who asked', async () => {
-    const job = { id: '5', company_id: 3, requested_by: 7, action: 'SEND', status: 'DONE', program_name: 'O1234.nc',
-                  machine_serial: 'VMC-01', message: null, backup_stored_name: null };
-    mockDb.queueResponse({ rowCount: 1 }, { rows: [{ user_id: 7, count: 6 }] });
-    await jobs.announce(job);
-    expect(counts()).toEqual([['user:7', 6]]);
+  test('a requested backup arriving tells the person who asked', async () => {
+    const programs = require('../../src/programs/program.service');
+    const storage = require('../../src/programs/storage');
+    jest.spyOn(storage, 'saveStream').mockResolvedValue({ folder: 'company-3/programs/machine-7/backups', storedName: 'b.nc',
+                                                          programName: 'O1234.nc', size: 10, sha256: 'a'.repeat(64) });
+    mockDb.queueResponse({ rows: [{ id: '90', program_name: 'O1234.nc' }], rowCount: 1 },
+      { rows: [{ id: '9', requested_by: 7 }], rowCount: 1 }, { rowCount: 1 }, { rows: [{ user_id: 7, count: 2 }] });
+    await programs.deviceBackup({ id: 3, company_id: 3, machine: { id: 7, machine_serial_no: 'VMC-01' } },
+                                { path: '/tmp/staged', originalname: 'O1234.nc' });
+    expect(counts()).toEqual([['user:7', 2]]);
+    storage.saveStream.mockRestore();
   });
 });

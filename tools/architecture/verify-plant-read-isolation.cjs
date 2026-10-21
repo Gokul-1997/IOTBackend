@@ -85,6 +85,8 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
    CREATE TABLE program_files(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,folder TEXT,stored_name TEXT,program_name TEXT,kind TEXT,size_bytes INT,sha256 TEXT,uploaded_by INT,note TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),deleted_at TIMESTAMPTZ,deleted_by INT,device_id INT,job_id BIGINT);
    CREATE TABLE program_jobs(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,machine_serial TEXT,action VARCHAR(10) CHECK(action IN ('SEND','FETCH')),program_name TEXT NOT NULL,file_id BIGINT,backup_file_id BIGINT,overwrite BOOL DEFAULT FALSE,status TEXT DEFAULT 'QUEUED',message TEXT,requested_by INT,device_id INT,requested_at TIMESTAMPTZ DEFAULT NOW(),delivered_at TIMESTAMPTZ,finished_at TIMESTAMPTZ,program_path TEXT);
    CREATE TABLE program_controller_files(machine_id INT PRIMARY KEY,files JSONB,reported_at TIMESTAMPTZ DEFAULT NOW());
+   CREATE TABLE program_backup_requests(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,requested_by INT,requested_at TIMESTAMPTZ DEFAULT NOW(),file_id BIGINT,closed_at TIMESTAMPTZ);
+   CREATE UNIQUE INDEX ON program_backup_requests(machine_id) WHERE closed_at IS NULL;
    INSERT INTO program_files(id,company_id,machine_id,folder,stored_name,program_name,kind,size_bytes,sha256,uploaded_by)VALUES(1,4,7,'own','own.nc','O7.nc','NEW',3,repeat('a',64),1),(2,4,10,'other','other.nc','O10.nc','NEW',3,repeat('b',64),2),(3,5,9,'foreign','foreign.nc','O9.nc','NEW',3,repeat('c',64),1);
    INSERT INTO program_jobs(company_id,machine_id,machine_serial,action,program_name,file_id,requested_by,program_path)VALUES(4,7,'VMC-7','SEND','O7.nc',1,1,'/programs'),(4,10,'Other plant','SEND','O10.nc',2,2,'/programs'),(5,9,'VMC-9','SEND','O9.nc',3,1,'/programs');
    INSERT INTO users(id,company_id,plant_id,username,is_active)VALUES(4,5,9,'Foreign technician',TRUE),(5,4,8,'Inactive technician',FALSE);
@@ -181,17 +183,14 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   assert.deepEqual((await get('/api/programs/machines')).data.map(m=>m.id),[7]);
   assert.deepEqual((await get('/api/programs/machines',2)).data.map(m=>m.id),[10]);
   assert.equal((await get('/api/programs/machines',1,['COMPANY_ADMIN'])).data.length,4);
-  for(const kind of ['files','jobs']) {
-   assert.deepEqual((await get(`/api/programs/${kind}`)).data.map(row=>row.machine_id),[7]);
-   assert.deepEqual((await get(`/api/programs/${kind}`,2)).data.map(row=>row.machine_id),[10]);
-   assert.equal((await get(`/api/programs/${kind}?machine_id=10`)).data.length,0);
-   assert.equal((await get(`/api/programs/${kind}`,1,['COMPANY_ADMIN'])).data.length,2);
-  }
+  // Program Transfer files are listed one machine at a time (21 Oct 2026)
+  assert.deepEqual((await get('/api/programs/files?machine_id=7')).data.map(row=>row.machine_id),[7]);
+  assert.deepEqual((await get('/api/programs/files?machine_id=10',2)).data.map(row=>row.machine_id),[10]);
+  assert.equal((await get('/api/programs/files?machine_id=10',1,['COMPANY_ADMIN'])).data.length,1);
   assert.equal(await get('/api/programs/files/1/download'),'M30');
-  for(const [method,route] of [['GET','/api/programs/files/2/download'],['GET','/api/programs/machines/10/current-program'],['GET','/api/programs/machines/10/controller-files'],['DELETE','/api/programs/files/2'],['POST','/api/programs/jobs/2/cancel'],['POST','/api/programs/machines/10/device-token'],['DELETE','/api/programs/machines/10/device-token']]) {
+  for(const [method,route] of [['GET','/api/programs/files?machine_id=10'],['GET','/api/programs/files/2/download'],['DELETE','/api/programs/files/2'],['POST','/api/programs/machines/10/backup'],['POST','/api/programs/machines/10/device-token'],['DELETE','/api/programs/machines/10/device-token']]) {
    const result=await fetch(url+route,{method,headers:{authorization:`Bearer ${token(1)}`}});assert.equal(result.status,404,`${method} ${route}`);
   }
-  assert.equal((await pool.query('SELECT status FROM program_jobs WHERE id=2')).rows[0].status,'QUEUED');
   assert.equal((await pool.query('SELECT deleted_at FROM program_files WHERE id=2')).rows[0].deleted_at,null);
   const quality=require(path.join(repo,'src/quality/quality.service'));
   await pool.query("UPDATE shifts SET start_time='08:15',end_time='16:00' WHERE id=3; INSERT INTO production_hourly(company_id,machine_id,shift_id,hour_start,run_seconds,idle_seconds,produced_qty)VALUES(4,7,3,'2026-05-06T02:30:00Z',900,1800,10),(5,7,3,'2026-05-06T02:30:00Z',900,1800,999)");

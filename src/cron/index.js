@@ -2,7 +2,6 @@ const cron = require('node-cron');
 const db = require('../db');
 const hourlyJob = require('./hourlyOee.job');
 const shiftJob = require('./shiftOee.job');
-const programJobsTimeout = require('./programJobsTimeout.job');
 const preventiveJob = require('./preventiveMaintenance.job');
 const periodicJob = require('./periodicMaintenance.job');
 const alarmNotifications = require('./alarmNotifications.job');
@@ -48,7 +47,6 @@ if (process.env.CRON_ENABLED !== 'false' && process.env.NODE_ENV !== 'test') {
   schedule('*/15 * * * * *', 'alarm-notifications', alarmNotifications);
   schedule('*/10 * * * *', 'shift-oee',        shiftJob);            // every 10 min (IST)
   schedule('0 * * * *',    'hourly-oee',       hourlyJob);           // on the hour (IST)
-  schedule('*/5 * * * *',  'program-timeouts', programJobsTimeout);  // fail Program Transfer jobs no device finished
   schedule('*/15 * * * *', 'preventive',       preventiveJob);       // raise PM tickets from breached alarm thresholds
   schedule('*/15 * * * *', 'periodic',         periodicJob);         // raise periodic tickets whose due date has arrived
 } else {

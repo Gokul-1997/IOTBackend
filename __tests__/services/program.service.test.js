@@ -1,307 +1,210 @@
 /*
- * Program Transfer, the people's side: uploads into a machine's folder,
- * jobs for its device, and device tokens.
+ * Program Transfer, kept simple (21 Oct 2026): people upload a machine's
+ * program, download files, ask for a backup; the machine's gateway reads
+ * its status, downloads the program and posts backups. The database is the
+ * mock; files go to a temporary storage folder.
  */
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-svc-'));
-process.env.STORAGE_ROOT = path.join(TMP, 'unified');
-process.env.PROGRAM_TRANSFER_DIR = path.join(TMP, 'ProgramTransfer');
+process.env.STORAGE_ROOT = path.join(TMP, 'storage');
+process.env.PROGRAM_MAX_MB = '1';
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
+jest.mock('../../src/audit/audit.service', () => ({ log: jest.fn(async () => {}) }));
 
 const { mockDb, resetDb } = require('../helpers/mockDb');
+const audit = require('../../src/audit/audit.service');
 const svc = require('../../src/programs/program.service');
 const storage = require('../../src/programs/storage');
 const deviceToken = require('../../src/programs/device-token');
 
 afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
-beforeEach(async () => {
-  resetDb();
-  await require('../../src/redis').set('company_grants:5', '[]', 'EX', 60);
-});
+beforeEach(() => { resetDb(); audit.log.mockClear(); });
 
 const one = row => ({ rows: [row], rowCount: 1 });
 const none = { rows: [], rowCount: 0 };
-const machine7 = { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', program_path: '//CNC_MEM/USER/PATH1/' };
-const machine8 = { id: 8, company_id: 5, machine_serial_no: 'VMC-2', ip_address: '192.168.200.4', program_path: 'M01:\\PRG\\USER\\' };
-const program = Buffer.from('%\nO1234\nG0 X0\nM30\n%\n');
+const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1' };
+const user = { id: 2, company_id: 5, permissions: [] };
+const req = (o = {}) => ({ user, params: {}, query: {}, body: {}, headers: {}, ip: '10.0.0.1', ...o });
+let staged = 0;
+function stage(text, name = 'O1001.nc') {
+  const file = path.join(TMP, `staged-${++staged}`);
+  fs.writeFileSync(file, text);
+  return { path: file, originalname: name };
+}
+const sql = pattern => mockDb.calls().find(c => pattern.test(c.text));
 
-const user = (perms = ['page:programs:view', 'page:programs:upload', 'page:programs:transfer', 'page:programs:fetch', 'page:programs:delete']) =>
-  ({ id: 2, username: 'Priya', company_id: 5, permissions: perms });
-const req = (o = {}) => ({ user: user(), params: {}, query: {}, body: {}, headers: {}, ip: '10.0.0.5', ...o });
-const jobRow = (o = {}) => ({ id: '11', company_id: 5, machine_id: 7, machine_serial: 'VMC-1', action: 'SEND', program_name: 'O1234.nc',
-  status: 'QUEUED', requested_by: 2, file_stored_name: null, backup_stored_name: null, ...o });
-
-const folderFiles = m => {
-  const dir = path.join(storage.ROOT, storage.machineFolder(m));
-  return ['uploads', 'backups', 'fetched'].flatMap(purpose => {
-    const folder = path.join(dir, purpose);
-    return fs.existsSync(folder) ? fs.readdirSync(folder) : [];
-  });
-};
-
-describe('uploading a program', () => {
-  const upload = (body, perms) => req({
-    user: user(perms), body: { machine_id: '7', ...body },
-    file: { originalname: 'O1234.nc', buffer: program }
-  });
-
-  test('send without the transfer permission is refused before anything is written', async () => {
-    await expect(svc.uploadFile(upload({ send: 'true' }, ['page:programs:upload'])))
-      .rejects.toMatchObject({ status: 403 });
-    expect(mockDb.calls()).toHaveLength(0);
-  });
-
-  test('already on the controller: 409 FILE_EXISTS, and no file is left behind', async () => {
-    mockDb.queueResponse(one(machine7), none, one({ files: [{ name: 'O1234' }] }));
-    await expect(svc.uploadFile(upload({ send: 'true' })))
-      .rejects.toMatchObject({ status: 409, code: 'FILE_EXISTS', names: ['O1234.nc'] });
-    expect(folderFiles(machine7)).toEqual([]);
+describe('machines and files', () => {
+  test('machines: the company only, each with its gateway, program, last backup and open request', async () => {
+    mockDb.queueResponse({ rows: [
+      { id: 7, machine_serial_no: 'VMC-1', token_prefix: 'mxd_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true,
+        program_id: '40', program_name: 'O1001.nc', program_size: 24, program_at: 'T2',
+        backup_id: '41', backup_name: 'O1001.nc', backup_at: 'T3', request_id: '9', requested_at: 'T4' },
+      { id: 8, machine_serial_no: 'VMC-2', token_prefix: null, program_id: null, backup_id: null, request_id: null }
+    ], rowCount: 2 });
+    const list = await svc.listMachines(req());
+    const q = mockDb.calls()[0];
+    expect(q.text).toMatch(/WHERE m\.company_id = \$1 AND m\.is_active = true/);
+    expect(q.params).toEqual([5, 60, 30]);
+    expect(list).toEqual([
+      { id: 7, machine_serial_no: 'VMC-1',
+        gateway: { token_prefix: 'mxd_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true },
+        program: { id: '40', program_name: 'O1001.nc', size_bytes: 24, created_at: 'T2' },
+        last_backup: { id: '41', program_name: 'O1001.nc', created_at: 'T3' },
+        backup_request: { id: '9', requested_at: 'T4' } },
+      { id: 8, machine_serial_no: 'VMC-2', gateway: null, program: null, last_backup: null, backup_request: null }
+    ]);
   });
 
-  test('already waiting to be sent: 409 DUPLICATE_JOB', async () => {
-    mockDb.queueResponse(one(machine7), one({ program_name: 'o1234' }));
-    await expect(svc.uploadFile(upload({ send: 'true', overwrite: 'true' })))
-      .rejects.toMatchObject({ status: 409, code: 'DUPLICATE_JOB' });
+  test("a plant user sees only their plant's machines", async () => {
+    await svc.listMachines(req({ user: { ...user, plant_id: 3, authorization_plant_id: 3 } }));
+    expect(mockDb.calls()[0].text).toMatch(/plant_id = 3/);
   });
 
-  test('upload and send: the file is kept as NEW and a SEND job is queued for the device', async () => {
-    mockDb.queueResponse(
-      one(machine7), none, none,
-      one({ id: '40', machine_id: 7, folder: 'company-5/192.168.200.3', stored_name: 'x', program_name: 'O1234.nc', kind: 'NEW' }),
-      one({ id: '11' }), one(jobRow())
-    );
-    const r = await svc.uploadFile(upload({ send: 'true', overwrite: 'false', note: 'rev C' }));
-    expect(r.job).toMatchObject({ id: '11', action: 'SEND', status: 'QUEUED' });
-    expect(folderFiles(machine7)).toEqual([expect.stringMatching(/^\d{8}-\d{6}_NEW_O1234\.nc$/)]);
-    const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
-    expect(job.params).toEqual([5, 7, 'VMC-1', 'SEND', 'O1234.nc', '40', false, 2, '//CNC_MEM/USER/PATH1/']);
+  test("another company's machine is not found, and nothing is listed", async () => {
+    mockDb.queueResponse(none);
+    await expect(svc.listFiles(req({ query: { machine_id: '99' } }))).rejects.toMatchObject({ status: 404, code: 'MACHINE_NOT_FOUND' });
+    expect(mockDb.calls()).toHaveLength(1);
+    expect(mockDb.calls()[0].params).toEqual([99, 5]);
   });
 
-  test.each([undefined, 'false'])('send=%s only saves the file; it creates no device work', async (send) => {
-    mockDb.queueResponse(
-      one(machine7),
-      one({ id: '42', machine_id: 7, program_name: 'O1234.nc', kind: 'NEW' })
-    );
-    const result = await svc.uploadFile(upload(send === undefined ? {} : { send }));
-    expect(result.file).toMatchObject({ id: '42', kind: 'NEW' });
-    expect(result.job).toBeNull();
-    expect(mockDb.calls().some(call => /INSERT INTO program_jobs/.test(call.text))).toBe(false);
+  test('files: newest first, backups filter, the current program marked', async () => {
+    mockDb.queueResponse(one(machine),
+      { rows: [{ id: '41', kind: 'BACKUP' }, { id: '40', kind: 'BACKUP' }], rowCount: 2 },
+      one({ total: 2 }),
+      one({ id: '50', kind: 'NEW' }));
+    const r = await svc.listFiles(req({ query: { machine_id: '7', kind: 'backups', page: '1', limit: '20' } }));
+    expect(mockDb.calls()[1].params).toEqual([7, 5, ['BACKUP', 'FETCHED'], 20, 0]);
+    expect(r.data.map(f => f.is_current)).toEqual([false, false]);
+    expect(r.pagination).toEqual({ page: 1, limit: 20, total: 2, totalPages: 1 });
   });
 });
 
-describe('legacy queued jobs must have their program path', () => {
-  const noPath = { ...machine7, program_path: null };
-
-  test('nothing is sent to a machine without one, and nothing is written', async () => {
-    mockDb.queueResponse(one(noPath));
-    await expect(svc.uploadFile(req({ body: { machine_id: '7', send: 'true' }, file: { originalname: 'O1.nc', buffer: program } })))
-      .rejects.toMatchObject({ status: 409, code: 'NO_PROGRAM_PATH', message: /Set the program path for VMC-1/ });
-    expect(folderFiles(noPath).filter(f => /_O1\.nc$/.test(f))).toEqual([]);
-  });
-
-  test('nothing is fetched from it', async () => {
-    mockDb.queueResponse(one(noPath));
-    await expect(svc.createJobs(req({ body: { action: 'FETCH', machine_id: 7, program_names: ['O1'] } })))
-      .rejects.toMatchObject({ code: 'NO_PROGRAM_PATH' });
-  });
-
-  test('a plain upload also requires the saved machine program path', async () => {
-    mockDb.queueResponse(one(noPath), one({ id: '60', machine_id: 7, folder: 'f', stored_name: 's', program_name: 'O5.nc', kind: 'NEW' }));
-    await expect(svc.uploadFile(req({ body: { machine_id: '7' }, file: { originalname: 'O5.nc', buffer: program } })))
-      .rejects.toMatchObject({ status: 409, code: 'NO_PROGRAM_PATH' });
-  });
-});
-
-describe('jobs', () => {
-  test('FETCH needs the fetch permission', async () => {
-    await expect(svc.createJobs(req({ user: user(['page:programs:view']), body: { action: 'FETCH', machine_id: 7, program_names: ['O1'] } })))
-      .rejects.toMatchObject({ status: 403 });
-  });
-
-  test('a program sent to another machine is copied into that machine\'s folder first', async () => {
-    const saved = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O2001.nc', buffer: program });
-    mockDb.queueResponse(
-      one({ id: '50', company_id: 5, machine_id: 7, folder: saved.folder, stored_name: saved.storedName, program_name: 'O2001.nc', kind: 'NEW', machine_serial_no: 'VMC-1' }),
-      one(machine8), none, none,
-      one({ id: '51', machine_id: 8, folder: 'company-5/192.168.200.4', stored_name: 'y', program_name: 'O2001.nc', kind: 'NEW' }),
-      one({ id: '12' }), one(jobRow({ id: '12', machine_id: 8, program_name: 'O2001.nc' }))
-    );
-    const r = await svc.createJobs(req({ body: { action: 'SEND', file_ids: [50], machine_ids: [8] } }));
-    expect(r.jobs).toHaveLength(1);
-    expect(folderFiles(machine8)).toEqual([expect.stringMatching(/_NEW_O2001\.nc$/)]);
-    const job = mockDb.calls().find(c => /INSERT INTO program_jobs/.test(c.text));
-    expect(job.params.slice(1, 6)).toEqual([8, 'VMC-2', 'SEND', 'O2001.nc', '51']);
-    expect(job.params[8]).toBe('M01:\\PRG\\USER\\');                  // the path the job was made with
-    const copy = mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text));
-    expect(copy.params[8]).toBe('Copied from VMC-1');                    // the machine, not a server folder
-  });
-
-  test('one refusal queues nothing', async () => {
-    mockDb.queueResponse(
-      one({ id: '50', company_id: 5, machine_id: 7, folder: 'f', stored_name: 's', program_name: 'O2001.nc' }),
-      one(machine7), one(machine8),
-      none, none,                                  // VMC-1: free
-      none, one({ files: [{ name: 'O2001.nc' }] }) // VMC-2: already there
-    );
-    await expect(svc.createJobs(req({ body: { action: 'SEND', file_ids: [50], machine_ids: [7, 8] } })))
-      .rejects.toMatchObject({ code: 'FILE_EXISTS', names: ['O2001.nc on VMC-2'] });
-    expect(mockDb.calls().some(c => /INSERT INTO program_jobs/.test(c.text))).toBe(false);
-  });
-
-  test('a job the device already took cannot be cancelled', async () => {
-    mockDb.queueResponse(one(jobRow({ status: 'DELIVERED' })));
-    await expect(svc.cancelJob(req({ params: { id: '11' } })))
-      .rejects.toMatchObject({ status: 409, message: /already taken/ });
-  });
-
-  test("another company's job is not found", async () => {
-    mockDb.queueResponse(one(jobRow({ company_id: 6 })));
-    await expect(svc.cancelJob(req({ params: { id: '11' } }))).rejects.toMatchObject({ status: 404 });
-  });
-});
-
-test('a file waiting to be sent cannot be deleted', async () => {
-  mockDb.queueResponse(one({ id: '40', company_id: 5, folder: 'f', stored_name: 's' }), none, one({ id: '11' }));
-  await expect(svc.deleteFile(req({ params: { id: '40' } }))).rejects.toMatchObject({ status: 409, code: 'IN_USE' });
-});
-
-describe('device tokens', () => {
-  test('the direct download token can be created without a controller program path', async () => {
-    mockDb.queueResponse(one({ ...machine7, program_path: null }), none, none,
-      one({ id: 9, machine_id: 7, label: null, token_prefix: 'mxd_abcdefgh', created_at: 'now' }), none);
-    const result = await svc.createDeviceToken(req({ params: { machineId: '7' } }));
-    expect(result.token).toMatch(deviceToken.SHAPE);
-    expect(result.device.program_path).toBeNull();
-  });
-  test('a new token replaces the old one; only its hash and prefix are stored or logged', async () => {
-    mockDb.queueResponse(
-      one(machine7),
-      {},                                                       // BEGIN
-      { rows: [], rowCount: 1 },                                // revoke the old token
-      one({ id: 9, machine_id: 7, label: null, token_prefix: 'mxd_abcdefgh', created_at: 'now' }),
-      {}                                                        // COMMIT
-    );
-    const r = await svc.createDeviceToken(req({ params: { machineId: '7' } }));
-    expect(r.token).toMatch(deviceToken.SHAPE);
-    expect(r.device.folder).toBe('company-5/programs/machine-7');
-
-    const calls = mockDb.calls();
-    expect(calls.find(c => /UPDATE program_devices SET revoked_at/.test(c.text)).params).toEqual([7, 2]);
-    const ins = calls.find(c => /INSERT INTO program_devices/.test(c.text));
-    expect(ins.params).toContain(deviceToken.hash(r.token));
-    expect(ins.params).not.toContain(r.token);
-    const auditCall = calls.find(c => /INSERT INTO audit_logs/.test(c.text));
-    expect(JSON.stringify(auditCall.params)).not.toContain(r.token);
-  });
-
-  test('revoking a machine without a token: 404', async () => {
-    mockDb.queueResponse(one(machine7), none);
-    await expect(svc.revokeDeviceToken(req({ params: { machineId: '7' } }))).rejects.toMatchObject({ status: 404 });
-  });
-});
-
-test('the machine list shows the IP the controller reports when none is set, and files go under it', async () => {
-  // production today: ip_address empty, controller_ip written by the collector
-  mockDb.queueResponse({ rows: [
-    { id: 19, company_id: 4, machine_serial_no: 'VMC - 2 - F', ip_address: null, controller_ip: '192.168.200.1', program_path: null, online: false },
-    { id: 20, company_id: 4, machine_serial_no: 'VMC - 3', ip_address: null, controller_ip: null, program_path: null, online: false }
-  ], rowCount: 2 });
-  const [m19, m20] = await svc.listMachines(req());
-  expect(m19).toMatchObject({ ip_address: '192.168.200.1', folder: 'company-4/programs/machine-19' });
-  expect(m20).toMatchObject({ ip_address: null, folder: 'company-4/programs/machine-20' });
-  expect(m19).not.toHaveProperty('controller_ip');
-  expect(m19).not.toHaveProperty('company_id');
-  expect(mockDb.calls()[0].text).toMatch(/m\.controller_ip/);
-});
-
-test('"O1234.nc" and "o1234" are the same program to a controller', () => {
-  expect(svc._internal.sameProgram('O1234.nc', 'o1234')).toBe(true);
-  expect(svc._internal.sameProgram('O1234.nc', 'O12345')).toBe(false);
-});
-
-describe('direct current program publication', () => {
-  const publishRequest = (overrides = {}) => req({
-    params: { machineId: '7' }, body: {}, file: { originalname: 'O7001.nc', buffer: program }, ...overrides
+describe('upload', () => {
+  test("is saved under the machine's folder and becomes the machine's program", async () => {
+    mockDb.queueResponse(one(machine), one({ id: '42', machine_id: 7, program_name: 'O1001.nc', kind: 'NEW' }));
+    const file = await svc.upload(req({ body: { machine_id: '7' }, file: stage('%\nO1001\nM30\n%\n') }));
+    expect(file).toMatchObject({ id: '42', is_current: true });
+    const insert = sql(/INSERT INTO program_files/);
+    expect(insert.params.slice(0, 2)).toEqual([5, 7]);
+    expect(insert.params[2]).toBe('company-5/programs/machine-7/uploads');
+    expect(insert.params.slice(4, 6)).toEqual(['O1001.nc', 'NEW']);
+    expect(insert.params[8]).toBe(2);           // uploaded_by
+    expect(fs.existsSync(storage.resolveInside(insert.params[2], insert.params[3]))).toBe(true);
+    expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'PROGRAM_UPLOAD', company_id: 5 }));
   });
 
   test.each([
-    ['page:programs:upload'], ['page:programs:transfer'], ['page:programs:view']
-  ])('both upload and transfer permissions are required (%s alone is denied)', async permission => {
-    await expect(svc.publishCurrentProgram(publishRequest({ user: user([permission]) })))
-      .rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' });
-    expect(mockDb.calls()).toHaveLength(0);
+    ['a binary file', '\u0000\u0001ELF', 'O1.nc', 'NOT_TEXT'],
+    ['an empty file', '', 'O1.nc', 'EMPTY'],
+    ['a file that is not a program', 'hello', 'virus.exe', 'BAD_TYPE']
+  ])('%s is refused, and nothing is saved', async (_, text, name, code) => {
+    mockDb.queueResponse(one(machine));
+    await expect(svc.upload(req({ body: { machine_id: '7' }, file: stage(text, name) }))).rejects.toMatchObject({ code });
+    expect(sql(/INSERT INTO program_files/)).toBeUndefined();
   });
 
-  test('a machine outside the caller company is refused before a file is saved', async () => {
-    const before = folderFiles(machine7);
+  test('no file attached says so', async () => {
+    mockDb.queueResponse(one(machine));
+    await expect(svc.upload(req({ body: { machine_id: '7' } }))).rejects.toMatchObject({ code: 'NO_FILE', status: 400 });
+  });
+});
+
+describe('delete', () => {
+  test("the machine's program cannot be deleted (the gateway would go back to an older one)", async () => {
+    mockDb.queueResponse(one({ id: '42', machine_id: 7, kind: 'NEW', company_id: 5, folder: 'company-5/programs/machine-7/uploads', stored_name: 'x' }),
+      one({ id: '42' }));
+    await expect(svc.deleteFile(req({ params: { id: '42' } }))).rejects.toMatchObject({ status: 409, code: 'CURRENT_PROGRAM' });
+    expect(sql(/UPDATE program_files SET deleted_at/)).toBeUndefined();
+  });
+
+  test('an older upload is deleted from disk and marked deleted', async () => {
+    const saved = await storage.saveStream({ machine, kind: 'NEW', programName: 'O0999.nc', filename: stage('%\nO0999\nM30\n%\n').path });
+    mockDb.queueResponse(one({ id: '30', machine_id: 7, kind: 'NEW', company_id: 5, program_name: 'O0999.nc',
+                               folder: saved.folder, stored_name: saved.storedName }), one({ id: '42' }));
+    await svc.deleteFile(req({ params: { id: '30' } }));
+    expect(fs.existsSync(storage.resolveInside(saved.folder, saved.storedName))).toBe(false);
+    expect(sql(/UPDATE program_files SET deleted_at/).params).toEqual(['30', 2]);
+  });
+
+  test("a file of another company is not found", async () => {
     mockDb.queueResponse(none);
-    await expect(svc.publishCurrentProgram(publishRequest({ user: { ...user(), company_id: 9 } })))
-      .rejects.toMatchObject({ status: 404, code: 'MACHINE_NOT_FOUND' });
-    expect(mockDb.calls()[0].params).toEqual([7, 9]);
-    expect(folderFiles(machine7)).toEqual(before);
+    await expect(svc.deleteFile(req({ params: { id: '30' } }))).rejects.toMatchObject({ status: 404, code: 'FILE_NOT_FOUND' });
+    expect(mockDb.calls()[0].params).toEqual([30, 5]);
+  });
+});
+
+describe('backup requests', () => {
+  test('a request is made once; a second click returns the open one', async () => {
+    mockDb.queueResponse(one(machine), none, one({ id: '9', requested_at: 'T0' }));
+    await expect(svc.requestBackup(req({ params: { machineId: '7' } }))).resolves.toEqual({ id: '9', requested_at: 'T0', created: true });
+    expect(mockDb.calls()[1].text).toMatch(/requested_at <= NOW\(\) - make_interval\(mins => \$2\)/);   // a stale one is closed first
+    expect(mockDb.calls()[2].text).toMatch(/ON CONFLICT \(machine_id\) WHERE closed_at IS NULL DO NOTHING/);
+
+    resetDb();
+    mockDb.queueResponse(one(machine), none, none, one({ id: '9', requested_at: 'T0' }));
+    await expect(svc.requestBackup(req({ params: { machineId: '7' } }))).resolves.toEqual({ id: '9', requested_at: 'T0', created: false });
+  });
+});
+
+describe('gateway token', () => {
+  test('replaces the live token; only its hash is stored and the token is returned once', async () => {
+    mockDb.queueResponse(one(machine), none, none, one({ id: 3, token_prefix: 'mxd_x', created_at: 'T0' }), none);
+    const r = await svc.createDeviceToken(req({ params: { machineId: '7' } }));
+    expect(r.token).toMatch(deviceToken.SHAPE);
+    const insert = sql(/INSERT INTO program_devices/);
+    expect(insert.params[3]).toBe(deviceToken.hash(r.token));
+    expect(JSON.stringify(insert.params)).not.toContain(r.token);
+    expect(sql(/UPDATE program_devices SET revoked_at/).params).toEqual([7, 2]);
   });
 
-  test('compatibility publication uses configured path and does not claim machine delivery', async () => {
-    mockDb.queueResponse(
-      one(machine7), none,
-      one({ id: '70', machine_id: 7, program_name: 'O7001.nc', kind: 'NEW' }), none, none
-    );
-    const result = await svc.publishCurrentProgram(publishRequest());
-    expect(result).toEqual({ file: { id: '70', machine_id: 7, program_name: 'O7001.nc', kind: 'NEW', is_current: true } });
-    const calls = mockDb.calls();
-    expect(calls[1].text).toBe('BEGIN');
-    expect(calls[2].text).toMatch(/INSERT INTO program_files/);
-    expect(calls[3].text).toMatch(/INSERT INTO program_current/);
-    expect(calls[3].params).toEqual([5, 7, '70']);
-    expect(calls[4].text).toBe('COMMIT');
-    expect(calls.some(call => /program_jobs/.test(call.text))).toBe(false);
-    const insert = calls[2];
-    expect(fs.readFileSync(path.join(storage.ROOT, insert.params[2], insert.params[3]))).toEqual(program);
+  test('revoking a machine with no token says so', async () => {
+    mockDb.queueResponse(one(machine), none);
+    await expect(svc.revokeDeviceToken(req({ params: { machineId: '7' } }))).rejects.toMatchObject({ status: 404, code: 'NO_TOKEN' });
+  });
+});
+
+describe('the gateway side', () => {
+  const device = { id: 3, company_id: 5, machine: { id: 7, machine_serial_no: 'VMC-1' } };
+
+  test('status: the program to compare by sha256, an open backup request, how often to ask', async () => {
+    mockDb.queueResponse(one({ id: '42', program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), created_at: 'T0' }),
+      one({ id: '9', requested_at: 'T1' }));
+    await expect(svc.deviceStatus(device)).resolves.toEqual({
+      machine: { id: 7, serial: 'VMC-1' },
+      program: { file_id: 42, program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), uploaded_at: 'T0' },
+      backup_request: { id: 9, requested_at: 'T1' },
+      poll_seconds: 15
+    });
+    expect(mockDb.calls()[0].params).toEqual([7]);
   });
 
-  test('a publication failure rolls back its row and removes only the new file', async () => {
-    const old = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O_OLD.nc', buffer: program });
-    const before = folderFiles(machine7);
-    mockDb.queueResponse(one(machine7), none,
-      one({ id: '71', machine_id: 7, program_name: 'O7002.nc', kind: 'NEW' }), new Error('pointer write failed'), none);
-    await expect(svc.publishCurrentProgram(publishRequest({ file: { originalname: 'O7002.nc', buffer: program } })))
-      .rejects.toThrow('pointer write failed');
-    expect(mockDb.calls().some(call => call.text === 'ROLLBACK')).toBe(true);
-    expect(mockDb.calls().some(call => call.text === 'COMMIT')).toBe(false);
-    expect(folderFiles(machine7)).toEqual(before);
-    expect(fs.readFileSync(path.join(storage.ROOT, old.folder, old.storedName))).toEqual(program);
+  test('program: none uploaded yet is a 404 the gateway can read', async () => {
+    await expect(svc.deviceProgram(device)).rejects.toMatchObject({ status: 404, code: 'NO_PROGRAM' });
   });
 
-  test('current metadata is null until an explicit publication and always company and machine scoped', async () => {
-    mockDb.queueResponse(one(machine7), none);
-    await expect(svc.getCurrentProgram(req({ params: { machineId: '7' } }))).resolves.toEqual({ file: null });
-    const lookup = mockDb.calls()[1];
-    expect(lookup.params).toEqual([5, 7]);
-    expect(lookup.text).toMatch(/c\.company_id = \$1 AND c\.machine_id = \$2/);
-    expect(lookup.text).toMatch(/f\.company_id = c\.company_id AND f\.machine_id = c\.machine_id/);
-    expect(lookup.text).toMatch(/f\.deleted_at IS NULL AND m\.is_active = true/);
+  test('backup: saved as a backup of that machine, answers the open request and tells who asked', async () => {
+    mockDb.queueResponse(one({ id: '43', machine_id: 7, program_name: 'O1001.nc', kind: 'BACKUP', size_bytes: 14, sha256: 'b'.repeat(64), created_at: 'T2' }),
+      one({ id: '9', requested_by: 2 }), none);
+    const r = await svc.deviceBackup(device, stage('%\nO1001\nM30\n%\n'), { program_name: 'O1001.nc' });
+    expect(r).toEqual({ file: { file_id: 43, program_name: 'O1001.nc', size_bytes: 14, sha256: 'b'.repeat(64), uploaded_at: 'T2' }, answered_request: 9 });
+    const insert = sql(/INSERT INTO program_files/);
+    expect(insert.params[2]).toBe('company-5/programs/machine-7/backups');
+    expect(insert.params[5]).toBe('BACKUP');
+    expect(insert.params.slice(8)).toEqual([null, 3]);   // no person; the device
+    expect(sql(/UPDATE program_backup_requests SET closed_at = NOW\(\), file_id = \$2/).params).toEqual([7, '43']);
+    const note = sql(/INSERT INTO notifications/);
+    expect(note.text).toMatch(/notify_program_transfer = false/);
+    expect(note.params).toEqual([5, 2, 'Backup received — VMC-1', '"O1001.nc" was saved from VMC-1.']);
   });
 
-  test('the published file cannot be deleted while devices can download it', async () => {
-    const saved = await storage.save({ machine: machine7, kind: 'NEW', programName: 'O_KEEP.nc', buffer: program });
-    mockDb.queueResponse(one({ id: '72', company_id: 5, machine_id: 7, folder: saved.folder, stored_name: saved.storedName }),
-      one({ file_id: '72' }));
-    await expect(svc.deleteFile(req({ params: { id: '72' } }))).rejects.toMatchObject({ status: 409, code: 'CURRENT_PROGRAM' });
-    expect(mockDb.calls()[1].params).toEqual([5, 7, '72']);
-    expect(fs.readFileSync(path.join(storage.ROOT, saved.folder, saved.storedName))).toEqual(program);
-    expect(mockDb.calls()).toHaveLength(2);
-  });
-
-  test('file history marks only the current pointer with the same company and machine', async () => {
-    mockDb.queueResponse(one({ id: '70', is_current: true, kind: 'NEW' }), one({ total: 1 }));
-    const result = await svc.listFiles(req({ query: { machine_id: 7 } }));
-    expect(result.data[0].is_current).toBe(true);
-    const lookup = mockDb.calls()[0];
-    expect(lookup.params.slice(0, 2)).toEqual([5, 7]);
-    expect(lookup.text).toMatch(/c\.file_id = f\.id AND c\.machine_id = f\.machine_id AND c\.company_id = f\.company_id/);
+  test('a backup nobody asked for is kept, and no one is notified', async () => {
+    mockDb.queueResponse(one({ id: '44', program_name: 'O1001.nc' }), none);
+    const r = await svc.deviceBackup(device, stage('%\nO1001\nM30\n%\n'));
+    expect(r.answered_request).toBeNull();
+    expect(sql(/INSERT INTO notifications/)).toBeUndefined();
   });
 });
