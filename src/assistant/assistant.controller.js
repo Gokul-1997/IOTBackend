@@ -9,8 +9,10 @@ const allowance = require('./assistant.allowance');
 const assistant = createAssistant();
 
 exports.status = async (req, res, next) => {
-  try { res.json({ status: 'success', data: await assistant.status(req.user) }); }
-  catch (err) { next(err); }
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ status: 'success', data: await assistant.status(req.user) });
+  } catch (err) { next(err); }
 };
 
 exports.chat = async (req, res, next) => {
@@ -21,8 +23,10 @@ exports.chat = async (req, res, next) => {
 };
 
 exports.getSettings = async (req, res, next) => {
-  try { res.json({ status: 'success', data: await allowance.settingsOf(req.user) }); }
-  catch (err) { next(err); }
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ status: 'success', data: await allowance.settingsOf(req.user) });
+  } catch (err) { next(err); }
 };
 
 exports.updateSettings = async (req, res, next) => {

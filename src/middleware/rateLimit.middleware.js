@@ -144,7 +144,25 @@ const deviceLimiter = rateLimit({
   message: { status: 'error', code: 'TOO_MANY_REQUESTS', message: 'Too many calls from this gateway. Call GET /status every 15 seconds, not faster.' },
 });
 
+/* The report assistant's questions (POST /api/assistant/chat), per person:
+   each one is a paid AI call (ASSISTANT_PER_MINUTE, default 6 a minute).
+   Counted in Redis — and, unlike the limits above, in this process's memory
+   while Redis is down: an outage must not open the bill. The daily ceilings
+   in assistant.allowance hold behind this either way. */
+const assistantOptions = {
+  windowMs: 60 * 1000,
+  limit: () => require('../assistant/assistant.config')().perMinute,
+  keyGenerator: (req) => `assistant:${req.user?.id ?? ipKeyGenerator(req.ip)}`,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', code: 'TOO_MANY_QUESTIONS', message: 'Too many questions in a short time. Wait a minute, then ask again.' },
+};
+const assistantLimiter = [
+  rateLimit({ ...assistantOptions, store: makeStore('rl:assistant:'), skip: () => !isRedisReady(), passOnStoreError: true }),
+  rateLimit({ ...assistantOptions, skip: () => isRedisReady() }),
+];
+
 module.exports = {
   standardLimiter, authLimiter, loginAccountLimiter, passwordLimiter,
-  deviceFailLimiter, deviceLimiter, whoIsAsking
+  deviceFailLimiter, deviceLimiter, assistantLimiter, whoIsAsking
 };

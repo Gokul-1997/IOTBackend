@@ -12,7 +12,9 @@ const db = require('../db');
 const reports = require('../reports/report.service');
 const oee = require('../dashboard/oee.dashboard.service');
 const { denialForAny } = require('../middleware/access.middleware');
-const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
+const readScope = require('../lib/read-scope');
+const { plantSql, sharedEntityPlantSql } = readScope;
+const { effectivePlantId } = require('../lib/plant-scope');
 const { MAX_DIRECT_DAYS } = require('../reports/report.limits');
 
 /** Pages whose figures a tool shows; the person needs one of them. */
@@ -230,7 +232,9 @@ const TOOLS = {
       input_schema: { type: 'object', properties: {}, additionalProperties: false }
     },
     async run(user) {
-      // the approved fields only — never ids, logos, users, limits or anything another company has
+      // the approved fields only — never ids, logos, users, limits or anything another company has;
+      // a person kept to one plant sees that plant only
+      const plantId = effectivePlantId(user);
       const [{ rows: [c] }, { rows: plants }, { rows: [m] }] = await Promise.all([
         db.query(`
           SELECT c.company_name, c.company_code, c.address, c.contact_email, c.contact_phone, c.timezone,
@@ -239,7 +243,8 @@ const TOOLS = {
             LEFT JOIN company_plans cp ON cp.company_id = c.id AND cp.is_active = TRUE
             LEFT JOIN plans p ON p.id = cp.plan_id
            WHERE c.id = $1`, [user.company_id]),
-        db.query('SELECT plant_name FROM plants WHERE company_id = $1 AND is_active = TRUE ORDER BY plant_name', [user.company_id]),
+        db.query(`SELECT plant_name FROM plants WHERE company_id = $1 AND is_active = TRUE${plantId ? ' AND id = $2' : ''} ORDER BY plant_name`,
+                 plantId ? [user.company_id, plantId] : [user.company_id]),
         db.query(`SELECT COUNT(*)::int AS n FROM machines WHERE company_id = $1 AND is_active = TRUE${plantSql('id')}`, [user.company_id])
       ]);
       if (!c) throw new ToolProblem('No company details.', { restricted: true });
@@ -270,13 +275,19 @@ function toolsFor(can) {
   return offered;
 }
 
-/** Run one tool call. Never throws for a person's mistake: the model is told, so it can ask. */
+/**
+ * Run one tool call. Never throws for a person's mistake: the model is told,
+ * so it can ask. Run inside this person's read scope (their company and
+ * plant) again, so the plant filter never rests on the request's context
+ * surviving the wait for the model.
+ */
 async function runTool(user, name, input, ctx) {
-  if (!ctx.offered.includes(name) || !TOOLS[name]) {
+  if (!ctx.offered.includes(name) || !Object.hasOwn(TOOLS, name)) {
     return { error: true, out: { restricted: true, message: 'This person may not see that.' } };
   }
   try {
-    const r = await TOOLS[name].run(user, input && typeof input === 'object' ? input : {}, ctx);
+    const args = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    const r = await readScope.run(user, () => TOOLS[name].run(user, args, ctx));
     return { error: false, out: r.data, source: r.source };
   } catch (err) {
     if (err instanceof ToolProblem) {

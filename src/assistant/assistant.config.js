@@ -13,6 +13,16 @@
  *   ASSISTANT_TIMEOUT_MS      one model call (default 45 s)
  *   ASSISTANT_MAX_CONCURRENT  questions answered at once across the server (8)
  *
+ * What it may cost — the platform pays for every model call, so these are
+ * hard ceilings no company setting can pass (22 Oct 2026):
+ *
+ *   ASSISTANT_DAILY_LIMIT_MAX    the most answers a day a company admin may give
+ *                                each person (default 100; the admin's own
+ *                                setting starts at 50)
+ *   ASSISTANT_COMPANY_DAILY_MAX  questions a day for a whole company, all its
+ *                                people together (default 500)
+ *   ASSISTANT_PER_MINUTE         questions a minute from one person (default 6)
+ *
  * The key stays on the server: the browser never sees it.
  */
 const positive = (raw, fallback, max) => {
@@ -32,5 +42,8 @@ module.exports = () => ({
   model: String(process.env.ASSISTANT_MODEL || '').trim() || 'claude-haiku-5-5',
   maxTokens: positive(process.env.ASSISTANT_MAX_TOKENS, 1024, 4096),
   timeoutMs: positive(process.env.ASSISTANT_TIMEOUT_MS, 45000, 120000),
-  maxConcurrent: positive(process.env.ASSISTANT_MAX_CONCURRENT, 8, 100)
+  maxConcurrent: positive(process.env.ASSISTANT_MAX_CONCURRENT, 8, 100),
+  dailyLimitMax: positive(process.env.ASSISTANT_DAILY_LIMIT_MAX, 100, 1000),
+  companyDailyMax: positive(process.env.ASSISTANT_COMPANY_DAILY_MAX, 500, 100000),
+  perMinute: positive(process.env.ASSISTANT_PER_MINUTE, 6, 60)
 });

@@ -10,6 +10,7 @@ module.exports = name => ({
   restricted: 'I can only provide information available to your account.',
   notFound: 'I couldn’t find matching information in your company’s connected records. Please try another period or filter.',
   limit: resetsAt => `You’ve reached today’s ${name} allowance. Your allowance resets at ${resetsAt}. You can still access your reports.`,
+  companyLimit: resetsAt => `${name} has reached your company’s allowance for today. It resets at ${resetsAt}. You can still access your reports.`,
   switchedOff: `${name} is switched off for your company.`,
   unavailable: `${name} is not available right now. Please try again in a few minutes.`,
   busy: `${name} is busy right now. Please try again in a moment.`,

@@ -1,15 +1,29 @@
 /*
- * The daily allowance: completed answers per person per company day
- * (migration 052). The company admin sets it (50 to start; 0 switches the
- * assistant off for the company). It resets at midnight in the company's
- * timezone. Only a completed answer counts — a clarifying question, a
- * refusal or a failure does not.
+ * What the report assistant may use, per company day (migrations 052, 054).
+ *
+ *   the allowance   completed answers per person per day, set by the company
+ *                   admin (50 to start, 0 switches the assistant off) and never
+ *                   above ASSISTANT_DAILY_LIMIT_MAX. What the person sees. A
+ *                   clarifying question, a refusal or a failure does not count.
+ *   the ceilings    every question the model reads counts — answers or not —
+ *                   against two hard limits the person does not see: three
+ *                   per answer of their allowance (at least 20), and
+ *                   ASSISTANT_COMPANY_DAILY_MAX for the whole company. Without
+ *                   them, questions that end in a refusal would run the
+ *                   platform's AI (and its bill) without end (22 Oct 2026).
+ *   the bill        the tokens each person's questions read and wrote.
+ *
+ * A day is the company's: it resets at midnight in the company's timezone.
  */
 const db = require('../db');
+const readConfig = require('./assistant.config');
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 1000;
 const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
+
+/** Questions a person may put to the model in a day: three per answer of the allowance, at least 20. */
+const questionCap = limit => Math.max(20, limit * 3);
+const count = v => Math.max(0, Math.round(Number(v) || 0));
 
 /** A timezone this server can work in (an IANA name such as Asia/Kolkata). */
 function validTimezone(tz) {
@@ -29,9 +43,10 @@ async function allowanceOf(user) {
   const { rows: [r] } = await db.query(`
     SELECT COALESCE(s.daily_limit, $3)                     AS daily_limit,
            c.timezone, c.company_name,
-           (NOW() AT TIME ZONE c.timezone)::date           AS day,
+           ((NOW() AT TIME ZONE c.timezone)::date)::text   AS day,
            (date_trunc('day', NOW() AT TIME ZONE c.timezone) + INTERVAL '1 day') AT TIME ZONE c.timezone AS resets_at,
-           COALESCE(u.answers, 0)                          AS used
+           COALESCE(u.answers, 0)                          AS used,
+           COALESCE(u.questions, 0)                        AS questions
       FROM companies c
       LEFT JOIN assistant_settings s ON s.company_id = c.id
       LEFT JOIN assistant_usage u
@@ -39,40 +54,81 @@ async function allowanceOf(user) {
      WHERE c.id = $1`,
     [user.company_id, user.id, DEFAULT_LIMIT]);
   if (!r) throw fail(403, 'NO_COMPANY', 'No company assigned');
-  const limit = Number(r.daily_limit);
+  const limit = Math.min(Number(r.daily_limit), readConfig().dailyLimitMax);     // a ceiling no company setting passes
   const used = Number(r.used);
   return {
-    limit, used, remaining: Math.max(0, limit - used),
+    limit, used, remaining: Math.max(0, limit - used), questions: Number(r.questions) || 0,
     day: r.day, timezone: r.timezone, company_name: r.company_name,
     resets_at: new Date(r.resets_at).toISOString(),
     resets_text: resetsText(r.resets_at, r.timezone)
   };
 }
 
-/** Count one completed answer; the allowance after it. */
-async function consume(user, allowance) {
-  const { rows: [r] } = await db.query(`
-    INSERT INTO assistant_usage (user_id, company_id, day, answers) VALUES ($1, $2, $3, 1)
-    ON CONFLICT (user_id, company_id, day) DO UPDATE SET answers = assistant_usage.answers + 1
-    RETURNING answers`,
+/**
+ * Take one question from today's ceilings, before the model is asked — in
+ * one statement, so two questions at once cannot both slip under them.
+ * Answers null when taken, else which ceiling was reached: 'PERSON' or
+ * 'COMPANY'.
+ */
+async function reserveQuestion(user, allowance) {
+  const companyMax = readConfig().companyDailyMax;
+  const { rows } = await db.query(`
+    INSERT INTO assistant_usage AS u (user_id, company_id, day, questions)
+    SELECT $1, $2, $3::date, 1
+     WHERE (SELECT COALESCE(SUM(questions), 0) FROM assistant_usage WHERE company_id = $2 AND day = $3::date) < $5
+    ON CONFLICT (user_id, company_id, day) DO UPDATE SET questions = u.questions + 1
+     WHERE u.questions < $4
+       AND (SELECT COALESCE(SUM(questions), 0) FROM assistant_usage WHERE company_id = $2 AND day = $3::date) < $5
+    RETURNING questions`,
+    [user.id, user.company_id, allowance.day, questionCap(allowance.limit), companyMax]);
+  if (rows.length) return null;
+  const { rows: [t] } = await db.query(
+    `SELECT COALESCE(SUM(questions), 0)::int AS company FROM assistant_usage WHERE company_id = $1 AND day = $2::date`,
+    [user.company_id, allowance.day]);
+  return Number(t?.company) >= companyMax ? 'COMPANY' : 'PERSON';
+}
+
+/** The question was never read (the model could not be reached): it does not count. */
+async function refundQuestion(user, allowance) {
+  await db.query(
+    `UPDATE assistant_usage SET questions = GREATEST(questions - 1, 0)
+      WHERE user_id = $1 AND company_id = $2 AND day = $3::date`,
     [user.id, user.company_id, allowance.day]);
-  const used = Number(r?.answers ?? allowance.used + 1);
+}
+
+/**
+ * After a question: one more answer if it was one, and the tokens the model
+ * read and wrote for it (input, cache reads, output) — what it costs.
+ */
+async function record(user, allowance, { answered = false, inputTokens = 0, cachedTokens = 0, outputTokens = 0 } = {}) {
+  const { rows: [r] } = await db.query(`
+    INSERT INTO assistant_usage AS u (user_id, company_id, day, answers, input_tokens, cached_tokens, output_tokens)
+    VALUES ($1, $2, $3::date, $4, $5, $6, $7)
+    ON CONFLICT (user_id, company_id, day) DO UPDATE
+       SET answers = u.answers + EXCLUDED.answers,
+           input_tokens = u.input_tokens + EXCLUDED.input_tokens,
+           cached_tokens = u.cached_tokens + EXCLUDED.cached_tokens,
+           output_tokens = u.output_tokens + EXCLUDED.output_tokens
+    RETURNING answers`,
+    [user.id, user.company_id, allowance.day, answered ? 1 : 0, count(inputTokens), count(cachedTokens), count(outputTokens)]);
+  const used = Number(r?.answers ?? allowance.used + (answered ? 1 : 0));
   return { ...allowance, used, remaining: Math.max(0, allowance.limit - used) };
 }
 
-/** What the browser is told: no internal day key. */
+/** What the browser is told: no internal day key, no ceilings. */
 const present = a => a && ({ limit: a.limit, used: a.used, remaining: a.remaining, resets_at: a.resets_at, resets_text: a.resets_text, timezone: a.timezone });
 
 async function settingsOf(user) {
   const a = await allowanceOf(user);
-  return { daily_limit: a.limit, timezone: a.timezone, default_limit: DEFAULT_LIMIT, max_limit: MAX_LIMIT };
+  return { daily_limit: a.limit, timezone: a.timezone, default_limit: DEFAULT_LIMIT, max_limit: readConfig().dailyLimitMax };
 }
 
-/** The company admin sets the allowance and the company's timezone. */
+/** The company admin sets the allowance (up to the platform's ceiling) and the company's timezone. */
 async function updateSettings(user, body = {}) {
+  const max = readConfig().dailyLimitMax;
   const limit = body.daily_limit;
-  if (!Number.isInteger(limit) || limit < 0 || limit > MAX_LIMIT) {
-    throw fail(400, 'BAD_LIMIT', `The daily allowance must be a whole number from 0 to ${MAX_LIMIT}.`);
+  if (!Number.isInteger(limit) || limit < 0 || limit > max) {
+    throw fail(400, 'BAD_LIMIT', `The daily allowance must be a whole number from 0 to ${max}.`);
   }
   if (body.timezone !== undefined && !validTimezone(body.timezone)) {
     throw fail(400, 'BAD_TIMEZONE', 'Choose a timezone from the list, such as Asia/Kolkata.');
@@ -87,4 +143,7 @@ async function updateSettings(user, body = {}) {
   return settingsOf(user);
 }
 
-module.exports = { allowanceOf, consume, present, settingsOf, updateSettings, validTimezone, resetsText, DEFAULT_LIMIT, MAX_LIMIT };
+module.exports = {
+  allowanceOf, reserveQuestion, refundQuestion, record, present, settingsOf, updateSettings,
+  validTimezone, resetsText, questionCap, DEFAULT_LIMIT
+};

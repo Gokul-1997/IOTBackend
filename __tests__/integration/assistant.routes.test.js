@@ -60,11 +60,11 @@ describe('the company admin sets the allowance', () => {
     expect((await request(app).put('/api/assistant/settings').send({ daily_limit: 10 })).status).toBe(403);
   });
 
-  test('a whole number from 0 to 1000, and a real timezone', async () => {
+  test('a whole number up to the platform\'s ceiling (100 unless the server says), and a real timezone', async () => {
     mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };
     for (const [body, message] of [
-      [{ daily_limit: -1 }, /0 to 1000/], [{ daily_limit: 1001 }, /0 to 1000/], [{ daily_limit: '50' }, /0 to 1000/],
-      [{ daily_limit: 20, timezone: 'Mars/Olympus' }, /timezone/]
+      [{ daily_limit: -1 }, /from 0 to 100\./], [{ daily_limit: 101 }, /from 0 to 100\./], [{ daily_limit: 1000 }, /from 0 to 100\./],
+      [{ daily_limit: '50' }, /from 0 to 100\./], [{ daily_limit: 20, timezone: 'Mars/Olympus' }, /timezone/]
     ]) {
       const res = await request(app).put('/api/assistant/settings').send(body);
       expect(res.status).toBe(400);
@@ -75,10 +75,40 @@ describe('the company admin sets the allowance', () => {
     mockDb.queueResponse({ rows: [], rowCount: 1 }, { rows: [], rowCount: 1 }, allowanceRow({ daily_limit: 20, timezone: 'Asia/Dubai' }));
     const res = await request(app).put('/api/assistant/settings').send({ daily_limit: 20, timezone: 'Asia/Dubai' });
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ daily_limit: 20, timezone: 'Asia/Dubai', default_limit: 50, max_limit: 1000 });
+    expect(res.body.data).toEqual({ daily_limit: 20, timezone: 'Asia/Dubai', default_limit: 50, max_limit: 100 });
     const [upsert, tz] = mockDb.calls();
     expect(upsert.params).toEqual([5, 20, 1]);
     expect(tz.params).toEqual([5, 'Asia/Dubai']);
+    // who changed what it may cost is on record
+    const audit = mockDb.calls().find(c => /INSERT INTO audit_logs/.test(c.text));
+    expect(audit.params.slice(0, 4)).toEqual([1, 5, 'UPDATE_ASSISTANT_SETTINGS', 'assistant_settings']);
+  });
+
+  test('S&T can raise the ceiling on the server; a stored allowance above it is used as the ceiling', async () => {
+    mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };
+    process.env.ASSISTANT_DAILY_LIMIT_MAX = '1000';
+    mockDb.queueResponse({ rows: [], rowCount: 1 }, allowanceRow({ daily_limit: 1000 }));
+    expect((await request(app).put('/api/assistant/settings').send({ daily_limit: 1000 })).body.data.max_limit).toBe(1000);
+    delete process.env.ASSISTANT_DAILY_LIMIT_MAX;
+    resetDb();
+    mockDb.queueResponse(allowanceRow({ daily_limit: 1000 }));
+    expect((await request(app).get('/api/assistant/settings')).body.data).toMatchObject({ daily_limit: 100, max_limit: 100 });
+  });
+});
+
+describe('how fast one person may ask', () => {
+  test('six questions a minute; the seventh is refused before anything else runs', async () => {
+    mockUser = { id: 77, company_id: 5, roles: ['SUPERVISOR'], permissions: ['page:reports:view'] };
+    for (let i = 0; i < 6; i++) {
+      const res = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: `q${i}` }] });
+      expect(res.status).toBe(503);                              // no key on this server: turned away by the service
+    }
+    const seventh = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: 'q7' }] });
+    expect(seventh.status).toBe(429);
+    expect(seventh.body).toMatchObject({ code: 'TOO_MANY_QUESTIONS', message: 'Too many questions in a short time. Wait a minute, then ask again.' });
+    // another person is not held up
+    mockUser = { ...mockUser, id: 78 };
+    expect((await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: 'q' }] })).status).toBe(503);
   });
 });
 
