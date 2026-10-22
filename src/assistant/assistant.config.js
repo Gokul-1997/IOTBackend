@@ -23,7 +23,11 @@ const positive = (raw, fallback, max) => {
 module.exports = () => ({
   name: String(process.env.ASSISTANT_NAME || '').trim().slice(0, 40) || 'STM Mexa AI',
   apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(),
-  workspaceId: String(process.env.ANTHROPIC_WORKSPACE_ID || '').trim(),
+  // a workspace id looks like wrkspc_…; anything else (a key pasted there by mistake) is not sent
+  workspaceId: /^wrkspc_[A-Za-z0-9]+$/.test(String(process.env.ANTHROPIC_WORKSPACE_ID || '').trim())
+    ? String(process.env.ANTHROPIC_WORKSPACE_ID).trim() : '',
+  workspaceIdIsKey: /^sk-ant-/.test(String(process.env.ANTHROPIC_WORKSPACE_ID || '').trim()),
+  workspaceIdSet: !!String(process.env.ANTHROPIC_WORKSPACE_ID || '').trim(),
   apiUrl: 'https://api.anthropic.com/v1/messages',
   model: String(process.env.ASSISTANT_MODEL || '').trim() || 'claude-haiku-5-5',
   maxTokens: positive(process.env.ASSISTANT_MAX_TOKENS, 1024, 4096),

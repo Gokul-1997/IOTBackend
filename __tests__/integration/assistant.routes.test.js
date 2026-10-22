@@ -166,3 +166,12 @@ test('a key not scoped to a workspace sends the workspace the server names', () 
   expect(headersFor({ apiKey: 'k' })).toEqual({ 'content-type': 'application/json', 'x-api-key': 'k', 'anthropic-version': '2023-06-01' });
   expect(headersFor({ apiKey: 'k', workspaceId: 'wrkspc_01ABC' })['anthropic-workspace-id']).toBe('wrkspc_01ABC');
 });
+
+test('a key pasted into ANTHROPIC_WORKSPACE_ID is never sent as the workspace, and is flagged', () => {
+  const readConfig = require('../../src/assistant/assistant.config');
+  process.env.ANTHROPIC_WORKSPACE_ID = 'sk-ant-usr-SECRET';
+  expect(readConfig()).toMatchObject({ workspaceId: '', workspaceIdIsKey: true, workspaceIdSet: true });
+  process.env.ANTHROPIC_WORKSPACE_ID = 'wrkspc_01AbC';
+  expect(readConfig()).toMatchObject({ workspaceId: 'wrkspc_01AbC', workspaceIdIsKey: false });
+  delete process.env.ANTHROPIC_WORKSPACE_ID;
+});

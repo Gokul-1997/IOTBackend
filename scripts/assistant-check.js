@@ -5,7 +5,8 @@
  *   cd <the API folder> && node scripts/assistant-check.js
  *
  * Reads the API's .env, prints the Node version, whether a key is set (only
- * its first characters and length, never the key), the model, and the
+ * its first characters and length, never the key — nor anything else that
+ * looks like one), the model, and the
  * answer to one tiny question — or the provider's reason for refusing it,
  * with what to do. It touches no database. A refused or failed check costs
  * nothing; a working one costs a fraction of a paisa.
@@ -27,10 +28,21 @@ const HINTS = [
 (async () => {
   const cfg = readConfig();
   console.log(`Node:  ${process.version}`);
-  console.log(`Key:   ${cfg.apiKey ? `set (${cfg.apiKey.slice(0, 7)}…, ${cfg.apiKey.length} characters)` : 'NOT SET — add ANTHROPIC_API_KEY=… to .env and restart the API'}`);
+  console.log(`Key:   ${cfg.apiKey ? `set (${cfg.apiKey.slice(0, 10)}…, ${cfg.apiKey.length} characters)` : 'NOT SET — add ANTHROPIC_API_KEY=… to .env and restart the API'}`);
   console.log(`Model: ${cfg.model}`);
-  if (cfg.workspaceId) console.log(`Workspace: ${cfg.workspaceId}`);
-  if (!cfg.apiKey) process.exit(1);
+  if (cfg.workspaceIdIsKey) {
+    // never print it: it is a secret
+    console.log('Workspace: WRONG — ANTHROPIC_WORKSPACE_ID holds an API key, not a workspace id. Put the key in');
+    console.log('           ANTHROPIC_API_KEY instead, and delete the ANTHROPIC_WORKSPACE_ID line (or set it to a wrkspc_… id).');
+  } else if (cfg.workspaceIdSet && !cfg.workspaceId) {
+    console.log('Workspace: not used — ANTHROPIC_WORKSPACE_ID should look like wrkspc_… (console.anthropic.com → Workspaces).');
+  } else if (cfg.workspaceId) {
+    console.log(`Workspace: ${cfg.workspaceId}`);
+  }
+  if (cfg.apiKey && !/^sk-ant-api/.test(cfg.apiKey)) {
+    console.log('Note:  keys made under console.anthropic.com → API Keys usually start "sk-ant-api"; this key is a different kind.');
+  }
+  if (!cfg.apiKey || cfg.workspaceIdIsKey) process.exit(1);
 
   let res;
   try {
