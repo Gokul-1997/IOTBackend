@@ -31,6 +31,28 @@ every 15 s:  GET /status
         or POST /report {backup_request_id, status: FAILED, message: "why"}
 ```
 
+## A ready-made gateway
+
+`mexa-gateway.js` does the loop above with a folder as the machine — a new
+program is written into `PROGRAM_DIR` (the folder the CNC reads: its network
+share, a DNC folder); **Backup now** sends the newest file in it. Node.js 20,
+nothing to install. Download it from **Program Transfer → Gateway token →
+Ready-made gateway** (or Backend `tools/gateway/`).
+
+```bash
+MEXA_URL=https://SERVER MEXA_TOKEN=mxd_... PROGRAM_DIR=/path/to/machine/folder node mexa-gateway.js
+```
+
+```powershell
+$env:MEXA_URL="https://SERVER"; $env:MEXA_TOKEN="mxd_..."; $env:PROGRAM_DIR="C:\CNC\VMC-1"; node mexa-gateway.js
+```
+
+To try the whole flow on a laptop: make the token, start the gateway with
+any folder, upload an `.nc` file on the page — within 15 s it is in the
+folder and the page shows **On the machine since …**. For a controller
+reached another way (FTP, FOCAS), replace the two functions marked MACHINE
+in the file: `writeToMachine` and `readFromMachine`.
+
 ## The token
 
 Each machine has its own token. In MEXA: **Program Transfer → choose the
