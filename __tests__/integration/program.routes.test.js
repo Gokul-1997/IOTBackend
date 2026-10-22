@@ -89,7 +89,7 @@ test.each([
 ])('the company side makes no token: %s %s is gone', async (method, url) => {
   const res = await request(app)[method](url);
   expect(res.status).toBe(404);
-  expect(mockDb.calls().find(c => /program_gateways|program_devices/.test(c.text))).toBeUndefined();
+  expect(mockDb.calls().find(c => /program_gateway_tokens|program_devices/.test(c.text))).toBeUndefined();
 });
 
 test('files of a machine in another company: 404, nothing listed', async () => {

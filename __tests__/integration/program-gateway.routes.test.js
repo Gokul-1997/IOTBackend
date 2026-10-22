@@ -48,7 +48,7 @@ test('S&T makes the token: shown once, never cached, only its hash kept, and the
   expect(res.headers['cache-control']).toBe('no-store');
   expect(res.body.token).toMatch(/^mxg_[A-Za-z0-9_-]{43}$/);
   expect(res.body).toMatchObject({ token_prefix: 'mxg_abcdefgh', created_at: 'T0', company_name: 'Acme Gears' });
-  expect(mockDb.calls().find(c => /UPDATE program_gateways SET revoked_at/.test(c.text)).params).toEqual([5, 1]);
+  expect(mockDb.calls().find(c => /UPDATE program_gateway_tokens SET revoked_at/.test(c.text)).params).toEqual([5, 1]);
   expect(JSON.stringify(mockDb.calls())).not.toContain(res.body.token);
   expect(JSON.stringify(audit.log.mock.calls)).not.toContain(res.body.token);
   expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ company_id: 5, action: 'GATEWAY_TOKEN_CREATE' }));
@@ -85,5 +85,5 @@ test('a company that does not exist: 404, and no token is made', async () => {
   const res = await request(app).post('/api/companies/99/program-gateway/token');
   expect(res.status).toBe(404);
   expect(res.body).toMatchObject({ code: 'COMPANY_NOT_FOUND' });
-  expect(mockDb.calls().find(c => /program_gateways/.test(c.text))).toBeUndefined();
+  expect(mockDb.calls().find(c => /program_gateway_tokens/.test(c.text))).toBeUndefined();
 });

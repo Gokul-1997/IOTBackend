@@ -3,8 +3,14 @@
 -- Until now every machine had its own gateway token (program_devices, 030)
 -- and the gateway asked about one machine per call: 20–30 machines meant
 -- 20–30 tokens to keep and 20–30 status calls every 15 seconds. From 053 a
--- company has ONE token (program_gateways). One GET /status answers for
--- every machine, and a call about one machine names it (or its IP).
+-- company has ONE token (program_gateway_tokens), made by S&T. One GET
+-- /status answers for every machine, and a call about one machine names it
+-- (or its IP).
+--
+-- Not "program_gateways": the retired 049 made a table of that name (with
+-- program_files.gateway_id and program_files_gateway_tenant_fk pointing at
+-- it), and production ran 049. Those stay as they are, unused (see 050);
+-- every name here is new, so 053 works with or without them.
 --
 -- Programs now wait in line per machine: two uploads for one machine go one
 -- after the other, oldest first; when the gateway reports the first DONE (or
@@ -23,7 +29,7 @@ SET LOCAL lock_timeout = '5s';
 
 /* ── the company's gateway, and its token ───────────────────────────────
    Only the token's SHA-256 is kept; the token is shown once when made.   */
-CREATE TABLE IF NOT EXISTS program_gateways (
+CREATE TABLE IF NOT EXISTS program_gateway_tokens (
   id            SERIAL PRIMARY KEY,
   company_id    INT          NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   token_prefix  VARCHAR(16)  NOT NULL,
@@ -38,19 +44,19 @@ CREATE TABLE IF NOT EXISTS program_gateways (
 );
 
 -- one live token per company
-CREATE UNIQUE INDEX IF NOT EXISTS uq_program_gateways_live
-  ON program_gateways (company_id) WHERE revoked_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_program_gateways_tenant
-  ON program_gateways (company_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_program_gateway_tokens_live
+  ON program_gateway_tokens (company_id) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_program_gateway_tokens_tenant
+  ON program_gateway_tokens (company_id, id);
 
--- the gateway that sent a backup (device_id stays on files machine tokens sent)
+-- the token a backup came with (device_id stays on files machine tokens sent)
 ALTER TABLE program_files
-  ADD COLUMN IF NOT EXISTS gateway_id INT REFERENCES program_gateways(id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS gateway_token_id INT REFERENCES program_gateway_tokens(id) ON DELETE SET NULL;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
-                  WHERE conname = 'program_files_gateway_tenant_fk' AND conrelid = 'program_files'::regclass) THEN
-    ALTER TABLE program_files ADD CONSTRAINT program_files_gateway_tenant_fk
-      FOREIGN KEY (company_id, gateway_id) REFERENCES program_gateways (company_id, id);
+                  WHERE conname = 'program_files_gateway_token_tenant_fk' AND conrelid = 'program_files'::regclass) THEN
+    ALTER TABLE program_files ADD CONSTRAINT program_files_gateway_token_tenant_fk
+      FOREIGN KEY (company_id, gateway_token_id) REFERENCES program_gateway_tokens (company_id, id);
   END IF;
 END $$;
 

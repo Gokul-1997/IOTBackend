@@ -72,7 +72,7 @@ describe('device.middleware', () => {
     await run({ authorization: `Bearer ${token}` }, []);
     const q = mockDb.calls()[0];
     expect(q.params).toEqual([deviceToken.hash(token)]);
-    expect(q.text).toMatch(/FROM program_gateways g/);
+    expect(q.text).toMatch(/FROM program_gateway_tokens g/);
     expect(q.text).toMatch(/revoked_at IS NULL/);
   });
 
@@ -93,13 +93,13 @@ describe('device.middleware', () => {
     const { req, next } = await run({ authorization: `Bearer ${token}` }, [row()]);
     expect(next).toHaveBeenCalled();
     expect(req.gateway).toEqual({ id: 3, company_id: 5, company_name: 'Acme Gears' });
-    expect(mockDb.calls().some(c => /UPDATE program_gateways/.test(c.text))).toBe(false);
+    expect(mockDb.calls().some(c => /UPDATE program_gateway_tokens/.test(c.text))).toBe(false);
   });
 
   test('a stale heartbeat, a new address or a new agent version is recorded', async () => {
     await run({ authorization: `Bearer ${token}`, 'x-agent-version': '1.1.0' },
               [row({ last_seen_at: new Date(Date.now() - 120_000).toISOString() })]);
-    const upd = mockDb.calls().find(c => /UPDATE program_gateways/.test(c.text));
+    const upd = mockDb.calls().find(c => /UPDATE program_gateway_tokens/.test(c.text));
     expect(upd.params).toEqual([3, '203.0.113.9', '1.1.0']);
   });
 });

@@ -43,7 +43,7 @@ describe('against the real gateway API', () => {
     const byName = id => state.machines.find(m => m.id === id).machine_serial_no;
     mockDb.query.mockImplementation(async (sql, params = []) => {
       const text = typeof sql === 'string' ? sql : sql.text;
-      if (/FROM program_gateways g/.test(text)) {
+      if (/FROM program_gateway_tokens g/.test(text)) {
         return params[0] === deviceToken.hash(token)
           ? one({ id: 3, company_id: 5, last_seen_at: new Date().toISOString(), last_seen_ip: '127.0.0.1',
                   agent_version: 'mexa-gateway 2', company_name: 'Acme Gears', company_active: true })
@@ -75,7 +75,7 @@ describe('against the real gateway API', () => {
       }
       if (/INSERT INTO program_files/.test(text)) {
         const row = { id: String(100 + state.files.length), machine_id: params[1], folder: params[2], stored_name: params[3],
-                      program_name: params[4], kind: params[5], size_bytes: params[6], sha256: params[7], gateway_id: params[9], created_at: 'T1' };
+                      program_name: params[4], kind: params[5], size_bytes: params[6], sha256: params[7], gateway_token_id: params[9], created_at: 'T1' };
         state.files.push(row);
         return one(row);
       }
@@ -169,7 +169,7 @@ describe('against the real gateway API', () => {
 
     await createGateway({ url, token, programDir: dir }).tick();
     const backup = db.files.find(f => f.kind === 'BACKUP');
-    expect(backup).toMatchObject({ program_name: 'O2002.nc', machine_id: 8, gateway_id: 3 });
+    expect(backup).toMatchObject({ program_name: 'O2002.nc', machine_id: 8, gateway_token_id: 3 });
     expect(fs.readFileSync(path.join(process.env.STORAGE_ROOT, backup.folder, backup.stored_name), 'utf8'))
       .toBe('%\nO2002\nG0 Z5.\nM30\n%\n');
     expect(db.requests[0]).toMatchObject({ closed_at: 'now', file_id: backup.id });

@@ -56,7 +56,7 @@ describe('machines and files', () => {
     expect(machines.text).toMatch(/f\.delivery_status IS NULL AND f\.deleted_at IS NULL\s+ORDER BY f\.created_at, f\.id LIMIT 1/);
     expect(machines.text).toMatch(/ORDER BY f\.delivered_at DESC NULLS LAST, f\.id DESC LIMIT 1/);
     expect(machines.params).toEqual([5, 30]);
-    expect(gateway.text).toMatch(/FROM program_gateways\s+WHERE company_id = \$1 AND revoked_at IS NULL/);
+    expect(gateway.text).toMatch(/FROM program_gateway_tokens\s+WHERE company_id = \$1 AND revoked_at IS NULL/);
     expect(gateway.params).toEqual([5, 60]);
     expect(r).toEqual({
       // where it calls from is for S&T, not the company's page
@@ -195,8 +195,8 @@ describe("S&T: a company's gateway token", () => {
     expect(r.token).toMatch(deviceToken.SHAPE);
     expect(r).toMatchObject({ token_prefix: 'mxg_x', created_at: 'T0', company_name: 'Acme Gears' });
     expect(sql(/FOR UPDATE/).params).toEqual([5]);
-    expect(sql(/UPDATE program_gateways SET revoked_at/).params).toEqual([5, 1]);
-    const insert = sql(/INSERT INTO program_gateways/);
+    expect(sql(/UPDATE program_gateway_tokens SET revoked_at/).params).toEqual([5, 1]);
+    const insert = sql(/INSERT INTO program_gateway_tokens/);
     expect(insert.params).toEqual([5, r.token.slice(0, 12), deviceToken.hash(r.token), 1]);
     expect(JSON.stringify(mockDb.calls())).not.toContain(r.token);
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ user_id: 1, company_id: 5, action: 'GATEWAY_TOKEN_CREATE',
@@ -220,13 +220,13 @@ describe("S&T: a company's gateway token", () => {
       .rejects.toMatchObject({ status: 404, code: 'NO_TOKEN', message: 'Acme Gears has no gateway token.' });
     mockDb.queueResponse(none);
     await expect(svc.createGatewayToken(req({ user: snt, params: { id: '99' } }))).rejects.toMatchObject({ status: 404, code: 'COMPANY_NOT_FOUND' });
-    expect(sql(/INSERT INTO program_gateways/)).toBeUndefined();
+    expect(sql(/INSERT INTO program_gateway_tokens/)).toBeUndefined();
   });
 
   test('stopping the token is audited against the company', async () => {
     mockDb.queueResponse(one(acme), one({ id: 3, token_prefix: 'mxg_abcdefgh' }));
     await svc.revokeGatewayToken(req({ user: snt, params: { id: '5' } }));
-    expect(sql(/UPDATE program_gateways SET revoked_at/).params).toEqual([5, 1]);
+    expect(sql(/UPDATE program_gateway_tokens SET revoked_at/).params).toEqual([5, 1]);
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ company_id: 5, action: 'GATEWAY_TOKEN_REVOKE' }));
   });
 });

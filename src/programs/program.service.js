@@ -26,7 +26,7 @@
  * upload's place in line is its delivery_status (051, 053): NULL waiting,
  * then DONE or FAILED as reported, or SKIPPED (made before the line existed;
  * never sent). Backup requests are program_backup_requests (050), one open
- * per machine. The token is program_gateways (053), one live per company.
+ * per machine. The token is program_gateway_tokens (053), one live per company.
  */
 const pool = require('../db');
 const storage = require('./storage');
@@ -102,7 +102,7 @@ async function saveFile({ machine, kind, staged, programName, userId = null, gat
   });
   try {
     const { rows } = await pool.query(
-      `INSERT INTO program_files (company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, uploaded_by, gateway_id)
+      `INSERT INTO program_files (company_id, machine_id, folder, stored_name, program_name, kind, size_bytes, sha256, uploaded_by, gateway_token_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id, machine_id, program_name, kind, size_bytes, sha256, created_at`,
       [machine.company_id, machine.id, saved.folder, saved.storedName, saved.programName, kind,
@@ -123,7 +123,7 @@ async function liveGateway(companyId, { full = false } = {}) {
   const { rows } = await pool.query(
     `SELECT id, token_prefix, created_at, last_seen_at, last_seen_ip, agent_version,
             COALESCE(last_seen_at > NOW() - make_interval(secs => $2), false) AS online
-       FROM program_gateways
+       FROM program_gateway_tokens
       WHERE company_id = $1 AND revoked_at IS NULL`,
     [companyId, ONLINE_WINDOW_SEC]
   );
@@ -328,11 +328,11 @@ exports.createGatewayToken = async (req) => {
     await client.query('BEGIN');
     await client.query(`SELECT id FROM companies WHERE id = $1 FOR UPDATE`, [company.id]);   // two clicks: one after the other
     await client.query(
-      `UPDATE program_gateways SET revoked_at = NOW(), revoked_by = $2 WHERE company_id = $1 AND revoked_at IS NULL`,
+      `UPDATE program_gateway_tokens SET revoked_at = NOW(), revoked_by = $2 WHERE company_id = $1 AND revoked_at IS NULL`,
       [company.id, req.user.id]
     );
     ({ rows: [gateway] } = await client.query(
-      `INSERT INTO program_gateways (company_id, token_prefix, token_hash, created_by)
+      `INSERT INTO program_gateway_tokens (company_id, token_prefix, token_hash, created_by)
        VALUES ($1, $2, $3, $4)
        RETURNING id, token_prefix, created_at`,
       [company.id, prefix, hash, req.user.id]
@@ -353,7 +353,7 @@ exports.createGatewayToken = async (req) => {
 exports.revokeGatewayToken = async (req) => {
   const company = await companyFor(req.params.id);
   const { rows } = await pool.query(
-    `UPDATE program_gateways SET revoked_at = NOW(), revoked_by = $2
+    `UPDATE program_gateway_tokens SET revoked_at = NOW(), revoked_by = $2
       WHERE company_id = $1 AND revoked_at IS NULL RETURNING id, token_prefix`,
     [company.id, req.user.id]
   );

@@ -34,7 +34,7 @@ module.exports = async (req, res, next) => {
     const { rows } = await db.query(
       `SELECT g.id, g.company_id, g.last_seen_at, g.last_seen_ip, g.agent_version,
               c.company_name, c.is_active AS company_active
-         FROM program_gateways g
+         FROM program_gateway_tokens g
          JOIN companies c ON c.id = g.company_id
         WHERE g.token_hash = $1 AND g.revoked_at IS NULL`,
       [deviceToken.hash(token)]
@@ -49,7 +49,7 @@ module.exports = async (req, res, next) => {
     const stale = !g.last_seen_at || Date.now() - new Date(g.last_seen_at).getTime() > SEEN_EVERY_MS;
     if (stale || ip !== g.last_seen_ip || (version && version !== g.agent_version)) {
       await db.query(
-        `UPDATE program_gateways
+        `UPDATE program_gateway_tokens
             SET last_seen_at = NOW(), last_seen_ip = $2, agent_version = COALESCE($3, agent_version)
           WHERE id = $1`,
         [g.id, ip, version]

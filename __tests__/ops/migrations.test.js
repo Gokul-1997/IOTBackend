@@ -76,3 +76,19 @@ test('enum preamble is separated while function bodies retain their BEGIN/END', 
   expect(p.body).toContain("BEGIN\n RAISE NOTICE");
   expect(p.body).not.toMatch(/^COMMIT;/m);
 });
+
+/* Production ran the retired 049 (removed from the folder in 6a038e4): its
+   program_gateways table, program_files.gateway_id and their constraints are
+   still there. 053 first reused those names and failed on the server
+   ("column revoked_at does not exist", 22 Oct 2026): IF NOT EXISTS skipped
+   creating the table, and the backup column would have pointed at 049's
+   table. 053 and its rollback keep to names of their own. */
+test.each(['053_program_gateway_company.sql', 'rollback/053_program_gateway_company_down.sql'])(
+  '%s touches nothing the retired 049 left in production', file => {
+    const sql = fs.readFileSync(path.join(__dirname, '../../src/migrations', file), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '');
+    for (const name of ['program_gateways', 'gateway_id', 'program_files_gateway_tenant_fk',
+                        'program_gateway_assignments', 'program_gateway_events']) {
+      expect(sql).not.toMatch(new RegExp(`\\b${name}\\b`));
+    }
+  });
