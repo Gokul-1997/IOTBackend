@@ -171,7 +171,9 @@ JSON. One of three:
   the person at the page: "Program O1001 is running", "CNC memory full".
 - `file_id` is the program from `/status` or the `X-File-Id` header.
 - A backup that worked needs no report: uploading it (call 3) answers the
-  request, so `status: DONE` with `backup_request_id` is refused.
+  request, so `status: DONE` with `backup_request_id` is refused — and so is
+  a report with the backup's own `file_id` (`BACKUP_NEEDS_NO_REPORT`). Report a
+  `file_id` only for the program from `/status` (or the `X-File-Id` header).
 - The same report sent again (a retry after a lost answer) changes nothing
   and notifies no one twice: `{"file_id": 42, "status": "DONE", "unchanged": true}`.
 
@@ -198,6 +200,7 @@ Every error is JSON: `{"status":"error","code":"…","message":"…"}`.
 | 404 | `NO_PROGRAM` | No program uploaded for this machine yet |
 | 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report about a file or request that is not this machine's |
 | 400 | `BAD_STATUS` / `NO_MESSAGE` / `NOTHING_TO_REPORT` | Report: status must be DONE or FAILED; FAILED needs a message; send file_id or backup_request_id |
+| 400 | `BACKUP_NEEDS_NO_REPORT` | Report: that file_id is a backup the gateway sent — a backup needs no report (the 201 from POST /backup finished it) |
 | 400 | `NO_FILE` / `BAD_UPLOAD` | Send the file as multipart field `file` |
 | 400 | `BAD_NAME` / `BAD_TYPE` / `NOT_TEXT` / `EMPTY` | Not a usable program name or text file |
 | 413 | `TOO_LARGE` | Over the size limit |

@@ -421,6 +421,13 @@ exports.deviceReport = async (device, body = {}) => {
  * the usual slip is an example id (42) or another machine's token.
  */
 async function notThisMachines(machine, id) {
+  // a backup the gateway itself sent: it needs no report — the upload (201) answered the request
+  const { rows: [backup] } = await pool.query(
+    `SELECT id FROM program_files WHERE id = $1 AND machine_id = $2 AND kind = 'BACKUP' AND deleted_at IS NULL`, [id, machine.id]);
+  if (backup) {
+    throw fail(`${id} is a backup this gateway sent. A backup needs no report: the 201 from POST /backup already finished it. `
+      + 'Report DONE or FAILED only for the program from GET /status (program.file_id).', 'BACKUP_NEEDS_NO_REPORT', 400);
+  }
   const current = await currentProgram(machine.id);
   return current
     ? `No upload ${id} on ${machine.machine_serial_no} (this token's machine). Its program now is file_id ${current.id} (${current.program_name}): take file_id from GET /status.`

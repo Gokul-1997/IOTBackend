@@ -257,13 +257,18 @@ describe('the gateway reports what happened', () => {
   });
 
   test("a file of another machine, or no file, is not found — and the error says which file_id to use", async () => {
-    mockDb.queueResponse(none, none, one({ id: '57', program_name: 'O1001.nc', kind: 'NEW' }));
+    mockDb.queueResponse(none, none, none, one({ id: '57', program_name: 'O1001.nc', kind: 'NEW' }));
     await expect(svc.deviceReport(device, { file_id: 42, status: 'DONE' })).rejects.toMatchObject({ status: 404, code: 'FILE_NOT_FOUND',
       message: 'No upload 42 on VMC-1 (this token\'s machine). Its program now is file_id 57 (O1001.nc): take file_id from GET /status.' });
 
-    mockDb.queueResponse(none, none, none);
+    mockDb.queueResponse(none, none, none, none);
     await expect(svc.deviceReport(device, { file_id: 42, status: 'DONE' })).rejects.toMatchObject({ status: 404,
       message: 'No upload 42 on VMC-1 (this token\'s machine), and nothing has been uploaded for it yet. Upload a program for VMC-1 on the Program Transfer page.' });
+
+    // the gateway reporting the backup it just sent — the 201 already finished that
+    mockDb.queueResponse(none, none, one({ id: '20' }));
+    await expect(svc.deviceReport(device, { file_id: 20, status: 'DONE' })).rejects.toMatchObject({ status: 400, code: 'BACKUP_NEEDS_NO_REPORT',
+      message: '20 is a backup this gateway sent. A backup needs no report: the 201 from POST /backup already finished it. Report DONE or FAILED only for the program from GET /status (program.file_id).' });
 
     // the Postman variable left unfilled, or text where the number goes
     await expect(svc.deviceReport(device, { file_id: '{{fileId}}', status: 'DONE' })).rejects.toMatchObject({ status: 404, code: 'FILE_NOT_FOUND',
