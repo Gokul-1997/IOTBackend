@@ -110,3 +110,12 @@ describe('the call to the model', () => {
       .rejects.toMatchObject({ status: 503, code: 'ASSISTANT_TIMEOUT' });
   });
 });
+
+test('the model is Haiku unless the server says otherwise — the lowest cost', () => {
+  const readConfig = require('../../src/assistant/assistant.config');
+  delete process.env.ASSISTANT_MODEL;
+  expect(readConfig().model).toBe('claude-haiku-5-5');
+  process.env.ASSISTANT_MODEL = 'claude-sonnet-5-5';
+  expect(readConfig().model).toBe('claude-sonnet-5-5');
+  delete process.env.ASSISTANT_MODEL;
+});

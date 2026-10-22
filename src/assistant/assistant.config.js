@@ -4,7 +4,9 @@
  *
  *   ANTHROPIC_API_KEY         required; without it the assistant stays hidden
  *   ASSISTANT_NAME            what people see it called (default "STM Mexa AI")
- *   ASSISTANT_MODEL           default claude-opus-5-5
+ *   ASSISTANT_MODEL           default claude-haiku-5-5 — the lowest cost (22 Oct 2026,
+ *                             the user: "Haiku, very low cost"); claude-sonnet-5-5 or
+ *                             claude-opus-5-5 answer harder questions at a higher price
  *   ASSISTANT_MAX_TOKENS      reply length cap per model call (default 1024)
  *   ASSISTANT_TIMEOUT_MS      one model call (default 45 s)
  *   ASSISTANT_MAX_CONCURRENT  questions answered at once across the server (8)
@@ -20,7 +22,7 @@ module.exports = () => ({
   name: String(process.env.ASSISTANT_NAME || '').trim().slice(0, 40) || 'STM Mexa AI',
   apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(),
   apiUrl: 'https://api.anthropic.com/v1/messages',
-  model: String(process.env.ASSISTANT_MODEL || '').trim() || 'claude-opus-5-5',
+  model: String(process.env.ASSISTANT_MODEL || '').trim() || 'claude-haiku-5-5',
   maxTokens: positive(process.env.ASSISTANT_MAX_TOKENS, 1024, 4096),
   timeoutMs: positive(process.env.ASSISTANT_TIMEOUT_MS, 45000, 120000),
   maxConcurrent: positive(process.env.ASSISTANT_MAX_CONCURRENT, 8, 100)

@@ -10,7 +10,8 @@ details, with the figures from the same server code as the screens.
 1. Run the migrations: `npm run migrate` (052 adds the allowance tables and
    `companies.timezone`).
 2. Put an Anthropic API key in the server's `.env`: `ANTHROPIC_API_KEY=…`
-   (and optionally `ASSISTANT_MODEL`, default `claude-opus-5-5`;
+   (and optionally `ASSISTANT_MODEL`, default `claude-haiku-5-5` — the lowest
+   cost; `claude-sonnet-5-5` / `claude-opus-5-5` cost more;
    `ASSISTANT_NAME`, default `STM Mexa AI`). Restart the API.
 3. Deploy the web app. The launcher appears for report users.
 
