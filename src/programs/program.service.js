@@ -27,6 +27,7 @@ const storage = require('./storage');
 const deviceToken = require('./device-token');
 const audit = require('../audit/audit.service');
 const { announceUnread } = require('../notifications/notification.service');
+const { programLink } = require('../notifications/links');
 const { plantSql } = require('../lib/read-scope');
 const { effectivePlantId } = require('../lib/plant-scope');
 
@@ -340,7 +341,7 @@ exports.deviceBackup = async (device, staged, body = {}) => {
   );
   if (request?.requested_by) {
     await tellUser(machine, request.requested_by, 'INFO', `Backup received — ${machine.machine_serial_no}`,
-                   `"${file.program_name}" was saved from ${machine.machine_serial_no}.`);
+                   `"${file.program_name}" was saved from ${machine.machine_serial_no}.`, file.id);
   }
   return { file: fileView(file), answered_request: request ? Number(request.id) : null };
 };
@@ -382,9 +383,9 @@ exports.deviceReport = async (device, body = {}) => {
     if (file.uploaded_by) {
       await (status === 'DONE'
         ? tellUser(machine, file.uploaded_by, 'INFO', `Program on ${machine.machine_serial_no}`,
-                   `"${file.program_name}" was written to ${machine.machine_serial_no}.`)
+                   `"${file.program_name}" was written to ${machine.machine_serial_no}.`, file.id)
         : tellUser(machine, file.uploaded_by, 'WARNING', `Program not accepted — ${machine.machine_serial_no}`,
-                   `${machine.machine_serial_no} could not use "${file.program_name}": ${message}`));
+                   `${machine.machine_serial_no} could not use "${file.program_name}": ${message}`, file.id));
     }
     return { file_id: id, status };
   }
@@ -416,14 +417,15 @@ exports.deviceReport = async (device, body = {}) => {
 };
 
 /** Respects Settings → Program transfer notifications, like transfers always did. */
-async function tellUser(machine, userId, type, title, message) {
+/** The link opens Program Transfer on this machine, the file marked (notifications/links.js). */
+async function tellUser(machine, userId, type, title, message, fileId = null) {
   try {
     await pool.query(
       `INSERT INTO notifications (company_id, user_id, type, title, message, link)
-       SELECT $1, $2, $3, $4, $5, '/programs'
+       SELECT $1, $2, $3, $4, $5, $6
         WHERE NOT EXISTS (SELECT 1 FROM notification_preferences
                            WHERE user_id = $2 AND notify_program_transfer = false)`,
-      [machine.company_id, userId, type, title, message]
+      [machine.company_id, userId, type, title, message, programLink(machine.id, fileId)]
     );
     await announceUnread([userId]);
   } catch (err) {

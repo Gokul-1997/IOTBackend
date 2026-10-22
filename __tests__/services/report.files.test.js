@@ -72,3 +72,23 @@ describe('the covering note', () => {
     expect(note({ rowCount: 1, reason: 'range' })).toContain('because its date range is longer than three months');
   });
 });
+
+describe('notification links open the very record', () => {
+  const { alarmLink, programLink, withQuery } = require('../../src/notifications/links');
+
+  test('an alarm: on the Alarms page that alarm; on the Alarm Report its machine; on the Live Dashboard its machine page', () => {
+    expect(alarmLink('/alarms', { alarmId: 91, machineId: 7 })).toBe('/alarms?alarm_id=91');
+    expect(alarmLink('/alarm-report', { alarmId: 91, machineId: 7 })).toBe('/alarm-report?view=details&machine_id=7');
+    expect(alarmLink('/dashboard', { alarmId: 91, machineId: 7 })).toBe('/dashboard/live/7');
+    expect(alarmLink('/dashboard', { alarmId: 91 })).toBe('/dashboard');
+  });
+
+  test('a program file, or just the machine when there is no file', () => {
+    expect(programLink(7, 42)).toBe('/programs?machine_id=7&file_id=42');
+    expect(programLink(7)).toBe('/programs?machine_id=7');
+  });
+
+  test('values are encoded; an empty one is left out', () => {
+    expect(withQuery('/x?a=1', { b: 'p q&r', c: null, d: '' })).toBe('/x?a=1&b=p%20q%26r');
+  });
+});

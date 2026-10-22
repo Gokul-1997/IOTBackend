@@ -217,7 +217,8 @@ describe('the gateway side', () => {
     expect(sql(/UPDATE program_backup_requests SET closed_at = NOW\(\), file_id = \$2/).params).toEqual([7, '43']);
     const note = sql(/INSERT INTO notifications/);
     expect(note.text).toMatch(/notify_program_transfer = false/);
-    expect(note.params).toEqual([5, 2, 'INFO', 'Backup received — VMC-1', '"O1001.nc" was saved from VMC-1.']);
+    // the link opens Program Transfer on this machine with the backup marked
+    expect(note.params).toEqual([5, 2, 'INFO', 'Backup received — VMC-1', '"O1001.nc" was saved from VMC-1.', '/programs?machine_id=7&file_id=43']);
   });
 
   test('a backup nobody asked for is kept, and no one is notified', async () => {
@@ -237,7 +238,8 @@ describe('the gateway reports what happened', () => {
     const update = sql(/UPDATE program_files SET delivery_status/);
     expect(update.params).toEqual([42, 7, 'DONE', null]);
     expect(update.text).toMatch(/machine_id = \$2 AND kind = 'NEW' AND deleted_at IS NULL/);   // only this machine's uploads
-    expect(sql(/INSERT INTO notifications/).params).toEqual([5, 2, 'INFO', 'Program on VMC-1', '"O1001.nc" was written to VMC-1.']);
+    expect(sql(/INSERT INTO notifications/).params).toEqual([5, 2, 'INFO', 'Program on VMC-1', '"O1001.nc" was written to VMC-1.',
+      '/programs?machine_id=7&file_id=42']);
   });
 
   test('FAILED: the reason is kept, and the uploader is warned', async () => {
@@ -245,7 +247,7 @@ describe('the gateway reports what happened', () => {
     await svc.deviceReport(device, { file_id: 42, status: 'FAILED', message: '  CNC memory full  ' });
     expect(sql(/UPDATE program_files SET delivery_status/).params).toEqual([42, 7, 'FAILED', 'CNC memory full']);
     expect(sql(/INSERT INTO notifications/).params.slice(2)).toEqual(['WARNING', 'Program not accepted — VMC-1',
-      'VMC-1 could not use "O1001.nc": CNC memory full']);
+      'VMC-1 could not use "O1001.nc": CNC memory full', '/programs?machine_id=7&file_id=42']);
   });
 
   test('the same report again (a retry) changes nothing and tells no one twice', async () => {
@@ -275,7 +277,7 @@ describe('the gateway reports what happened', () => {
       .resolves.toEqual({ backup_request_id: 9, status: 'FAILED' });
     expect(sql(/UPDATE program_backup_requests SET closed_at = NOW\(\), error_message = \$3/).params).toEqual([9, 7, 'CNC not reachable']);
     expect(sql(/INSERT INTO notifications/).params.slice(2)).toEqual(['WARNING', 'Backup failed — VMC-1',
-      'VMC-1 could not send a backup: CNC not reachable']);
+      'VMC-1 could not send a backup: CNC not reachable', '/programs?machine_id=7']);
   });
 
   test('a backup request already closed: unchanged; another machine\'s: not found', async () => {

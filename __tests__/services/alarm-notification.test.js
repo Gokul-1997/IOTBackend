@@ -60,7 +60,7 @@ describe('durable critical-only delivery', () => {
     mockAnnounce.mockImplementation(async () => { expect(calls().at(-1)).toBe('COMMIT'); expect(mockClient.release).toHaveBeenCalled(); });
     expect(await service.processDueAlarms()).toMatchObject({ checked: 1, delivered: 1, recipients: 1 });
     const [sql, params] = mockClient.query.mock.calls.find(([sql]) => /INSERT INTO notifications/.test(sql));
-    expect(sql).toMatch(/ON CONFLICT\(alarm_id,user_id,alarm_priority\)/); expect(params.slice(3)).toEqual(['91', 'critical', [12], ['/alarms']]);
+    expect(sql).toMatch(/ON CONFLICT\(alarm_id,user_id,alarm_priority\)/); expect(params.slice(3)).toEqual(['91', 'critical', [12], ['/alarms?alarm_id=91']]);
     expect(params[2]).toContain("Controller's alarm"); expect(params[2]).not.toContain('Still active after');
     const eventSql = calls().find(sql => /FROM alarm_notification_events e JOIN/.test(sql));
     expect(eventSql).not.toMatch(/a.ended_at IS NULL/); expect(eventSql).toMatch(/INTERVAL '120 seconds'/);

@@ -1,3 +1,4 @@
+const { alarmLink } = require('../notifications/links');
 const db = require('../db');
 const notifications = require('../notifications/notification.service');
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -87,7 +88,9 @@ exports.processDueAlarms = async ({ batchSize = 100 } = {}) => {
         SELECT $1,recipient.user_id,'ALARM',$2,$3,recipient.link,$4,$5
         FROM unnest($6::int[],$7::text[]) AS recipient(user_id,link)
         ON CONFLICT(alarm_id,user_id,alarm_priority) WHERE alarm_id IS NOT NULL DO NOTHING RETURNING user_id`,
-      [alarm.company_id, title, message, alarm.alarm_id || alarm.id, alarm.severity_class, users.map(user => user.id), users.map(user => user.link)]);
+      [alarm.company_id, title, message, alarm.alarm_id || alarm.id, alarm.severity_class, users.map(user => user.id),
+        // each person's alarm page, opened on this alarm (notifications/links.js)
+        users.map(user => alarmLink(user.link, { alarmId: alarm.alarm_id || alarm.id, machineId: alarm.machine_id }))]);
       await client.query(`UPDATE machine_alarms SET notification_sent_at=NOW(),
         notification_delivered_priorities=array_append(notification_delivered_priorities,$2) WHERE id=$1
         AND NOT ($2=ANY(notification_delivered_priorities))`, [alarm.alarm_id || alarm.id, alarm.severity_class]);
