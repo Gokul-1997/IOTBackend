@@ -131,8 +131,9 @@ describe('auth.service.login', () => {
 
 
 /*
- * Self-service profile: the route a non-admin uses to see and change their
- * own account. Before this existed, GET/PUT /api/users/:id required
+ * Own profile: any authenticated user can view their account and change
+ * their password, while profile details are administrator-managed.
+ * Before this existed, GET/PUT /api/users/:id required
  * ADMIN-tier role, so a MANAGER/SUPERVISOR/OPERATOR had no way to view their
  * own profile or change their own password.
  */
@@ -156,33 +157,21 @@ describe('getMyProfile', () => {
 });
 
 describe('updateMyProfile', () => {
-  test('rejects a malformed email before it reaches the database', async () => {
-    await expect(auth.updateMyProfile(12, { email: 'not-an-email' }))
-      .rejects.toMatchObject({ status: 400 });
-    expect(mockDb.calls()).toHaveLength(0);
-  });
-
-  test('rejects an update with nothing to change', async () => {
-    await expect(auth.updateMyProfile(12, {})).rejects.toMatchObject({ status: 400 });
-  });
-
-  test('updates email and mobile together', async () => {
-    mockDb.queueResponse({ rows: [{ id: 12, username: 'suresh', email: 'new@x.com', mobile: '9999999999' }] });
-    const out = await auth.updateMyProfile(12, { email: 'new@x.com', mobile: '9999999999' });
-    expect(out.email).toBe('new@x.com');
-    const { text: sql, params } = mockDb.calls()[0];
-    expect(sql).toMatch(/UPDATE users SET email = \$1, mobile = \$2/);
-    expect(params).toEqual(['new@x.com', '9999999999', 12]);
-  });
-
-  test('a duplicate email reports 409, not a raw database error', async () => {
-    // queueError only throws instanceof Error — a plain object would be
-    // returned as if it were a successful { code, message } row.
-    const dup = new Error('duplicate key');
-    dup.code = '23505';
-    mockDb.queueError(dup);
-    await expect(auth.updateMyProfile(12, { email: 'taken@x.com' }))
-      .rejects.toMatchObject({ status: 409 });
+  test.each([
+    ['email and mobile changes', { email: 'new@x.com', mobile: '9999999999' }],
+    ['clearing mobile', { mobile: null }],
+    ['a malformed email', { email: 'not-an-email' }],
+    ['administrator-controlled fields', { username: 'new_name', company_id: 9, role_ids: [1] }],
+    ['an empty update', {}],
+    ['a missing update', undefined],
+    ['a null update', null]
+  ])('rejects %s without database access', async (_label, body) => {
+    await expect(auth.updateMyProfile(12, body)).rejects.toEqual({
+      status: 403,
+      message: 'To update your profile details, contact your Company Admin or Super Admin.'
+    });
+    expect(mockDb.query).not.toHaveBeenCalled();
+    expect(mockDb.connect).not.toHaveBeenCalled();
   });
 });
 

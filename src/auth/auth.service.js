@@ -423,7 +423,7 @@ exports.logout = async (refreshToken) => {
    SELF-SERVICE PROFILE
 
    Everything above this line answers "who am I logging in as"; this answers
-   "what can I see and change about my own account once I am". Before this,
+   "what can I see about my own account once I am". Before this,
    GET/PUT /api/users/:id required ADMIN-tier role — a MANAGER, SUPERVISOR or
    OPERATOR had no route to their own profile or their own password at all.
 ───────────────────────────────────────────────────────── */
@@ -443,39 +443,13 @@ exports.getMyProfile = async (userId) => {
   return rows[0];
 };
 
-/** Email and mobile only — username, role and company are admin-controlled
- *  elsewhere, and letting a user grant themselves a different role through
- *  their own profile form would be a privilege-escalation hole. */
-exports.updateMyProfile = async (userId, { email, mobile }) => {
-  const fields = [];
-  const params = [];
-  let i = 1;
-
-  if (email !== undefined) {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      throw { status: 400, message: 'Enter a valid email address' };
-    }
-    fields.push(`email = $${i++}`); params.push(email);
-  }
-  if (mobile !== undefined) {
-    fields.push(`mobile = $${i++}`); params.push(mobile || null);
-  }
-  if (!fields.length) throw { status: 400, message: 'Nothing to update' };
-
-  params.push(userId);
-  try {
-    const { rows } = await db.query(
-      `UPDATE users SET ${fields.join(', ')}, updated_at = NOW()
-        WHERE id = $${i} RETURNING id, username, email, mobile`,
-      params
-    );
-    if (!rows.length) throw { status: 404, message: 'User not found' };
-    return rows[0];
-  } catch (e) {
-    // unique_violation on email
-    if (e.code === '23505') throw { status: 409, message: 'That email is already in use' };
-    throw e;
-  }
+/** Profile details are administrator-managed. Keep rejecting legacy clients
+ *  at the service boundary without reading or writing account data. */
+exports.updateMyProfile = async () => {
+  throw {
+    status: 403,
+    message: 'To update your profile details, contact your Company Admin or Super Admin.'
+  };
 };
 
 /** Requires the current password — unlike admin-driven resets, a user

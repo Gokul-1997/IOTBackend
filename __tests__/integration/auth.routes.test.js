@@ -38,6 +38,9 @@
  *    TC-AR-52  400 when password shorter than 8 chars
  *    TC-AR-53  200 on successful reset
  *    TC-AR-54  400 when token invalid/expired
+ *
+ *  PATCH /api/auth/me
+ *    Authentication remains required; profile changes are refused for all roles.
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
@@ -253,6 +256,44 @@ describe('POST /api/auth/login', () => {
     expect(res.status).toBe(503); expect(res.body.code).toBe('AUTH_UNAVAILABLE');
     expect(res.body.message).not.toMatch(/relation|users does not exist/);
   });
+});
+
+describe('PATCH /api/auth/me', () => {
+  test('requires authentication before handling a profile change', async () => {
+    const res = await request(makeApp())
+      .patch('/api/auth/me')
+      .send({ email: 'new@x.com' });
+
+    expect(res.status).toBe(401);
+    expect(mockDb.query).not.toHaveBeenCalled();
+  });
+
+  test.each(['OPERATOR', 'COMPANY_ADMIN', 'SNT_SUPER'])(
+    'rejects self-service changes for %s after checking the session', async role => {
+      const app = makeApp();
+      const isSuper = role === 'SNT_SUPER';
+      require('jsonwebtoken').verify.mockReturnValue({ user_id: 12, roles: [role] });
+      mockDb.queueResponse({ rows: [{
+        id: 12, username: 'suresh', is_active: true,
+        company_id: isSuper ? null : 4, plant_id: isSuper ? null : 1
+      }] });
+
+      const res = await request(app)
+        .patch('/api/auth/me')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ email: 'new@x.com', mobile: '9999999999' });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({
+        success: false,
+        message: 'To update your profile details, contact your Company Admin or Super Admin.'
+      });
+      // The existing authentication check is the only database operation.
+      expect(mockDb.calls()).toHaveLength(1);
+      expect(mockDb.calls()[0].params).toEqual([12]);
+      expect(mockDb.connect).not.toHaveBeenCalled();
+    }
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
