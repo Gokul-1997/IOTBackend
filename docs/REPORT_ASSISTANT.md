@@ -15,7 +15,16 @@ details, with the figures from the same server code as the screens.
    `ASSISTANT_NAME`, default `STM Mexa AI`). Restart the API.
 3. Deploy the web app. The launcher appears for report users.
 
-Without the key, nothing shows: the status call says `NOT_CONFIGURED`.
+Without the key, the chat says it is not switched on yet (status
+`NOT_CONFIGURED`).
+
+**Check it on the server:** `node scripts/assistant-check.js` prints the Node
+version, whether a key is set (first characters only), the model, and the
+answer to one tiny question — or Anthropic's exact reason for refusing it,
+with what to do. A key not scoped to a workspace needs
+`ANTHROPIC_WORKSPACE_ID=wrkspc_…` as well (or make the key inside a
+workspace). Any failure is also in the API log as `[assistant] model call
+failed`, with the provider's reason.
 
 ## What it can and cannot see
 
