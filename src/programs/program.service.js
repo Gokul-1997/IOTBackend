@@ -365,7 +365,7 @@ exports.deviceReport = async (device, body = {}) => {
   if (status === 'FAILED' && !message) throw fail('Say what went wrong in "message".', 'NO_MESSAGE');
 
   if (body.file_id != null) {
-    const id = idOf(body.file_id, 'No such program for this machine.', 'FILE_NOT_FOUND');
+    const id = idOf(body.file_id, 'file_id must be a number: the program.file_id from GET /status (or the X-File-Id header).', 'FILE_NOT_FOUND');
     const { rows: [file] } = await pool.query(
       `UPDATE program_files SET delivery_status = $3, delivery_message = $4, delivered_at = NOW()
         WHERE id = $1 AND machine_id = $2 AND kind = 'NEW' AND deleted_at IS NULL
@@ -377,7 +377,7 @@ exports.deviceReport = async (device, body = {}) => {
       const known = await pool.query(
         `SELECT id FROM program_files WHERE id = $1 AND machine_id = $2 AND kind = 'NEW' AND deleted_at IS NULL`, [id, machine.id]
       );
-      if (!known.rows.length) throw fail('No such program for this machine.', 'FILE_NOT_FOUND', 404);
+      if (!known.rows.length) throw fail(await notThisMachines(machine, id), 'FILE_NOT_FOUND', 404);
       return { file_id: id, status, unchanged: true };
     }
     if (file.uploaded_by) {
@@ -415,6 +415,17 @@ exports.deviceReport = async (device, body = {}) => {
 
   throw fail('Send file_id (a program) or backup_request_id (a backup request).', 'NOTHING_TO_REPORT');
 };
+
+/**
+ * Why a reported file_id is not this machine's upload, and which one is —
+ * the usual slip is an example id (42) or another machine's token.
+ */
+async function notThisMachines(machine, id) {
+  const current = await currentProgram(machine.id);
+  return current
+    ? `No upload ${id} on ${machine.machine_serial_no} (this token's machine). Its program now is file_id ${current.id} (${current.program_name}): take file_id from GET /status.`
+    : `No upload ${id} on ${machine.machine_serial_no} (this token's machine), and nothing has been uploaded for it yet. Upload a program for ${machine.machine_serial_no} on the Program Transfer page.`;
+}
 
 /** Respects Settings → Program transfer notifications, like transfers always did. */
 /** The link opens Program Transfer on this machine, the file marked (notifications/links.js). */

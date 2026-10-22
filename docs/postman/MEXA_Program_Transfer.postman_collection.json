@@ -501,7 +501,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"FILE_NOT_FOUND\",\n  \"message\": \"No such program for this machine.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"FILE_NOT_FOUND\",\n  \"message\": \"No upload 42 on VMC-1 (this token's machine). Its program now is file_id 57 (O1001.nc): take file_id from GET /status.\"\n}"
             }
           ]
         },
