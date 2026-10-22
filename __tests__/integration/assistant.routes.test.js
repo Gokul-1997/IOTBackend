@@ -119,3 +119,50 @@ test('the model is Haiku unless the server says otherwise — the lowest cost', 
   expect(readConfig().model).toBe('claude-sonnet-5-5');
   delete process.env.ASSISTANT_MODEL;
 });
+
+describe('the HTTPS call itself, without global fetch', () => {
+  const http = require('node:http');
+  const { post } = require('../../src/assistant/assistant.model');
+  let server, url, seen;
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        seen = { headers: req.headers, body };
+        if (req.url === '/slow') return;                                  // never answers
+        res.writeHead(req.url === '/refused' ? 401 : 200, { 'content-type': 'application/json' });
+        res.end(req.url === '/refused' ? '{"error":{"type":"authentication_error","message":"invalid x-api-key"}}' : '{"content":[{"type":"text","text":"OK"}]}');
+      });
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterAll(() => new Promise(r => server.close(r)));
+
+  test('posts the body with its length and headers, and reads the answer', async () => {
+    const res = await post(`${url}/ok`, { headers: { 'x-api-key': 'k' }, body: '{"a":"é"}' });
+    expect(res.ok).toBe(true);
+    expect(await res.json()).toEqual({ content: [{ type: 'text', text: 'OK' }] });
+    expect(seen.headers['content-length']).toBe(String(Buffer.byteLength('{"a":"é"}')));
+    expect(seen.headers['x-api-key']).toBe('k');
+  });
+
+  test('a refusal is kept for the server log, with the provider\'s reason', async () => {
+    const cfg = { apiKey: 'bad', apiUrl: `${url}/refused`, model: 'm', maxTokens: 8, timeoutMs: 2000 };
+    await expect(callModel({ config: cfg, system: [], tools: [], toolChoice: { type: 'any' }, messages: [] }))
+      .rejects.toMatchObject({ status: 503, code: 'ASSISTANT_UNAVAILABLE', detail: '401 authentication_error: invalid x-api-key' });
+  });
+
+  test('no answer in time is a timeout, not a hang', async () => {
+    const cfg = { apiKey: 'k', apiUrl: `${url}/slow`, model: 'm', maxTokens: 8, timeoutMs: 50 };
+    await expect(callModel({ config: cfg, system: [], tools: [], toolChoice: { type: 'any' }, messages: [] }))
+      .rejects.toMatchObject({ status: 503, code: 'ASSISTANT_TIMEOUT' });
+  });
+});
+
+test('a key not scoped to a workspace sends the workspace the server names', () => {
+  const { headersFor } = require('../../src/assistant/assistant.model');
+  expect(headersFor({ apiKey: 'k' })).toEqual({ 'content-type': 'application/json', 'x-api-key': 'k', 'anthropic-version': '2023-06-01' });
+  expect(headersFor({ apiKey: 'k', workspaceId: 'wrkspc_01ABC' })['anthropic-workspace-id']).toBe('wrkspc_01ABC');
+});

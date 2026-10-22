@@ -2,7 +2,9 @@
  * The report assistant's settings, read from the server's environment each
  * time (a changed key or model applies without code changes).
  *
- *   ANTHROPIC_API_KEY         required; without it the assistant stays hidden
+ *   ANTHROPIC_API_KEY         required; without it the assistant says it is not on yet
+ *   ANTHROPIC_WORKSPACE_ID    only for a key not scoped to a workspace (Anthropic
+ *                             then asks which workspace to bill: wrkspc_…)
  *   ASSISTANT_NAME            what people see it called (default "STM Mexa AI")
  *   ASSISTANT_MODEL           default claude-haiku-5-5 — the lowest cost (22 Oct 2026,
  *                             the user: "Haiku, very low cost"); claude-sonnet-5-5 or
@@ -21,6 +23,7 @@ const positive = (raw, fallback, max) => {
 module.exports = () => ({
   name: String(process.env.ASSISTANT_NAME || '').trim().slice(0, 40) || 'STM Mexa AI',
   apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(),
+  workspaceId: String(process.env.ANTHROPIC_WORKSPACE_ID || '').trim(),
   apiUrl: 'https://api.anthropic.com/v1/messages',
   model: String(process.env.ASSISTANT_MODEL || '').trim() || 'claude-haiku-5-5',
   maxTokens: positive(process.env.ASSISTANT_MAX_TOKENS, 1024, 4096),
