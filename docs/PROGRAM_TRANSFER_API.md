@@ -1,76 +1,108 @@
 # Program Transfer — gateway API
 
-Four HTTPS calls between the gateway at a machine (a Node-RED PC, a laptop,
-any program) and the MEXA server:
+Four HTTPS calls between the company's gateway (a Node-RED PC, a laptop,
+any program on the factory network) and the MEXA server. **One token for
+all the company's machines, and one status call for all of them.**
 
 | Call | What it does |
 | --- | --- |
-| `GET  /api/device/v1/status`  | Ask: is there a new program? Has someone asked for a backup? |
-| `GET  /api/device/v1/program` | Download the machine's program |
-| `POST /api/device/v1/backup`  | Upload a backup file from the machine |
-| `POST /api/device/v1/report`  | Say what happened: program written, machine refused it, backup could not be read |
+| `GET  /api/device/v1/status` | Every machine at once: is a program waiting for it? Did someone ask for a backup? |
+| `GET  /api/device/v1/program?machine=NAME` | Download the program waiting for that machine |
+| `POST /api/device/v1/backup` | Upload a backup file from a machine (form fields `machine`, `file`) |
+| `POST /api/device/v1/report` | Say what happened: program written, machine refused it, backup could not be read |
 
-That is all. How the gateway talks to the CNC (FTP, FOCAS, a shared folder,
+That is all. How the gateway talks to a CNC (FTP, FOCAS, a shared folder,
 anything) is up to the gateway; the server never connects to a machine.
 
 **Postman:** `docs/postman/MEXA_Program_Transfer.postman_collection.json`
-has every call with example answers and errors. Import it, set `baseUrl`
-and `token`, and run the folder *Gateway — the 4 calls* top to bottom.
+has every call with example answers and errors. Import it, set `baseUrl`,
+`token` and `machine`, and run the folder *Gateway — the 4 calls* top to
+bottom.
 
 ## The gateway's loop
 
 ```
-every 15 s:  GET /status
-  program.status == WAITING and its sha256 is new
-      → GET /program → write it to the CNC
+every 15 s:  GET /status                                ← ONE call for every machine
+  for each machine in machines:
+    program is not null
+      → GET /program?machine=NAME  → write it to the CNC (machine_ip)
       → POST /report {file_id, status: DONE}
         or POST /report {file_id, status: FAILED, message: "why"}
-  backup_request is not null
+        the answer's next_program: the next one for this machine (or null)
+    backup_request is not null
       → read the program from the CNC
-      → POST /backup (the file)
+      → POST /backup (machine=NAME, file)
         or POST /report {backup_request_id, status: FAILED, message: "why"}
 ```
 
+Twenty machines cost one call every 15 seconds, not twenty. Programs and
+backups add calls only when there is something to move.
+
+## Programs wait in line, per machine
+
+Two programs uploaded for the same machine are sent **one after the other**,
+oldest first. `/status` shows the one in front (`program`) and how many wait
+(`programs_waiting`). When you report it — `DONE` or `FAILED` — the next one
+takes its place, and the report's answer already names it (`next_program`),
+so it can follow at once. A program you do not report stays in front: if the
+CNC cannot be reached now, do not report anything; it is offered again on
+the next `/status`.
+
+Different machines do not wait for each other.
+
 ## A ready-made gateway
 
-`mexa-gateway.js` does the loop above with a folder as the machine — a new
-program is written into `PROGRAM_DIR` (the folder the CNC reads: its network
-share, a DNC folder); **Backup now** sends the newest file in it. Node.js 20,
-nothing to install. Download it from **Program Transfer → Gateway token →
-Ready-made gateway** (or Backend `tools/gateway/`).
+`mexa-gateway.js` does the loop above for all the company's machines, with a
+folder as each machine: a new program for `VMC-01` is written into
+`PROGRAM_DIR/VMC-01/` (or the folder `MACHINE_DIRS` gives for it — the CNC's
+network share, a DNC folder); **Backup now** sends the newest file in it.
+Node.js 20, nothing to install. S&T hands it out with the token (Company
+Management → Gateway → Ready-made gateway), or Backend `tools/gateway/`.
 
 ```bash
-MEXA_URL=https://SERVER MEXA_TOKEN=mxd_... PROGRAM_DIR=/path/to/machine/folder node mexa-gateway.js
+MEXA_URL=https://SERVER MEXA_TOKEN=mxg_... PROGRAM_DIR=/path/to/machines node mexa-gateway.js
 ```
 
 ```powershell
-$env:MEXA_URL="https://SERVER"; $env:MEXA_TOKEN="mxd_..."; $env:PROGRAM_DIR="C:\CNC\VMC-1"; node mexa-gateway.js
+$env:MEXA_URL="https://SERVER"; $env:MEXA_TOKEN="mxg_..."; $env:PROGRAM_DIR="C:\CNC"; node mexa-gateway.js
 ```
 
-To try the whole flow on a laptop: make the token, start the gateway with
-any folder, upload an `.nc` file on the page — within 15 s it is in the
-folder and the page shows **On the machine since …**. For a controller
-reached another way (FTP, FOCAS), replace the two functions marked MACHINE
-in the file: `writeToMachine` and `readFromMachine`.
+Only some machines on this PC: `MACHINE_DIRS='{"VMC-01":"\\\\cnc01\\programs","VMC-02":"D:\\DNC\\VMC-02"}'`
+— then only those are served here, and another gateway can serve the rest.
+For a controller reached another way (FTP, FOCAS), replace the two functions
+marked MACHINE in the file, `writeToMachine` and `readFromMachine`; they are
+given the machine's name and IP.
 
 ## The token
 
-Each machine has its own token. In MEXA: **Program Transfer → choose the
-machine → Gateway token → Create token**. It looks like `mxd_` followed by 43
-characters and is shown once; keep it in the gateway's settings for that
-machine. A gateway serving five machines keeps five tokens.
+One token per company, for all its machines. **S&T makes it** (S&T Super
+Admin → Company Management → the company → **Gateway** → Make token) and
+gives it to the gateway team. It looks like `mxg_` followed by 43 characters
+and is shown once.
 
 Send it on every call:
 
 ```http
-Authorization: Bearer mxd_...
+Authorization: Bearer mxg_...
 ```
 
-The token says which machine the call is about, so a call never names a
-machine and cannot reach another one. **Replace token** stops the old one at
-once; **Revoke** stops it with no replacement.
+The token says which company the call is about; a call can only ever reach
+that company's machines. **Replace token** stops the old one at once; **Stop
+token** stops it with no replacement. Machine tokens from before 22 Oct 2026
+(`mxd_…`) no longer work (`TOKEN_REPLACED`).
 
 Use HTTPS and keep certificate checks on.
+
+## Naming a machine
+
+A call about one machine names it with `machine` — its name in MEXA exactly
+as `/status` lists it (upper or lower case does not matter) — or with
+`machine_ip`, or both:
+
+- `machine` alone is enough when the name is unique in the company.
+- `machine_ip` alone works when MEXA knows the machine's IP (from its
+  telemetry); `/status` shows it, or `null` when not known yet.
+- Two machines with the same name: send both (`409 MACHINE_AMBIGUOUS` says so).
 
 ## 1. GET /status — call it every `poll_seconds` (15 s)
 
@@ -80,48 +112,61 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
 
 ```json
 {
-  "machine": { "id": 15, "serial": "VMC-15" },
-  "program": {
-    "file_id": 42,
-    "program_name": "O1001.nc",
-    "size_bytes": 1472,
-    "sha256": "9f2c…64 hex characters…",
-    "uploaded_at": "2026-10-21T08:00:00.000Z",
-    "status": "WAITING",
-    "message": null
-  },
-  "backup_request": { "id": 9, "requested_at": "2026-10-21T08:05:00.000Z" },
+  "company": "Acme Gears",
+  "machines": [
+    {
+      "machine": "VMC-01",
+      "machine_ip": "192.168.1.10",
+      "program": {
+        "file_id": 42,
+        "program_name": "O1001.nc",
+        "size_bytes": 1472,
+        "sha256": "9f2c…64 hex characters…",
+        "uploaded_at": "2026-10-22T08:00:00.000Z"
+      },
+      "programs_waiting": 2,
+      "backup_request": null
+    },
+    {
+      "machine": "VMC-02",
+      "machine_ip": null,
+      "program": null,
+      "programs_waiting": 0,
+      "backup_request": { "id": 9, "requested_at": "2026-10-22T08:05:00.000Z" }
+    }
+  ],
   "poll_seconds": 15
 }
 ```
 
-- `program` is the machine's program: the newest file someone uploaded for
-  it. `null` until the first upload. When its `sha256` differs from the one
-  you last wrote to the CNC and `status` is `WAITING`, download it (call 2).
-  `DONE` / `FAILED` mean you already reported this file (call 4): do not try
-  it again. A corrected upload comes with a new `file_id` and `sha256`.
-- `backup_request` is not `null` when someone pressed **Backup** on the page.
-  Read the program from the CNC and upload it (call 3). A request nobody
-  answers within 30 minutes lapses.
+- `machines` lists every machine of the company that is switched on in MEXA.
+- `program` is the program in front of the machine's line (`null`: nothing
+  waiting). Download it (call 2), write it, report it (call 4).
+- `programs_waiting` counts it and the ones behind it.
+- `backup_request` is not `null` when someone pressed **Backup now**. Read the
+  program from the CNC and upload it (call 3). A request nobody answers within
+  30 minutes lapses.
 
-## 2. GET /program — download the program
+## 2. GET /program?machine=NAME — download the program
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" -o program.nc https://SERVER/api/device/v1/program
+curl -H "Authorization: Bearer $TOKEN" -o program.nc "https://SERVER/api/device/v1/program?machine=VMC-01"
 ```
 
-The body is the file itself. The headers say what it is:
+`?machine_ip=192.168.1.10` works too. URL-encode a name with spaces
+(`VMC%2001`). The body is the file itself. The headers say what it is:
 
 | Header | Example |
 | --- | --- |
+| `X-File-Id` | `42` — report this one (call 4) |
 | `X-Program-Name` | `O1001.nc` (URL-encoded) |
-| `X-File-Id` | `42` |
+| `X-Machine` | `VMC-01` (URL-encoded) |
 | `X-Sha256` | the file's SHA-256 — check it before writing to the CNC |
 | `Content-Length` | `1472` |
 
-`404` with code `NO_PROGRAM` means nothing has been uploaded for this machine.
-The same program can be downloaded as often as needed. After writing it to
-the CNC, report the result (call 4).
+`404 NO_PROGRAM` means nothing is waiting for that machine (someone deleted
+it on the page after your `/status`). The same program can be downloaded as
+often as needed until it is reported.
 
 ## 3. POST /backup — upload a backup
 
@@ -129,27 +174,30 @@ Multipart form data:
 
 | Field | |
 | --- | --- |
-| `file` | the program file read from the CNC (required) |
+| `machine` | the machine's name (or send `machine_ip`) — required |
+| `file` | the program file read from the CNC — required |
 | `program_name` | its name on the CNC, e.g. `O1001.nc` (optional; else the file's name) |
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-     -F "program_name=O1001.nc" -F "file=@O1001.nc" \
+     -F "machine=VMC-02" -F "program_name=O1001.nc" -F "file=@O1001.nc" \
      https://SERVER/api/device/v1/backup
 ```
 
 ```json
 {
+  "machine": "VMC-02",
   "file": { "file_id": 43, "program_name": "O1001.nc", "size_bytes": 1472,
-            "sha256": "…", "uploaded_at": "2026-10-21T08:06:10.000Z" },
+            "sha256": "…", "uploaded_at": "2026-10-22T08:06:10.000Z" },
   "answered_request": 9
 }
 ```
 
 The backup is saved on the server and listed on the Program Transfer page.
-It answers an open backup request (the person who asked is notified). A
-backup can also be sent without a request — after a change on the machine,
-or every night. If the CNC cannot be read, report it instead (call 4).
+It answers the machine's open backup request (the person who asked is
+notified). A backup can also be sent without a request — after a change on
+the machine, or every night. If the CNC cannot be read, report it instead
+(call 4).
 
 ## 4. POST /report — say what happened
 
@@ -161,21 +209,37 @@ JSON. One of three:
 { "backup_request_id": 9, "status": "FAILED", "message": "CNC not reachable" }
 ```
 
+`file_id` and `backup_request_id` already say which machine. You may add
+`"machine": "VMC-01"` as a check: a report about another machine's program
+is then refused (`MACHINE_MISMATCH`) instead of recorded.
+
+The answer to a program report names the machine's next program:
+
+```json
+{ "file_id": 42, "machine": "VMC-01", "status": "DONE",
+  "next_program": { "file_id": 44, "program_name": "O1002.nc", "size_bytes": 980,
+                    "sha256": "…", "uploaded_at": "2026-10-22T08:01:00.000Z" } }
+```
+
+`next_program` is `null` when nothing else waits for that machine.
+
 | Report | What the page shows | Who is notified |
 | --- | --- | --- |
 | program `DONE` | ✅ On the machine since 10:42 | the person who uploaded it |
-| program `FAILED` | ❌ The machine could not use it: *message* | the person who uploaded it |
+| program `FAILED` | ❌ Refused by machine: *message* | the person who uploaded it |
 | backup `FAILED` | ❌ Backup failed: *message*, and Backup now works again | the person who asked |
 
 - `message` is required with `FAILED` (up to 500 characters) — write it for
   the person at the page: "Program O1001 is running", "CNC memory full".
-- `file_id` is the program from `/status` or the `X-File-Id` header.
+- `DONE` and `FAILED` both take the program out of the line; a corrected
+  program is uploaded again and waits at the end.
+- `file_id` is the program's `file_id` from `/status` or the `X-File-Id`
+  header.
 - A backup that worked needs no report: uploading it (call 3) answers the
   request, so `status: DONE` with `backup_request_id` is refused — and so is
-  a report with the backup's own `file_id` (`BACKUP_NEEDS_NO_REPORT`). Report a
-  `file_id` only for the program from `/status` (or the `X-File-Id` header).
+  a report with the backup's own `file_id` (`BACKUP_NEEDS_NO_REPORT`).
 - The same report sent again (a retry after a lost answer) changes nothing
-  and notifies no one twice: `{"file_id": 42, "status": "DONE", "unchanged": true}`.
+  and notifies no one twice: the answer then has `"unchanged": true`.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -195,12 +259,18 @@ Every error is JSON: `{"status":"error","code":"…","message":"…"}`.
 
 | Status | Code | Meaning |
 | --- | --- | --- |
-| 401 | `TOKEN_MISSING` / `TOKEN_INVALID` | No token, a wrong one, or a revoked one |
-| 403 | `MACHINE_INACTIVE` / `COMPANY_DISABLED` | The machine or company is switched off in MEXA |
-| 404 | `NO_PROGRAM` | No program uploaded for this machine yet |
-| 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report about a file or request that is not this machine's |
+| 401 | `TOKEN_MISSING` / `TOKEN_INVALID` | No token, a wrong one, or one S&T replaced or stopped |
+| 401 | `TOKEN_REPLACED` | A machine token (`mxd_…`) from before 22 Oct 2026: ask S&T for the company's `mxg_` token |
+| 403 | `COMPANY_DISABLED` | The company is switched off in MEXA |
+| 403 | `MACHINE_INACTIVE` | The machine named is switched off in MEXA |
+| 400 | `MACHINE_REQUIRED` | Send `machine` (or `machine_ip`) |
+| 404 | `MACHINE_NOT_FOUND` | No such machine in the company: use the names and IPs `/status` lists |
+| 409 | `MACHINE_AMBIGUOUS` | Two machines share that name (or IP): send both `machine` and `machine_ip` |
+| 404 | `NO_PROGRAM` | Nothing is waiting for that machine |
+| 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report: no such program / backup request in the company |
+| 400 | `MACHINE_MISMATCH` | Report: the `machine` sent is not the program's (or request's) machine |
 | 400 | `BAD_STATUS` / `NO_MESSAGE` / `NOTHING_TO_REPORT` | Report: status must be DONE or FAILED; FAILED needs a message; send file_id or backup_request_id |
-| 400 | `BACKUP_NEEDS_NO_REPORT` | Report: that file_id is a backup the gateway sent — a backup needs no report (the 201 from POST /backup finished it) |
+| 400 | `BACKUP_NEEDS_NO_REPORT` | Report: that file_id is a backup the gateway sent — a backup needs no report |
 | 400 | `NO_FILE` / `BAD_UPLOAD` | Send the file as multipart field `file` |
 | 400 | `BAD_NAME` / `BAD_TYPE` / `NOT_TEXT` / `EMPTY` | Not a usable program name or text file |
 | 413 | `TOO_LARGE` | Over the size limit |

@@ -1,12 +1,12 @@
 /**
- * /api/programs — Program Transfer for people. The machine's gateway uses
- * /api/device/v1 (device.routes.js) with the machine's own token instead.
+ * /api/programs — Program Transfer for people. The company's gateway uses
+ * /api/device/v1 (device.routes.js) with the company's token instead; S&T
+ * makes that token (companies/company.routes.js → /:id/program-gateway), so
+ * nothing here makes or shows one.
  *
  * Permissions (page:programs:*): view — machines, files, downloads;
- * upload + transfer — upload a program (it goes to the machine);
+ * upload + transfer — upload a program (it joins the machine's line);
  * fetch — ask the machine for a backup; delete — remove a file.
- * A gateway token is a machine credential, so it takes Machines → Edit,
- * like the machine's MQTT key.
  */
 const express = require('express');
 const router = express.Router();
@@ -22,9 +22,11 @@ const ok = (res, data, status = 200) => res.status(status).json({ status: 'succe
 
 router.use(auth, access('page:programs:view'));
 
+/* The machines, and beside them the company's gateway: online or not (one for all machines). */
 router.get('/machines', handle(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  ok(res, await service.listMachines(req));
+  const { machines, gateway } = await service.listMachines(req);
+  res.json({ status: 'success', data: machines, gateway });
 }));
 
 router.get('/files', handle(async (req, res) => {
@@ -47,16 +49,6 @@ router.delete('/files/:id', access('page:programs:delete'), handle(async (req, r
 router.post('/machines/:machineId/backup', access('page:programs:fetch'), handle(async (req, res) => {
   const request = await service.requestBackup(req);
   ok(res, request, request.created ? 201 : 200);
-}));
-
-router.post('/machines/:machineId/device-token', access('page:machines:edit'), handle(async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  ok(res, await service.createDeviceToken(req), 201);
-}));
-
-router.delete('/machines/:machineId/device-token', access('page:machines:edit'), handle(async (req, res) => {
-  await service.revokeDeviceToken(req);
-  ok(res, { revoked: true });
 }));
 
 module.exports = router;

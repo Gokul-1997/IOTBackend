@@ -1,5 +1,7 @@
 /*
- * The device token check in front of /api/device/v1.
+ * The gateway token check in front of /api/device/v1: one token per company
+ * ("mxg_…", made by S&T) since 22 Oct 2026; machine tokens ("mxd_…") are
+ * turned away with a sentence saying what replaced them.
  */
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 
@@ -18,9 +20,8 @@ function run(headers = {}, rows = []) {
 }
 
 const row = (o = {}) => ({
-  id: 3, company_id: 5, machine_id: 7, last_seen_at: new Date().toISOString(), last_seen_ip: '203.0.113.9',
-  agent_version: '1.0.0', machine_serial_no: 'VMC-1', ip_address: '192.168.200.3', machine_active: true,
-  machine_company_id: 5, company_active: true, ...o
+  id: 3, company_id: 5, last_seen_at: new Date().toISOString(), last_seen_ip: '203.0.113.9',
+  agent_version: '1.0.0', company_name: 'Acme Gears', company_active: true, ...o
 });
 
 beforeEach(() => resetDb());
@@ -28,15 +29,17 @@ beforeEach(() => resetDb());
 describe('tokens', () => {
   test('generated tokens have the documented shape and are random', () => {
     const a = deviceToken.generate(), b = deviceToken.generate();
+    expect(a.token).toMatch(/^mxg_[A-Za-z0-9_-]{43}$/);
     expect(a.token).toMatch(deviceToken.SHAPE);
     expect(a.token).not.toBe(b.token);
     expect(a.prefix).toBe(a.token.slice(0, 12));
     expect(a.hash).toMatch(/^[0-9a-f]{64}$/);
   });
-  test('only "Bearer mxd_…" of the right length is read', () => {
+  test('only "Bearer mxg_…" of the right length is read', () => {
     expect(deviceToken.fromRequest({ headers: { authorization: `Bearer ${token}` } })).toBe(token);
     expect(deviceToken.fromRequest({ headers: { authorization: token } })).toBeNull();
     expect(deviceToken.fromRequest({ headers: { authorization: 'Bearer eyJhbGciOi.x.y' } })).toBeNull();   // a user's JWT
+    expect(deviceToken.fromRequest({ headers: { authorization: `Bearer mxd_${'a'.repeat(43)}` } })).toBeNull();   // a machine token
     expect(deviceToken.fromRequest({ headers: {} })).toBeNull();
   });
 });
@@ -51,10 +54,25 @@ describe('device.middleware', () => {
     expect(mockDb.calls()).toHaveLength(0);
   });
 
-  test('a token is looked up by its hash, never by the token itself', async () => {
+  test('a machine token from before 22 Oct is turned away with what to do instead — without asking the database', async () => {
+    resetDb();
+    const req = { headers: { authorization: `Bearer mxd_${'Q'.repeat(43)}` } };
+    const res = { status: jest.fn(function (s) { this.code = s; return this; }), json: jest.fn(function (b) { this.body = b; return this; }) };
+    const next = jest.fn();
+    await deviceAuth(req, res, next);
+    expect(res.code).toBe(401);
+    expect(res.body.code).toBe('TOKEN_REPLACED');
+    expect(res.body.message).toMatch(/one token for all machines/);
+    expect(res.body.message).toMatch(/mxg_/);
+    expect(next).not.toHaveBeenCalled();
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('a token is looked up by its hash among the company gateways, never by the token itself', async () => {
     await run({ authorization: `Bearer ${token}` }, []);
     const q = mockDb.calls()[0];
     expect(q.params).toEqual([deviceToken.hash(token)]);
+    expect(q.text).toMatch(/FROM program_gateways g/);
     expect(q.text).toMatch(/revoked_at IS NULL/);
   });
 
@@ -65,29 +83,23 @@ describe('device.middleware', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  test('a disabled company or a switched-off machine stops the device', async () => {
-    let r = await run({ authorization: `Bearer ${token}` }, [row({ company_active: false })]);
+  test('a disabled company stops its gateway', async () => {
+    const r = await run({ authorization: `Bearer ${token}` }, [row({ company_active: false })]);
     expect([r.res.code, r.res.body.code]).toEqual([403, 'COMPANY_DISABLED']);
-    r = await run({ authorization: `Bearer ${token}` }, [row({ machine_active: false })]);
-    expect([r.res.code, r.res.body.code]).toEqual([403, 'MACHINE_INACTIVE']);
-    r = await run({ authorization: `Bearer ${token}` }, [row({ machine_company_id: 9 })]);
-    expect(r.res.code).toBe(403);
+    expect(r.next).not.toHaveBeenCalled();
   });
 
-  test('accepted: req.device is its one machine; a recent heartbeat is not rewritten', async () => {
+  test('accepted: req.gateway is the company; a recent heartbeat is not rewritten', async () => {
     const { req, next } = await run({ authorization: `Bearer ${token}` }, [row()]);
     expect(next).toHaveBeenCalled();
-    expect(req.device).toEqual({
-      id: 3, company_id: 5,
-      machine: { id: 7, company_id: 5, machine_serial_no: 'VMC-1', ip_address: '192.168.200.3' }
-    });
-    expect(mockDb.calls().some(c => /UPDATE program_devices/.test(c.text))).toBe(false);
+    expect(req.gateway).toEqual({ id: 3, company_id: 5, company_name: 'Acme Gears' });
+    expect(mockDb.calls().some(c => /UPDATE program_gateways/.test(c.text))).toBe(false);
   });
 
   test('a stale heartbeat, a new address or a new agent version is recorded', async () => {
     await run({ authorization: `Bearer ${token}`, 'x-agent-version': '1.1.0' },
               [row({ last_seen_at: new Date(Date.now() - 120_000).toISOString() })]);
-    const upd = mockDb.calls().find(c => /UPDATE program_devices/.test(c.text));
+    const upd = mockDb.calls().find(c => /UPDATE program_gateways/.test(c.text));
     expect(upd.params).toEqual([3, '203.0.113.9', '1.1.0']);
   });
 });

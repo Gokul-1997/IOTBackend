@@ -2,25 +2,16 @@
   "info": {
     "_postman_id": "f1d8654b-d90a-5a3c-9b4f-358cf0bee233",
     "name": "MEXA Program Transfer — Gateway API",
-    "description": "The machine's gateway (Node-RED PC, laptop, any program) and the MEXA server: **4 HTTPS calls**.\n\n| Call | |\n|---|---|\n| `GET /api/device/v1/status` | New program? Backup asked for? |\n| `GET /api/device/v1/program` | Download the machine's program |\n| `POST /api/device/v1/backup` | Upload a backup (multipart `file`) |\n| `POST /api/device/v1/report` | Program written / refused, backup could not be read |\n\n**Set the variables** (collection → Variables): `baseUrl` = the server, e.g. `https://stmapi.stmcnc.com`; `token` = the machine's token (`mxd_…`, from Program Transfer → the machine → Gateway token).\n\nHow the gateway talks to the CNC (FTP, FOCAS, a folder, anything) is up to the gateway. Full guide: docs/PROGRAM_TRANSFER_API.md.",
+    "description": "The company's gateway (Node-RED PC, laptop, any program) and the MEXA server: **4 HTTPS calls, one token for all machines**.\n\n| Call | |\n|---|---|\n| `GET /api/device/v1/status` | Every machine at once: program waiting? backup asked for? |\n| `GET /api/device/v1/program?machine=NAME` | Download the program waiting for that machine |\n| `POST /api/device/v1/backup` | Upload a backup (multipart `machine`, `file`) |\n| `POST /api/device/v1/report` | Program written / refused, backup could not be read |\n\n**Set the variables** (collection → Variables): `baseUrl` = the server, e.g. `https://stmapi.stmcnc.com`; `token` = the company's gateway token (`mxg_…`, from S&T); `machine` = a machine's name as /status lists it.\n\nHow the gateway talks to the CNC (FTP, FOCAS, a folder, anything) is up to the gateway. Full guide: docs/PROGRAM_TRANSFER_API.md.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "auth": {
-    "type": "bearer",
-    "bearer": [
-      {
-        "key": "token",
-        "value": "{{token}}",
-        "type": "string"
-      }
-    ]
   },
   "item": [
     {
       "name": "Gateway — the 4 calls (give this to the gateway team)",
+      "description": "Every call sends the company's token: `Authorization: Bearer {{token}}` (set on the collection). **One token for all machines**; S&T makes it. A call about one machine names it: `machine` (its name as /status lists it) or `machine_ip`.\n\n**The gateway loop**\n\n```\nevery 15 s:  GET /status                      ← one call, every machine\n  for each machine with a program  → GET /program?machine=NAME → write to the CNC\n                                   → POST /report {file_id, status: DONE}\n                                     or {file_id, status: FAILED, message}\n                                     next_program in the answer → the same again\n  for each machine with backup_request → read the program from the CNC\n                                   → POST /backup (machine, file)\n                                     or POST /report {backup_request_id, status: FAILED, message}\n```\n\nPrograms for one machine wait in line and go one after the other; different machines do not wait for each other.\n\nErrors are always JSON: `{\"status\":\"error\",\"code\":\"…\",\"message\":\"…\"}`. 429 = too many calls: wait and try again.",
       "item": [
         {
-          "name": "1. Status — poll every 15 s",
+          "name": "1. Status — every machine, poll every 15 s",
           "request": {
             "method": "GET",
             "header": [],
@@ -36,7 +27,7 @@
                 "status"
               ]
             },
-            "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+            "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
           },
           "event": [
             {
@@ -46,23 +37,31 @@
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
                   "const body = pm.response.json();",
-                  "if (body.program) {",
-                  "  pm.collectionVariables.set('fileId', body.program.file_id);",
-                  "  pm.collectionVariables.set('sha256', body.program.sha256);",
-                  "  if (body.program.status === 'WAITING') console.log('New program waiting:', body.program.program_name, '→ call 2. Download the program');",
-                  "} else console.log('No program uploaded for this machine yet.');",
-                  "if (body.backup_request) {",
-                  "  pm.collectionVariables.set('backupRequestId', body.backup_request.id);",
-                  "  console.log('Backup asked for → read the program from the CNC and call 4a. Upload a backup (or 4b on failure)');",
-                  "} else pm.collectionVariables.unset('backupRequestId');",
-                  "pm.test('poll_seconds is given', () => pm.expect(body.poll_seconds).to.be.a('number'));"
+                  "pm.test('every machine in one answer', () => pm.expect(body.machines).to.be.an('array'));",
+                  "pm.test('poll_seconds is given', () => pm.expect(body.poll_seconds).to.be.a('number'));",
+                  "const want = String(pm.collectionVariables.get('machine') || '').trim().toLowerCase();",
+                  "const m = body.machines.find(x => x.machine.toLowerCase() === want) || body.machines.find(x => x.program || x.backup_request);",
+                  "if (!m) {",
+                  "  console.log('Nothing to do for any machine of ' + body.company + '.');",
+                  "} else {",
+                  "  pm.collectionVariables.set('machine', m.machine);",
+                  "  if (m.program) {",
+                  "    pm.collectionVariables.set('fileId', m.program.file_id);",
+                  "    pm.collectionVariables.set('sha256', m.program.sha256);",
+                  "    console.log(m.machine + ': ' + m.program.program_name + ' waiting (' + m.programs_waiting + ' in line) → call 2. Download the program');",
+                  "  } else console.log(m.machine + ': nothing waiting.');",
+                  "  if (m.backup_request) {",
+                  "    pm.collectionVariables.set('backupRequestId', m.backup_request.id);",
+                  "    console.log(m.machine + ': backup asked for → read the program from the CNC and call 4a (or 4b on failure)');",
+                  "  } else pm.collectionVariables.unset('backupRequestId');",
+                  "}"
                 ]
               }
             }
           ],
           "response": [
             {
-              "name": "New program waiting, backup asked for",
+              "name": "Programs waiting, a backup asked for",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
@@ -78,7 +77,7 @@
                     "status"
                   ]
                 },
-                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "OK",
               "code": 200,
@@ -89,10 +88,10 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"machine\": {\n    \"id\": 15,\n    \"serial\": \"VMC-15\"\n  },\n  \"program\": {\n    \"file_id\": 42,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-21T08:00:00.000Z\",\n    \"status\": \"WAITING\",\n    \"message\": null\n  },\n  \"backup_request\": {\n    \"id\": 9,\n    \"requested_at\": \"2026-10-21T08:05:00.000Z\"\n  },\n  \"poll_seconds\": 15\n}"
+              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"program\": {\n        \"file_id\": 42,\n        \"program_name\": \"O1001.nc\",\n        \"size_bytes\": 1472,\n        \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n        \"uploaded_at\": \"2026-10-22T08:00:00.000Z\"\n      },\n      \"programs_waiting\": 2,\n      \"backup_request\": null\n    },\n    {\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": {\n        \"id\": 9,\n        \"requested_at\": \"2026-10-22T08:05:00.000Z\"\n      }\n    },\n    {\n      \"machine\": \"VMC-03\",\n      \"machine_ip\": \"192.168.1.12\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
             },
             {
-              "name": "Nothing new (program already written)",
+              "name": "Nothing to do",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
@@ -108,7 +107,7 @@
                     "status"
                   ]
                 },
-                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "OK",
               "code": 200,
@@ -119,10 +118,10 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"machine\": {\n    \"id\": 15,\n    \"serial\": \"VMC-15\"\n  },\n  \"program\": {\n    \"file_id\": 42,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-21T08:00:00.000Z\",\n    \"status\": \"DONE\",\n    \"message\": null\n  },\n  \"backup_request\": null,\n  \"poll_seconds\": 15\n}"
+              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    },\n    {\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
             },
             {
-              "name": "No program uploaded yet",
+              "name": "Wrong, replaced or stopped token",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
@@ -138,37 +137,7 @@
                     "status"
                   ]
                 },
-                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
-              },
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json; charset=utf-8"
-                }
-              ],
-              "body": "{\n  \"machine\": {\n    \"id\": 15,\n    \"serial\": \"VMC-15\"\n  },\n  \"program\": null,\n  \"backup_request\": null,\n  \"poll_seconds\": 15\n}"
-            },
-            {
-              "name": "Wrong or revoked token",
-              "originalRequest": {
-                "method": "GET",
-                "header": [],
-                "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/status",
-                  "host": [
-                    "{{baseUrl}}"
-                  ],
-                  "path": [
-                    "api",
-                    "device",
-                    "v1",
-                    "status"
-                  ]
-                },
-                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Unauthorized",
               "code": 401,
@@ -179,10 +148,10 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"TOKEN_INVALID\",\n  \"message\": \"This device token is not valid. Ask an admin for a new one.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"TOKEN_INVALID\",\n  \"message\": \"This gateway token is not valid. Ask S&T for your company's gateway token.\"\n}"
             },
             {
-              "name": "Machine switched off in MEXA",
+              "name": "An old machine token (mxd_…)",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
@@ -198,7 +167,37 @@
                     "status"
                   ]
                 },
-                "description": "Call every `poll_seconds` (15 s).\n\n- `program` is the machine's program (the newest upload). When its `sha256` differs from the program you last wrote to the CNC **and** `status` is `WAITING`, download it (call 2). `DONE` / `FAILED` mean you already reported this file — do not try it again.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n\nThe tests below save `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"TOKEN_REPLACED\",\n  \"message\": \"This is a machine token (mxd_…), and machine tokens no longer work. Program Transfer now has one token for all machines of a company (it starts mxg_), made by S&T: ask S&T for your company's gateway token.\"\n}"
+            },
+            {
+              "name": "Company switched off in MEXA",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "status"
+                  ]
+                },
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Forbidden",
               "code": 403,
@@ -209,7 +208,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_INACTIVE\",\n  \"message\": \"Machine VMC-15 is switched off in the platform.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"COMPANY_DISABLED\",\n  \"message\": \"The company's access has been turned off.\"\n}"
             }
           ]
         },
@@ -219,7 +218,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/device/v1/program",
+              "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -228,9 +227,16 @@
                 "device",
                 "v1",
                 "program"
+              ],
+              "query": [
+                {
+                  "key": "machine",
+                  "value": "{{machine}}",
+                  "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                }
               ]
             },
-            "description": "The machine's program as a file. Check `X-Sha256` against the file before writing it to the CNC.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason)."
+            "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
           },
           "event": [
             {
@@ -241,7 +247,7 @@
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
                   "pm.test('X-Sha256 is the program /status announced', () => pm.expect(pm.response.headers.get('X-Sha256')).to.eql(pm.collectionVariables.get('sha256')));",
                   "pm.collectionVariables.set('fileId', pm.response.headers.get('X-File-Id'));",
-                  "console.log('Program', decodeURIComponent(pm.response.headers.get('X-Program-Name') || ''), '— write it to the CNC, then report with 3a or 3b');"
+                  "console.log(decodeURIComponent(pm.response.headers.get('X-Machine') || '') + ': ' + decodeURIComponent(pm.response.headers.get('X-Program-Name') || '') + ' — write it to the CNC, then report with 3a or 3b');"
                 ]
               }
             }
@@ -253,7 +259,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program",
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
                   "host": [
                     "{{baseUrl}}"
                   ],
@@ -262,9 +268,16 @@
                     "device",
                     "v1",
                     "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                    }
                   ]
                 },
-                "description": "The machine's program as a file. Check `X-Sha256` against the file before writing it to the CNC.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason)."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
               },
               "status": "OK",
               "code": 200,
@@ -279,12 +292,16 @@
                   "value": "attachment; filename=\"O1001.nc\""
                 },
                 {
+                  "key": "X-File-Id",
+                  "value": "42"
+                },
+                {
                   "key": "X-Program-Name",
                   "value": "O1001.nc"
                 },
                 {
-                  "key": "X-File-Id",
-                  "value": "42"
+                  "key": "X-Machine",
+                  "value": "VMC-01"
                 },
                 {
                   "key": "X-Sha256",
@@ -294,12 +311,12 @@
               "body": "%\nO1001 (SHAFT OP10)\nG21 G90 G40\nT1 M06\nG0 X25. Y0.\nM30\n%\n"
             },
             {
-              "name": "No program uploaded yet",
+              "name": "Nothing waiting for the machine",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program",
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
                   "host": [
                     "{{baseUrl}}"
                   ],
@@ -308,9 +325,16 @@
                     "device",
                     "v1",
                     "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                    }
                   ]
                 },
-                "description": "The machine's program as a file. Check `X-Sha256` against the file before writing it to the CNC.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason)."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
               },
               "status": "Not Found",
               "code": 404,
@@ -321,7 +345,118 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_PROGRAM\",\n  \"message\": \"No program has been uploaded for this machine yet.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_PROGRAM\",\n  \"message\": \"Nothing is waiting for VMC-01.\"\n}"
+            },
+            {
+              "name": "No such machine",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                    }
+                  ]
+                },
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_NOT_FOUND\",\n  \"message\": \"No machine \\\"VMC-9\\\" in Acme Gears. Use the names and IPs GET /status lists.\"\n}"
+            },
+            {
+              "name": "Two machines with that name",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                    }
+                  ]
+                },
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_AMBIGUOUS\",\n  \"message\": \"2 machines are named \\\"VMC-01\\\". Send \\\"machine_ip\\\" as well, or give them different names on the Machines page.\"\n}"
+            },
+            {
+              "name": "No machine named",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                    }
+                  ]
+                },
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_REQUIRED\",\n  \"message\": \"Say which machine: \\\"machine\\\" (its name in MEXA, as GET /status lists it) or \\\"machine_ip\\\".\"\n}"
             }
           ]
         },
@@ -349,14 +484,14 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+              "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
           },
           "event": [
             {
@@ -365,14 +500,20 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "pm.test('DONE recorded', () => pm.expect(pm.response.json().status).to.eql('DONE'));"
+                  "const body = pm.response.json();",
+                  "pm.test('DONE recorded', () => pm.expect(body.status).to.eql('DONE'));",
+                  "if (body.next_program) {",
+                  "  pm.collectionVariables.set('fileId', body.next_program.file_id);",
+                  "  pm.collectionVariables.set('sha256', body.next_program.sha256);",
+                  "  console.log(body.machine + ': next in line is ' + body.next_program.program_name + ' → call 2 again');",
+                  "} else console.log(body.machine + ': nothing else waiting.');"
                 ]
               }
             }
           ],
           "response": [
             {
-              "name": "Recorded",
+              "name": "Recorded — the next program named",
               "originalRequest": {
                 "method": "POST",
                 "header": [
@@ -395,14 +536,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -413,7 +554,51 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"status\": \"DONE\"\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"next_program\": {\n    \"file_id\": 44,\n    \"program_name\": \"O1002.nc\",\n    \"size_bytes\": 980,\n    \"sha256\": \"4b7d0e9c2a1f8e3d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170f6e\",\n    \"uploaded_at\": \"2026-10-22T08:01:00.000Z\"\n  }\n}"
+            },
+            {
+              "name": "Recorded — nothing else waiting",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"next_program\": null\n}"
             },
             {
               "name": "Same report again (retry)",
@@ -439,14 +624,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -457,10 +642,10 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"status\": \"DONE\",\n  \"unchanged\": true\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"unchanged\": true,\n  \"next_program\": null\n}"
             },
             {
-              "name": "Not this machine's program",
+              "name": "No such program in the company",
               "originalRequest": {
                 "method": "POST",
                 "header": [
@@ -483,14 +668,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified.\n\nSending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Not Found",
               "code": 404,
@@ -501,7 +686,95 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"FILE_NOT_FOUND\",\n  \"message\": \"No upload 42 on VMC-1 (this token's machine). Its program now is file_id 57 (O1001.nc): take file_id from GET /status.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"FILE_NOT_FOUND\",\n  \"message\": \"No program 42 in Acme Gears. Report the file_id GET /status lists under the machine (program.file_id), or the X-File-Id header of GET /program.\"\n}"
+            },
+            {
+              "name": "Another machine's program",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_MISMATCH\",\n  \"message\": \"Program 42 is for VMC-01, not VMC-02.\"\n}"
+            },
+            {
+              "name": "A backup's file_id",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/report",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "report"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"BACKUP_NEEDS_NO_REPORT\",\n  \"message\": \"43 is a backup the gateway sent. A backup needs no report: the 201 from POST /backup already finished it. Report DONE or FAILED only for a program from GET /status (program.file_id).\"\n}"
             }
           ]
         },
@@ -529,14 +802,14 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+              "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+            "description": "The machine could not take the program. `message` is required (up to 500 characters) — write it for the person at the page: \"Program O1001 is running\", \"CNC memory full\". The page shows it and the uploader is warned.\n\nThe program leaves the line all the same, so the next one is not held up; a corrected file is uploaded again."
           },
           "event": [
             {
@@ -575,14 +848,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+                "description": "The machine could not take the program. `message` is required (up to 500 characters) — write it for the person at the page: \"Program O1001 is running\", \"CNC memory full\". The page shows it and the uploader is warned.\n\nThe program leaves the line all the same, so the next one is not held up; a corrected file is uploaded again."
               },
               "status": "OK",
               "code": 200,
@@ -593,7 +866,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"status\": \"FAILED\"\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"FAILED\",\n  \"next_program\": null\n}"
             },
             {
               "name": "No reason given",
@@ -619,14 +892,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+                "description": "The machine could not take the program. `message` is required (up to 500 characters) — write it for the person at the page: \"Program O1001 is running\", \"CNC memory full\". The page shows it and the uploader is warned.\n\nThe program leaves the line all the same, so the next one is not held up; a corrected file is uploaded again."
               },
               "status": "Bad Request",
               "code": 400,
@@ -663,14 +936,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The machine refused the program. `message` (required, up to 500 characters) is what the person sees: **The machine could not use it: …**. They upload a corrected file, which comes with a new `file_id` and `sha256`.\n\nDo not try the same `file_id` again: `/status` now shows it as `FAILED`."
+                "description": "The machine could not take the program. `message` is required (up to 500 characters) — write it for the person at the page: \"Program O1001 is running\", \"CNC memory full\". The page shows it and the uploader is warned.\n\nThe program leaves the line all the same, so the next one is not held up; a corrected file is uploaded again."
               },
               "status": "Bad Request",
               "code": 400,
@@ -706,6 +979,12 @@
               "mode": "formdata",
               "formdata": [
                 {
+                  "key": "machine",
+                  "value": "{{machine}}",
+                  "type": "text",
+                  "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                },
+                {
                   "key": "file",
                   "type": "file",
                   "src": [],
@@ -719,7 +998,7 @@
                 }
               ]
             },
-            "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+            "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
           },
           "event": [
             {
@@ -729,7 +1008,7 @@
                 "exec": [
                   "pm.test('201 Created', () => pm.response.to.have.status(201));",
                   "const body = pm.response.json();",
-                  "console.log('Saved backup', body.file.file_id, body.answered_request ? '— answered request ' + body.answered_request : '— no request was open');"
+                  "console.log(body.machine + ': saved backup ' + body.file.file_id + (body.answered_request ? ' — answered request ' + body.answered_request : ' — no request was open'));"
                 ]
               }
             }
@@ -756,6 +1035,12 @@
                   "mode": "formdata",
                   "formdata": [
                     {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "type": "text",
+                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                    },
+                    {
                       "key": "file",
                       "type": "file",
                       "src": [],
@@ -769,7 +1054,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Created",
               "code": 201,
@@ -780,7 +1065,60 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file\": {\n    \"file_id\": 43,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-21T08:06:10.000Z\"\n  },\n  \"answered_request\": 9\n}"
+              "body": "{\n  \"machine\": \"VMC-02\",\n  \"file\": {\n    \"file_id\": 43,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-22T08:06:10.000Z\"\n  },\n  \"answered_request\": 9\n}"
+            },
+            {
+              "name": "No machine named",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/backup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "backup"
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "type": "text",
+                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                    },
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": [],
+                      "description": "The program read from the CNC (required). In Postman: choose a file here."
+                    },
+                    {
+                      "key": "program_name",
+                      "value": "O1001.nc",
+                      "type": "text",
+                      "description": "Its name on the CNC (optional; otherwise the file's name)."
+                    }
+                  ]
+                },
+                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_REQUIRED\",\n  \"message\": \"Say which machine: \\\"machine\\\" (its name in MEXA, as GET /status lists it) or \\\"machine_ip\\\".\"\n}"
             },
             {
               "name": "No file attached",
@@ -803,6 +1141,12 @@
                   "mode": "formdata",
                   "formdata": [
                     {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "type": "text",
+                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                    },
+                    {
                       "key": "file",
                       "type": "file",
                       "src": [],
@@ -816,7 +1160,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -850,6 +1194,12 @@
                   "mode": "formdata",
                   "formdata": [
                     {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "type": "text",
+                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                    },
+                    {
                       "key": "file",
                       "type": "file",
                       "src": [],
@@ -863,7 +1213,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -897,6 +1247,12 @@
                   "mode": "formdata",
                   "formdata": [
                     {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "type": "text",
+                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                    },
+                    {
                       "key": "file",
                       "type": "file",
                       "src": [],
@@ -910,7 +1266,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -944,6 +1300,12 @@
                   "mode": "formdata",
                   "formdata": [
                     {
+                      "key": "machine",
+                      "value": "{{machine}}",
+                      "type": "text",
+                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                    },
+                    {
                       "key": "file",
                       "type": "file",
                       "src": [],
@@ -957,7 +1319,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data, field `file`. Answers an open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Payload Too Large",
               "code": 413,
@@ -1003,7 +1365,7 @@
                 }
               }
             },
-            "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+            "description": "The backup could not be read from the CNC. The request is closed, the page shows **Backup failed** with the reason, **Backup now** works again and the person who asked is warned.\n\nOnly FAILED is reported here: a backup that worked is answered by uploading it (4a)."
           },
           "event": [
             {
@@ -1048,7 +1410,7 @@
                     }
                   }
                 },
-                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+                "description": "The backup could not be read from the CNC. The request is closed, the page shows **Backup failed** with the reason, **Backup now** works again and the person who asked is warned.\n\nOnly FAILED is reported here: a backup that worked is answered by uploading it (4a)."
               },
               "status": "OK",
               "code": 200,
@@ -1059,7 +1421,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"backup_request_id\": 9,\n  \"status\": \"FAILED\"\n}"
+              "body": "{\n  \"backup_request_id\": 9,\n  \"machine\": \"VMC-02\",\n  \"status\": \"FAILED\"\n}"
             },
             {
               "name": "Already closed (retry)",
@@ -1092,7 +1454,7 @@
                     }
                   }
                 },
-                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+                "description": "The backup could not be read from the CNC. The request is closed, the page shows **Backup failed** with the reason, **Backup now** works again and the person who asked is warned.\n\nOnly FAILED is reported here: a backup that worked is answered by uploading it (4a)."
               },
               "status": "OK",
               "code": 200,
@@ -1103,10 +1465,10 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"backup_request_id\": 9,\n  \"status\": \"FAILED\",\n  \"unchanged\": true\n}"
+              "body": "{\n  \"backup_request_id\": 9,\n  \"machine\": \"VMC-02\",\n  \"status\": \"FAILED\",\n  \"unchanged\": true\n}"
             },
             {
-              "name": "Not this machine's request",
+              "name": "No such request in the company",
               "originalRequest": {
                 "method": "POST",
                 "header": [
@@ -1136,7 +1498,7 @@
                     }
                   }
                 },
-                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+                "description": "The backup could not be read from the CNC. The request is closed, the page shows **Backup failed** with the reason, **Backup now** works again and the person who asked is warned.\n\nOnly FAILED is reported here: a backup that worked is answered by uploading it (4a)."
               },
               "status": "Not Found",
               "code": 404,
@@ -1147,7 +1509,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"REQUEST_NOT_FOUND\",\n  \"message\": \"No backup request with this id for this machine.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"REQUEST_NOT_FOUND\",\n  \"message\": \"No backup request 9 in Acme Gears. Use backup_request.id from GET /status.\"\n}"
             },
             {
               "name": "DONE is not reported here",
@@ -1180,7 +1542,7 @@
                     }
                   }
                 },
-                "description": "The backup someone asked for could not be read. The request closes, the page shows **Backup failed: …** and **Backup now** works again; the person who asked is warned.\n\n(A backup that worked needs no report: uploading it with 4a answers the request.)"
+                "description": "The backup could not be read from the CNC. The request is closed, the page shows **Backup failed** with the reason, **Backup now** works again and the person who asked is warned.\n\nOnly FAILED is reported here: a backup that worked is answered by uploading it (4a)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -1195,14 +1557,24 @@
             }
           ]
         }
-      ],
-      "description": "Every call sends the machine's token: `Authorization: Bearer {{token}}` (set on the collection). One token per machine; it says which machine the call is about.\n\n**The gateway loop**\n\n```\nevery 15 s:  GET /status\n  program.status == WAITING and sha256 is new  → GET /program → write to the CNC\n                                                 → POST /report {file_id, status: DONE}\n                                                   or {file_id, status: FAILED, message}\n  backup_request != null                       → read the program from the CNC\n                                                 → POST /backup (file)\n                                                   or POST /report {backup_request_id, status: FAILED, message}\n```\n\nErrors are always JSON: `{\"status\":\"error\",\"code\":\"…\",\"message\":\"…\"}`. 429 = too many calls: wait and try again."
+      ]
     },
     {
       "name": "Web side — to test the flow without the page (internal, do not share)",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{userToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "description": "Plays S&T's and the person's part, to run the whole flow from Postman: a → b (S&T makes the company's gateway token) → c → d → e (upload) → then the gateway calls 1, 2, 3a/3b → f (Backup now) → 1, 4a/4b.\n\nUses people's logins: remove this folder before sending the collection to the gateway team.",
       "item": [
         {
-          "name": "a. Sign in (a company admin)",
+          "name": "a. Sign in as S&T Super Admin",
           "request": {
             "method": "POST",
             "header": [
@@ -1211,9 +1583,6 @@
                 "value": "application/json"
               }
             ],
-            "auth": {
-              "type": "noauth"
-            },
             "url": {
               "raw": "{{baseUrl}}/api/auth/login",
               "host": [
@@ -1225,6 +1594,147 @@
                 "login"
               ]
             },
+            "description": "S&T's sign-in: only S&T makes a company's gateway token. Saves `sntToken`.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{sntEmail}}\",\n  \"password\": \"{{sntPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('sntToken', pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "b. Make the company's gateway token (S&T)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/companies/{{companyId}}/program-gateway/token",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "companies",
+                "{{companyId}}",
+                "program-gateway",
+                "token"
+              ]
+            },
+            "description": "Makes (or replaces) the company's one gateway token — what S&T Super Admin → Company Management → Gateway → Make token does — and saves it as `token` for the gateway folder. Shown once; the old one stops at once.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{sntToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('token', pm.response.json().token);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "c. The company's gateway (S&T)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/companies/{{companyId}}/program-gateway",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "companies",
+                "{{companyId}}",
+                "program-gateway"
+              ]
+            },
+            "description": "The token (its first characters only), when the gateway last called, from which address and with which agent.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{sntToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const g = pm.response.json().gateway;",
+                  "console.log(g ? (g.online ? 'Gateway online' : 'Gateway offline') + ', last call ' + g.last_seen_at : 'No token yet');"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "d. Sign in (a company admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "A person's sign-in (company admin), to play the web page's part. Saves `userToken`.",
+            "auth": {
+              "type": "noauth"
+            },
             "body": {
               "mode": "raw",
               "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
@@ -1233,8 +1743,7 @@
                   "language": "json"
                 }
               }
-            },
-            "description": "A person's sign-in (company admin), to play the web page's part. Saves `userToken`."
+            }
           },
           "event": [
             {
@@ -1251,20 +1760,10 @@
           "response": []
         },
         {
-          "name": "b. Machines",
+          "name": "e. Machines",
           "request": {
             "method": "GET",
             "header": [],
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{userToken}}",
-                  "type": "string"
-                }
-              ]
-            },
             "url": {
               "raw": "{{baseUrl}}/api/programs/machines",
               "host": [
@@ -1276,7 +1775,17 @@
                 "machines"
               ]
             },
-            "description": "The company's machines, each with its gateway, program (and what the gateway reported), last backup and open backup request. Saves the first machine as `machineId` unless one is set."
+            "description": "The company's machines, each with the program in front of its line (or the last one reported), how many wait, last backup and open backup request; beside them, whether the gateway is online. Saves the first machine as `machineId` and `machine` unless set.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "event": [
             {
@@ -1286,8 +1795,11 @@
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
                   "const list = pm.response.json().data;",
-                  "if (!pm.collectionVariables.get('machineId') && list.length) pm.collectionVariables.set('machineId', list[0].id);",
-                  "console.log(list.map(m => m.id + ' ' + m.machine_serial_no).join('\\n'));"
+                  "if (!pm.collectionVariables.get('machineId') && list.length) {",
+                  "  pm.collectionVariables.set('machineId', list[0].id);",
+                  "  pm.collectionVariables.set('machine', list[0].machine_serial_no);",
+                  "}",
+                  "console.log(list.map(m => m.id + ' ' + m.machine_serial_no + (m.waiting ? ' (' + m.waiting + ' waiting)' : '')).join('\\n'));"
                 ]
               }
             }
@@ -1295,64 +1807,10 @@
           "response": []
         },
         {
-          "name": "c. Make the machine's gateway token",
+          "name": "f. Upload a program (as the page does)",
           "request": {
             "method": "POST",
             "header": [],
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{userToken}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/programs/machines/{{machineId}}/device-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "programs",
-                "machines",
-                "{{machineId}}",
-                "device-token"
-              ]
-            },
-            "description": "Makes (or replaces) the machine's gateway token and saves it as `token` for the gateway folder. Shown once — the old one stops at once."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
-                  "pm.collectionVariables.set('token', pm.response.json().data.token);"
-                ]
-              }
-            }
-          ],
-          "response": []
-        },
-        {
-          "name": "d. Upload a program (as the page does)",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{userToken}}",
-                  "type": "string"
-                }
-              ]
-            },
             "url": {
               "raw": "{{baseUrl}}/api/programs/files",
               "host": [
@@ -1362,6 +1820,17 @@
                 "api",
                 "programs",
                 "files"
+              ]
+            },
+            "description": "What **Upload program** on the page does: the file joins the end of the machine's line, and `/status` shows it when it is in front.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
               ]
             },
             "body": {
@@ -1379,8 +1848,7 @@
                   "description": "A program file, e.g. O1001.nc"
                 }
               ]
-            },
-            "description": "What **Upload program** on the page does: the file becomes the machine's program, and `/status` shows it as WAITING."
+            }
           },
           "event": [
             {
@@ -1388,7 +1856,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('201 Created', () => pm.response.to.have.status(201));"
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "console.log('Place in line: ' + pm.response.json().data.queue_position);"
                 ]
               }
             }
@@ -1396,20 +1865,10 @@
           "response": []
         },
         {
-          "name": "e. Backup now (as the page does)",
+          "name": "g. Backup now (as the page does)",
           "request": {
             "method": "POST",
             "header": [],
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{userToken}}",
-                  "type": "string"
-                }
-              ]
-            },
             "url": {
               "raw": "{{baseUrl}}/api/programs/machines/{{machineId}}/backup",
               "host": [
@@ -1423,7 +1882,17 @@
                 "backup"
               ]
             },
-            "description": "What **Backup now** on the page does: `/status` then shows a `backup_request`."
+            "description": "What **Backup now** on the page does: `/status` then shows a `backup_request` for that machine.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "event": [
             {
@@ -1438,20 +1907,19 @@
           ],
           "response": []
         }
-      ],
-      "auth": {
-        "type": "bearer",
-        "bearer": [
-          {
-            "key": "token",
-            "value": "{{userToken}}",
-            "type": "string"
-          }
-        ]
-      },
-      "description": "Plays the person's part, to run the whole flow from Postman: a → b → c (gets the gateway token) → d (upload) → then the gateway calls 1, 2, 3a/3b → e (Backup now) → 1, 4a/4b.\n\nUses a person's login: remove this folder before sending the collection to the gateway team."
+      ]
     }
   ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
   "variable": [
     {
       "key": "baseUrl",
@@ -1461,27 +1929,57 @@
     },
     {
       "key": "token",
-      "value": "mxd_paste-the-machine-token-here",
+      "value": "mxg_paste-the-company-token-here",
       "type": "string",
-      "description": "The machine's gateway token"
+      "description": "The company's gateway token, from S&T (one for all machines)"
+    },
+    {
+      "key": "machine",
+      "value": "VMC-01",
+      "type": "string",
+      "description": "A machine's name as /status lists it (1. Status picks one with work when this one has none)"
     },
     {
       "key": "fileId",
       "value": "",
       "type": "string",
-      "description": "Set by 1. Status / 2. Download"
+      "description": "Set by 1. Status / 2. Download / 3a"
     },
     {
       "key": "sha256",
       "value": "",
       "type": "string",
-      "description": "Set by 1. Status"
+      "description": "Set by 1. Status / 3a"
     },
     {
       "key": "backupRequestId",
       "value": "",
       "type": "string",
       "description": "Set by 1. Status"
+    },
+    {
+      "key": "sntEmail",
+      "value": "",
+      "type": "string",
+      "description": "Web side folder only"
+    },
+    {
+      "key": "sntPassword",
+      "value": "",
+      "type": "string",
+      "description": "Web side folder only"
+    },
+    {
+      "key": "sntToken",
+      "value": "",
+      "type": "string",
+      "description": "Set by a. Sign in as S&T"
+    },
+    {
+      "key": "companyId",
+      "value": "",
+      "type": "string",
+      "description": "Web side folder only: the company's id (S&T → Company Management)"
     },
     {
       "key": "userEmail",
@@ -1499,13 +1997,13 @@
       "key": "userToken",
       "value": "",
       "type": "string",
-      "description": "Set by a. Sign in"
+      "description": "Set by d. Sign in"
     },
     {
       "key": "machineId",
       "value": "",
       "type": "string",
-      "description": "Set by b. Machines (or type it)"
+      "description": "Set by e. Machines (or type it)"
     }
   ]
 }

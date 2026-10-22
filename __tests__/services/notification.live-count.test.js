@@ -95,10 +95,12 @@ describe('when the count changes', () => {
     const storage = require('../../src/programs/storage');
     jest.spyOn(storage, 'saveStream').mockResolvedValue({ folder: 'company-3/programs/machine-7/backups', storedName: 'b.nc',
                                                           programName: 'O1234.nc', size: 10, sha256: 'a'.repeat(64) });
-    mockDb.queueResponse({ rows: [{ id: '90', program_name: 'O1234.nc' }], rowCount: 1 },
+    mockDb.queueResponse({ rows: [{ id: 7, company_id: 3, machine_serial_no: 'VMC-01', is_active: true, machine_ip: null }], rowCount: 1 },
+      { rows: [{ id: '90', program_name: 'O1234.nc' }], rowCount: 1 },
       { rows: [{ id: '9', requested_by: 7 }], rowCount: 1 }, { rowCount: 1 }, { rows: [{ user_id: 7, count: 2 }] });
-    await programs.deviceBackup({ id: 3, company_id: 3, machine: { id: 7, machine_serial_no: 'VMC-01' } },
-                                { path: '/tmp/staged', originalname: 'O1234.nc' });
+    // the company's gateway names the machine (22 Oct 2026: one token for all machines)
+    await programs.gatewayBackup({ id: 3, company_id: 3, company_name: 'Acme Gears' },
+                                 { path: '/tmp/staged', originalname: 'O1234.nc' }, { machine: 'VMC-01' });
     expect(counts()).toEqual([['user:7', 2]]);
     storage.saveStream.mockRestore();
   });

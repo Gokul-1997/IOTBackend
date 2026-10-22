@@ -24,6 +24,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/programs', require('../../src/programs/program.routes'));
 const one = row => ({ rows: [row], rowCount: 1 });
+const none = { rows: [], rowCount: 0 };
 const machine = { id: 7, company_id: 5, machine_serial_no: 'VMC-1' };
 const ALL = ['page:programs:view', 'page:programs:upload', 'page:programs:transfer', 'page:programs:fetch', 'page:programs:delete', 'page:machines:edit'];
 
@@ -34,12 +35,26 @@ beforeEach(async () => {
 });
 afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
-test('upload: the file is saved for the machine and comes back as its program', async () => {
-  mockDb.queueResponse(one(machine), one({ id: '101', machine_id: 7, program_name: 'O1001.nc', kind: 'NEW' }));
+test('machines: the list, and beside it the company\'s one gateway — never a token', async () => {
+  mockDb.queueResponse({ rows: [{ id: 7, machine_serial_no: 'VMC-1', next_id: null, report_id: null, backup_id: null, request_id: null }], rowCount: 1 },
+    one({ id: 1, token_prefix: 'mxg_abcdefgh', created_at: 'T0', last_seen_at: 'T1', last_seen_ip: '203.0.113.9', online: true }));
+  const res = await request(app).get('/api/programs/machines');
+  expect(res.status).toBe(200);
+  expect(res.headers['cache-control']).toBe('no-store');
+  expect(res.body).toEqual({
+    status: 'success',
+    data: [{ id: 7, machine_serial_no: 'VMC-1', next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }],
+    gateway: { token_prefix: 'mxg_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true }
+  });
+});
+
+test('upload: the file is saved for the machine and comes back with its place in the line', async () => {
+  mockDb.queueResponse(one(machine), one({ id: '101', machine_id: 7, program_name: 'O1001.nc', kind: 'NEW', created_at: 'T0' }),
+    none /* the audit row */, one({ position: 1 }));
   const res = await request(app).post('/api/programs/files')
     .field('machine_id', '7').attach('file', Buffer.from('%\nO1001\nM30\n%'), 'O1001.nc');
   expect(res.status).toBe(201);
-  expect(res.body).toMatchObject({ status: 'success', data: { id: '101', program_name: 'O1001.nc', is_current: true } });
+  expect(res.body).toMatchObject({ status: 'success', data: { id: '101', program_name: 'O1001.nc', queue_position: 1 } });
 });
 
 test.each(['page:programs:upload', 'page:programs:transfer'])('upload needs both Upload and Send to Machine, not just %s', async permission => {
@@ -60,21 +75,21 @@ test('backup request needs Fetch from Machine; the first click makes it, the sec
   expect(first.body.data).toEqual({ id: '9', requested_at: 'T0', created: true });
 });
 
-test('delete needs Delete; the gateway token needs Machines → Edit', async () => {
+test('delete needs Delete', async () => {
   mockUser.permissions = ['page:programs:view'];
   expect((await request(app).delete('/api/programs/files/30')).status).toBe(403);
-  expect((await request(app).post('/api/programs/machines/7/device-token')).status).toBe(403);
-  expect((await request(app).delete('/api/programs/machines/7/device-token')).status).toBe(403);
   expect(mockDb.calls().find(c => /program_/.test(c.text))).toBeUndefined();
 });
 
-test('a new gateway token is shown once and never cached', async () => {
-  mockDb.queueResponse(one(machine), { rows: [] }, { rows: [] }, one({ id: 3, token_prefix: 'mxd_abcdefgh', created_at: 'T0' }));
-  const res = await request(app).post('/api/programs/machines/7/device-token');
-  expect(res.status).toBe(201);
-  expect(res.headers['cache-control']).toBe('no-store');
-  expect(res.body.data.token).toMatch(/^mxd_[A-Za-z0-9_-]{43}$/);
-  expect(res.body.data).toMatchObject({ token_prefix: 'mxd_abcdefgh', machine_serial_no: 'VMC-1' });
+/* 22 Oct 2026: one token per company, made by S&T (companies → /:id/program-gateway) — not here, by anyone */
+test.each([
+  ['post', '/api/programs/machines/7/device-token'],
+  ['delete', '/api/programs/machines/7/device-token'],
+  ['post', '/api/programs/gateway-token']
+])('the company side makes no token: %s %s is gone', async (method, url) => {
+  const res = await request(app)[method](url);
+  expect(res.status).toBe(404);
+  expect(mockDb.calls().find(c => /program_gateways|program_devices/.test(c.text))).toBeUndefined();
 });
 
 test('files of a machine in another company: 404, nothing listed', async () => {

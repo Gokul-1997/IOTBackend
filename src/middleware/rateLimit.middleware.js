@@ -20,11 +20,10 @@ const isRedisReady = () => redis.status === 'ready';
    connected but slow — a timed-out store call used to fail every request
    with a 500. Either way requests go through unlimited rather than not at all. */
 
-/* The machines' devices are left out of the per-address count: a factory's
-   devices all reach the server from its one public address, and a few
-   dozen of them asking for work every 15 seconds would use up the
-   allowance of everyone working in that factory. They are counted per
-   device instead (deviceLimiter). */
+/* The Program Transfer gateways are left out of the per-address count: a
+   factory's gateway reaches the server from the same public address as
+   everyone working there, and its calls would use up their allowance. They
+   are counted per gateway instead (deviceLimiter). */
 const isDeviceApi = (req) => (req.originalUrl || req.url || '').startsWith('/api/device/');
 
 /*
@@ -130,18 +129,19 @@ const deviceFailLimiter = rateLimit({
   message: { status: 'error', code: 'TOO_MANY_FAILURES', message: 'Too many calls with a wrong token. Wait 15 minutes.' },
 });
 
-/* Device API, per device once its token is known: polling every 15 s is
-   60 calls in 15 minutes; this leaves room for files and retries. */
+/* Device API, per company gateway once its token is known: one status call
+   every 15 s is 60 calls in 15 minutes for all of a company's machines; this
+   leaves room for the programs, backups and reports of a busy shift. */
 const deviceLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 600,
+  limit: 900,
   store: makeStore('rl:device:'),
   skip: (req) => !isRedisReady(),
   passOnStoreError: true,
-  keyGenerator: (req) => `device:${req.device?.id ?? ipKeyGenerator(req.ip)}`,
+  keyGenerator: (req) => `gateway:${req.gateway?.id ?? ipKeyGenerator(req.ip)}`,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { status: 'error', code: 'TOO_MANY_REQUESTS', message: 'Too many calls from this device. Poll every 15 seconds, not faster.' },
+  message: { status: 'error', code: 'TOO_MANY_REQUESTS', message: 'Too many calls from this gateway. Call GET /status every 15 seconds, not faster.' },
 });
 
 module.exports = {

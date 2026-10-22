@@ -24,6 +24,14 @@ router.put('/:id/permissions',        auth, audited('company'), isSNT, validate(
 router.delete('/:id',                 auth, audited('company'), isSNT,  ctrl.remove);
 router.delete('/:id/permanent',       auth, audited('company'), isSNT,  ctrl.permanentDelete);
 
+/* ── Program Transfer: the company's gateway token (SNT_SUPER only) ──
+   One token for all of a company's machines (22 Oct 2026). S&T makes it and
+   gives it to the gateway team; the company sees only whether its gateway
+   is online. Audited in program.service, which never records the token. */
+router.get('/:id/program-gateway',          auth, isSNT,  ctrl.getProgramGateway);
+router.post('/:id/program-gateway/token',   auth, isSNT,  ctrl.createProgramGatewayToken);
+router.delete('/:id/program-gateway/token', auth, isSNT,  ctrl.revokeProgramGatewayToken);
+
 /* ── Plant management under a company (SNT_SUPER only) ── */
 
 // Inject target company_id so checkQuota works correctly for SNT_SUPER

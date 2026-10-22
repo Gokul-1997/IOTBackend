@@ -33,6 +33,8 @@ const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
 const ONLY = arg('only', null)?.split(',');
 const signIn = async email => (await (await fetch(mt.base + '/api/auth/login', { method: 'POST',
   headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: mt.password }) })).json()).accessToken;
+let snt;
+const sntToken = async () => (snt ??= await signIn(mt.snt.email));
 for (const [key, c] of Object.entries(mt.companies)) {
   c.key = key;
   const token = await signIn(c.admin.email);
@@ -60,7 +62,8 @@ for (const [key, c] of Object.entries(mt.companies)) {
   await step('periodic_schedule', async () => idOf(await api(token, 'POST', '/api/dashboard/periodic/schedules', { machine_id: m1,
     title: `${c.marker} coolant change`, frequency: 'MONTHLY', next_due_at: new Date(Date.now() + 5 * 86400000).toISOString(), grace_days: 2 })));
   await step('energy_settings', async () => (await api(token, 'POST', '/api/dashboard/energy/settings', { machine_id: m0, cost_per_kwh: 10.95, overload_kw: 25 }), true));
-  await step('device_token', async () => (await api(token, 'POST', `/api/programs/machines/${m0}/device-token`, {})).token ? true : true);
+  // the company's one Program Transfer gateway token — S&T makes it (22 Oct 2026)
+  await step('gateway_token', async () => (await api(await sntToken(), 'POST', `/api/companies/${c.id}/program-gateway/token`, {})).token ? true : true);
   await step('alarm', async () => (await db.query(
     `INSERT INTO machine_alarms (machine_id, company_id, alarm_type, alarm_code, message, severity, started_at, is_resolved)
      VALUES ($1, $2, 'SERVO', '${c.marker}-411', '${c.marker} servo overload', 'HIGH', now() - interval '2 hours', false) RETURNING id`,

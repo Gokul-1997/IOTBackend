@@ -1,5 +1,6 @@
 const svc      = require('./company.service');
 const plantSvc = require('../plants/plant.service');
+const programs = require('../programs/program.service');
 
 /* company.routes.js says "SNT_SUPER only (except GET own company)" — but
    nothing enforced the exception's other half. getById, getPlanFeatures and
@@ -105,6 +106,35 @@ exports.permanentDelete = async (req, res, next) => {
   try {
     await svc.permanentDelete(req.params.id);
     res.json({ message: 'Company permanently deleted' });
+  } catch (e) { next(e); }
+};
+
+/* ─────────────────────────────────────────────────────────
+   PROGRAM TRANSFER GATEWAY of a company (SNT_SUPER only)
+   GET    /companies/:id/program-gateway         the token's state, last call
+   POST   /companies/:id/program-gateway/token   a new token (the old one stops)
+   DELETE /companies/:id/program-gateway/token   stop it
+   The token is in the POST answer only; nothing caches it.
+───────────────────────────────────────────────────────── */
+
+exports.getProgramGateway = async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(await programs.companyGateway(req));
+  } catch (e) { next(e); }
+};
+
+exports.createProgramGatewayToken = async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(201).json(await programs.createGatewayToken(req));
+  } catch (e) { next(e); }
+};
+
+exports.revokeProgramGatewayToken = async (req, res, next) => {
+  try {
+    await programs.revokeGatewayToken(req);
+    res.json({ revoked: true });
   } catch (e) { next(e); }
 };
 

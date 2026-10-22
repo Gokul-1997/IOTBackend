@@ -82,10 +82,11 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
    ALTER TABLE machines ADD COLUMN ip_address TEXT, ADD COLUMN controller_ip TEXT, ADD COLUMN program_path TEXT;
    UPDATE machines SET ip_address='192.168.1.'||id,program_path='/programs';
    CREATE TABLE program_devices(id SERIAL PRIMARY KEY,company_id INT,machine_id INT,label TEXT,token_prefix TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),last_seen_at TIMESTAMPTZ,last_seen_ip TEXT,agent_version TEXT,revoked_at TIMESTAMPTZ);
-   CREATE TABLE program_files(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,folder TEXT,stored_name TEXT,program_name TEXT,kind TEXT,size_bytes INT,sha256 TEXT,uploaded_by INT,note TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),deleted_at TIMESTAMPTZ,deleted_by INT,device_id INT,job_id BIGINT);
+   CREATE TABLE program_gateways(id SERIAL PRIMARY KEY,company_id INT,token_prefix TEXT,token_hash TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),last_seen_at TIMESTAMPTZ,last_seen_ip TEXT,agent_version TEXT,revoked_at TIMESTAMPTZ);
+   CREATE TABLE program_files(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,folder TEXT,stored_name TEXT,program_name TEXT,kind TEXT,size_bytes INT,sha256 TEXT,uploaded_by INT,note TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),deleted_at TIMESTAMPTZ,deleted_by INT,device_id INT,job_id BIGINT,gateway_id INT,delivery_status TEXT,delivery_message TEXT,delivered_at TIMESTAMPTZ);
    CREATE TABLE program_jobs(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,machine_serial TEXT,action VARCHAR(10) CHECK(action IN ('SEND','FETCH')),program_name TEXT NOT NULL,file_id BIGINT,backup_file_id BIGINT,overwrite BOOL DEFAULT FALSE,status TEXT DEFAULT 'QUEUED',message TEXT,requested_by INT,device_id INT,requested_at TIMESTAMPTZ DEFAULT NOW(),delivered_at TIMESTAMPTZ,finished_at TIMESTAMPTZ,program_path TEXT);
    CREATE TABLE program_controller_files(machine_id INT PRIMARY KEY,files JSONB,reported_at TIMESTAMPTZ DEFAULT NOW());
-   CREATE TABLE program_backup_requests(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,requested_by INT,requested_at TIMESTAMPTZ DEFAULT NOW(),file_id BIGINT,closed_at TIMESTAMPTZ);
+   CREATE TABLE program_backup_requests(id BIGSERIAL PRIMARY KEY,company_id INT,machine_id INT,requested_by INT,requested_at TIMESTAMPTZ DEFAULT NOW(),file_id BIGINT,closed_at TIMESTAMPTZ,error_message TEXT);
    CREATE UNIQUE INDEX ON program_backup_requests(machine_id) WHERE closed_at IS NULL;
    INSERT INTO program_files(id,company_id,machine_id,folder,stored_name,program_name,kind,size_bytes,sha256,uploaded_by)VALUES(1,4,7,'own','own.nc','O7.nc','NEW',3,repeat('a',64),1),(2,4,10,'other','other.nc','O10.nc','NEW',3,repeat('b',64),2),(3,5,9,'foreign','foreign.nc','O9.nc','NEW',3,repeat('c',64),1);
    INSERT INTO program_jobs(company_id,machine_id,machine_serial,action,program_name,file_id,requested_by,program_path)VALUES(4,7,'VMC-7','SEND','O7.nc',1,1,'/programs'),(4,10,'Other plant','SEND','O10.nc',2,2,'/programs'),(5,9,'VMC-9','SEND','O9.nc',3,1,'/programs');
@@ -188,7 +189,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   assert.deepEqual((await get('/api/programs/files?machine_id=10',2)).data.map(row=>row.machine_id),[10]);
   assert.equal((await get('/api/programs/files?machine_id=10',1,['COMPANY_ADMIN'])).data.length,1);
   assert.equal(await get('/api/programs/files/1/download'),'M30');
-  for(const [method,route] of [['GET','/api/programs/files?machine_id=10'],['GET','/api/programs/files/2/download'],['DELETE','/api/programs/files/2'],['POST','/api/programs/machines/10/backup'],['POST','/api/programs/machines/10/device-token'],['DELETE','/api/programs/machines/10/device-token']]) {
+  for(const [method,route] of [['GET','/api/programs/files?machine_id=10'],['GET','/api/programs/files/2/download'],['DELETE','/api/programs/files/2'],['POST','/api/programs/machines/10/backup']]) {
    const result=await fetch(url+route,{method,headers:{authorization:`Bearer ${token(1)}`}});assert.equal(result.status,404,`${method} ${route}`);
   }
   assert.equal((await pool.query('SELECT deleted_at FROM program_files WHERE id=2')).rows[0].deleted_at,null);
