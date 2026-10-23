@@ -36,8 +36,9 @@ describe('against the real gateway API', () => {
   function fakeDatabase() {
     const state = {
       machines: [{ id: 7, company_id: 5, machine_serial_no: 'VMC-1', is_active: true, machine_ip: '192.168.1.10', controller: 'FANUC 0i-MF',
-                   api_key: 'a'.repeat(32), program_path: '//CNC_MEM/USER/PATH1/' },
-                 { id: 8, company_id: 5, machine_serial_no: 'VMC-2', is_active: true, machine_ip: null, controller: null, api_key: null, program_path: null }],
+                   controller_type: 'FANUC', api_key: 'a'.repeat(32), program_path: '//CNC_MEM/USER/PATH1/' },
+                 { id: 8, company_id: 5, machine_serial_no: 'VMC-2', is_active: true, machine_ip: null, controller: null, controller_type: 'MITSUBISHI',
+                   api_key: null, program_path: null }],
       files: [], requests: [], statusCalls: 0
     };
     const waiting = machineId => state.files.filter(f => f.machine_id === machineId && f.kind === 'NEW' && !f.delivery_status);
@@ -55,6 +56,7 @@ describe('against the real gateway API', () => {
         return { rows: state.machines.map(m => {
           const line = waiting(m.id), head = line[0], request = state.requests.find(r => r.machine_id === m.id && !r.closed_at);
           return { machine_id: m.id, machine_serial_no: m.machine_serial_no, machine_ip: m.machine_ip, controller: m.controller,
+                   controller_type: m.controller_type,
                    api_key: m.api_key, program_path: m.program_path, file_id: head?.id ?? null,
                    program_name: head?.program_name, size_bytes: head?.size_bytes, sha256: head?.sha256, created_at: head?.created_at,
                    waiting: line.length ? String(line.length) : null, request_id: request?.id ?? null, requested_at: request?.requested_at };
@@ -139,7 +141,8 @@ describe('against the real gateway API', () => {
     expect(db.statusCalls).toBe(1);
     expect(status.company).toBe('Acme Gears');
     expect(status.machines.map(m => [m.machine_id, m.machine, m.programs_waiting])).toEqual([[7, 'VMC-1', 2], [8, 'VMC-2', 1]]);
-    expect(status.machines[0]).toMatchObject({ controller_name: 'FANUC 0i-MF', api_key: 'a'.repeat(32), program_path: '//CNC_MEM/USER/PATH1/' });
+    expect(status.machines[0]).toMatchObject({ controller_name: 'FANUC 0i-MF', controller_type: 'FANUC', api_key: 'a'.repeat(32), program_path: '//CNC_MEM/USER/PATH1/' });
+    expect(status.machines[1].controller_type).toBe('MITSUBISHI');
     // the CNC's own folder is for a gateway that talks to the CNC; this one writes only under PROGRAM_DIR
     expect(fs.existsSync(path.join(dir, 'VMC-1'))).toBe(true);
     expect(fs.readFileSync(path.join(dir, 'VMC-1', 'O1001.nc'), 'utf8')).toBe(first);

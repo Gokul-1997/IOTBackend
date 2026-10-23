@@ -20,7 +20,8 @@
  * the whole flow on a laptop, any PROGRAM_DIR will do. A controller reached
  * another way (FTP, FOCAS…) replaces the two functions marked MACHINE below;
  * they are given the machine as /status lists it — its machine_id, name, IP,
- * controller and program path (the CNC's folder, from the Machines page).
+ * controller and its type (Fanuc or Mitsubishi), and program path (the CNC's
+ * folder, from the Machines page).
  * Nothing else changes.
  *
  * Node.js 20 or newer, nothing to install:
@@ -101,7 +102,8 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
   /* ── MACHINE ── how this gateway reaches a machine: its program folder.
      For FTP, FOCAS or a controller's own tool, replace these two; `machine`
      is the machine from GET /status: { machine_id, machine (its name),
-     machine_ip, controller_name, program_path, … }. program_path is the
+     machine_ip, controller_name, controller_type (FANUC or MITSUBISHI: which
+     protocol to use), program_path, … }. program_path is the
      CNC's own folder as typed on the Machines page (//CNC_MEM/USER/PATH1/ on
      a Fanuc), for such a version; this folder version never takes it for a
      folder on this PC — only PROGRAM_DIR and MACHINE_DIRS, set here. ── */

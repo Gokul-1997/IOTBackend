@@ -10,7 +10,7 @@
  *     make, replace or stop a company's gateway token.
  *   The company's gateway (/api/device/v1, that token):
  *     GET  /status   every machine in one answer: its machine_id, name, IP,
- *                    controller, api_key and program path, the next program
+ *                    controller and its type, api_key and program path, the next program
  *                    waiting for it, and whether someone asked for a backup
  *     GET  /program  ?machine_id=ID: that machine's next program
  *     POST /backup   a backup file from a machine (form field "machine_id")
@@ -459,14 +459,15 @@ async function machineOf(gateway, input = {}) {
 
 /**
  * What the gateway polls — one call for every machine of the company: who it
- * is (machine_id — what the other calls send —, name, IP, controller, its
- * telemetry api_key and its program path from the Machines page), the
+ * is (machine_id — what the other calls send —, name, IP, controller and its
+ * type (FANUC / MITSUBISHI), its telemetry api_key and its program path, from
+ * the Machines page), the
  * program in front of its line (and how many wait), and an open backup
  * request. The answer carries each machine's api_key: as private as the token.
  */
 exports.gatewayStatus = async (gateway) => {
   const { rows } = await pool.query(
-    `SELECT m.id AS machine_id, m.machine_serial_no, ${MACHINE_IP} AS machine_ip, m.controller, m.api_key, m.program_path,
+    `SELECT m.id AS machine_id, m.machine_serial_no, ${MACHINE_IP} AS machine_ip, m.controller, m.controller_type, m.api_key, m.program_path,
             q.id AS file_id, q.program_name, q.size_bytes, q.sha256, q.created_at, q.waiting,
             r.id AS request_id, r.requested_at
        FROM machines m
@@ -488,6 +489,7 @@ exports.gatewayStatus = async (gateway) => {
       machine: r.machine_serial_no,
       machine_ip: r.machine_ip || null,
       controller_name: given(r.controller),
+      controller_type: r.controller_type || null,
       api_key: r.api_key || null,
       program_path: given(r.program_path),
       program: r.file_id ? fileView({ id: r.file_id, program_name: r.program_name, size_bytes: r.size_bytes,

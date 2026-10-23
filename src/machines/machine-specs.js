@@ -23,6 +23,10 @@ const SWITCHES = { twin_spindle: 'Twin spindle', twin_table: 'Twin table' };
 const PATHS = { program_path: 'Program path' };
 const PATH_MAX = 255;
 const PATH_CHARS = /^[A-Za-z0-9 _\-.:/\\]+$/;
+// The controller's make, next to the Controller text (its model) — for the
+// gateway to know how to talk to the CNC; in GET /status (23 Oct 2026)
+const CHOICES = { controller_type: 'Controller type' };
+const CONTROLLER_TYPES = ['FANUC', 'MITSUBISHI'];
 
 const fail = (message) => Object.assign(new Error(message), { code: 'BAD_MACHINE_SPEC', status: 400 });
 const blank = (value) => value === null || value === undefined || (typeof value === 'string' && !value.trim());
@@ -54,6 +58,14 @@ function folder(value, label) {
   return t;
 }
 
+/** Fanuc or Mitsubishi (any case), stored as FANUC / MITSUBISHI; empty: not set. */
+function controllerType(value, label) {
+  if (blank(value)) return null;
+  const v = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  if (!CONTROLLER_TYPES.includes(v)) throw fail(`${label} must be Fanuc or Mitsubishi.`);
+  return v;
+}
+
 function onOff(value, label) {
   if (blank(value)) return null;
   if (value === true || value === 'true') return true;
@@ -65,7 +77,7 @@ function onOff(value, label) {
  *  out, so an edit changes only what it sends. */
 function cleanSpecs(body = {}) {
   const specs = {};
-  for (const [rules, clean] of [[WHOLE_NUMBERS, wholeNumber], [TEXT, text], [SWITCHES, onOff], [PATHS, folder]]) {
+  for (const [rules, clean] of [[WHOLE_NUMBERS, wholeNumber], [TEXT, text], [SWITCHES, onOff], [PATHS, folder], [CHOICES, controllerType]]) {
     for (const [key, label] of Object.entries(rules)) {
       if (body[key] !== undefined) specs[key] = clean(body[key], label);
     }
@@ -73,4 +85,4 @@ function cleanSpecs(body = {}) {
   return specs;
 }
 
-module.exports = { cleanSpecs, INT_MAX };
+module.exports = { cleanSpecs, INT_MAX, CONTROLLER_TYPES };

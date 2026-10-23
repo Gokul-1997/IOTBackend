@@ -72,10 +72,10 @@ test('no token, a wrong one, or an old machine token: 401 with a code the gatewa
 test('status: every machine of the company in one call — its id, name, IP, controller, api_key, program path, next program, line and backup request', async () => {
   authRow();
   mockDb.queueResponse({ rows: [
-    { machine_id: 7, machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', controller: ' FANUC 0i-MF ', api_key: 'k'.repeat(32),
+    { machine_id: 7, machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', controller: ' FANUC 0i-MF ', controller_type: 'FANUC', api_key: 'k'.repeat(32),
       program_path: '//CNC_MEM/USER/PATH1/', file_id: '81', program_name: 'O8001.nc', size_bytes: 20,
       sha256: 'a'.repeat(64), created_at: '2026-10-22T05:00:00Z', waiting: '2', request_id: '9', requested_at: '2026-10-22T05:10:00Z' },
-    { machine_id: 8, machine_serial_no: 'VMC-2', machine_ip: null, controller: '', api_key: null, program_path: null,
+    { machine_id: 8, machine_serial_no: 'VMC-2', machine_ip: null, controller: '', controller_type: null, api_key: null, program_path: null,
       file_id: null, waiting: null, request_id: null }
   ], rowCount: 2 });
   const res = await request(app).get('/api/device/v1/status').set(AUTH);
@@ -84,12 +84,12 @@ test('status: every machine of the company in one call — its id, name, IP, con
   expect(res.body).toEqual({
     company: 'Acme Gears',
     machines: [
-      { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', api_key: 'k'.repeat(32),
+      { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', controller_type: 'FANUC', api_key: 'k'.repeat(32),
         program_path: '//CNC_MEM/USER/PATH1/',
         program: { file_id: 81, program_name: 'O8001.nc', size_bytes: 20, sha256: 'a'.repeat(64), uploaded_at: '2026-10-22T05:00:00Z' },
         programs_waiting: 2,
         backup_request: { id: 9, requested_at: '2026-10-22T05:10:00Z' } },
-      { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: null, api_key: null, program_path: null,
+      { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: null, controller_type: null, api_key: null, program_path: null,
         program: null, programs_waiting: 0, backup_request: null }
     ],
     poll_seconds: 15

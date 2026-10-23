@@ -8,13 +8,13 @@ function begin() { mockDb.queueResponse(response(), response([{ id: 4 }]), respo
 test('quota, owned placement and shift links commit together under the company lock', async () => {
   begin();
   mockDb.queueResponse(response([{ id: 8, plant_id: 5 }]), response([{ id: 5 }]), response([{ id: 7, plant_id: 5 }]), response(), response());
-  await svc.createMachine(req({ line_id: 8, ip_address: 'ignored', program_path: '//CNC_MEM/USER/PATH1/' }));
+  await svc.createMachine(req({ line_id: 8, ip_address: 'ignored', program_path: '//CNC_MEM/USER/PATH1/', controller_type: 'Fanuc' }));
   const calls = mockDb.calls();
   expect(calls[1].text).toMatch(/companies.*FOR UPDATE/);
   const insert = calls.find(call => /INSERT INTO machines/.test(call.text));
   expect(insert.params.slice(0, 4)).toEqual([5, 4, 8, 'VMC-7']);
   expect(insert.text).not.toMatch(/ip_address/);                        // the IP comes from telemetry, never the form
-  expect(insert.params.at(-1)).toBe('//CNC_MEM/USER/PATH1/');             // the program path, for the gateway (23 Oct 2026)
+  expect(insert.params.slice(-2)).toEqual(['//CNC_MEM/USER/PATH1/', 'FANUC']);   // the program path and the controller type, for the gateway (23 Oct 2026)
   expect(calls.find(call => /INSERT INTO machine_shift_config/.test(call.text)).params).toEqual([5, 7, 4]);
   expect(calls.at(-1).text).toBe('COMMIT');
 });
@@ -54,6 +54,22 @@ test('machine list clamps page size and keeps a plant-bound user in their own pl
   expect(mockDb.calls()[0].params).toEqual([4, 5, 100, 0]);
   for (const call of mockDb.calls()) expect(call.text).toMatch(/m.plant_id = \$2/);
 });
+/* 23 Oct 2026, the user: "the controller — one more dropdown, Fanuc or Mitsubishi — and in the status API" */
+test('the controller type: Fanuc or Mitsubishi, any case, kept as FANUC / MITSUBISHI; empty is not set; anything else refused', async () => {
+  for (const bad of ['Siemens', 'fanuc 0i', 1, true]) {
+    await expect(svc.updateMachine({ ...req(), body: { controller_type: bad } }))
+      .rejects.toMatchObject({ status: 400, message: 'Controller type must be Fanuc or Mitsubishi.' });
+  }
+  expect(mockDb.calls()).toHaveLength(0);
+  for (const [sent, kept] of [['mitsubishi', 'MITSUBISHI'], [' Fanuc ', 'FANUC'], ['', null], [null, null]]) {
+    resetDb();
+    mockDb.queueResponse(response([{ id: 7, controller_type: kept }]));
+    await svc.updateMachine({ ...req(), body: { controller_type: sent } });
+    expect(mockDb.calls()[0].params[0]).toBe(kept);
+    expect(mockDb.calls()[0].text).toMatch(/controller_type = \$1/);
+  }
+});
+
 test('the edit API cannot set the IP (telemetry gives it)', async () => {
   await expect(svc.updateMachine({ ...req(), body: { ip_address: '1.2.3.4' } })).rejects.toMatchObject({ status: 400 });
   expect(mockDb.calls()).toHaveLength(0);

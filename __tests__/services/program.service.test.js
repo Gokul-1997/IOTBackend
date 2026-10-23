@@ -280,27 +280,27 @@ describe('the gateway side: one token, every machine', () => {
      from the Machines page in the status" */
   test('status: every machine of the token\'s company — its id, name, IP, controller, api_key and program path — one query, and how often to ask', async () => {
     mockDb.queueResponse({ rows: [
-      { machine_id: '7', machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', controller: 'FANUC 0i-MF', api_key: 'k'.repeat(32),
+      { machine_id: '7', machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', controller: 'FANUC 0i-MF', controller_type: 'FANUC', api_key: 'k'.repeat(32),
         program_path: ' //CNC_MEM/USER/PATH1/ ', file_id: '42', program_name: 'O1001.nc', size_bytes: 24,
         sha256: 'a'.repeat(64), created_at: 'T0', waiting: '3', request_id: '9', requested_at: 'T1' },
-      { machine_id: '8', machine_serial_no: 'VMC-2', machine_ip: null, controller: null, api_key: null, program_path: '',
+      { machine_id: '8', machine_serial_no: 'VMC-2', machine_ip: null, controller: 'M80', controller_type: 'MITSUBISHI', api_key: null, program_path: '',
         file_id: null, waiting: null, request_id: null }
     ], rowCount: 2 });
     await expect(svc.gatewayStatus(gateway)).resolves.toEqual({
       company: 'Acme Gears',
       machines: [
-        { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', api_key: 'k'.repeat(32),
+        { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', controller_type: 'FANUC', api_key: 'k'.repeat(32),
           program_path: '//CNC_MEM/USER/PATH1/',
           program: { file_id: 42, program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), uploaded_at: 'T0' },
           programs_waiting: 3, backup_request: { id: 9, requested_at: 'T1' } },
-        { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: null, api_key: null, program_path: null,
+        { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: 'M80', controller_type: 'MITSUBISHI', api_key: null, program_path: null,
           program: null, programs_waiting: 0, backup_request: null }
       ],
       poll_seconds: 15
     });
     expect(mockDb.calls()).toHaveLength(1);
     expect(mockDb.calls()[0].params).toEqual([5, 30]);
-    expect(mockDb.calls()[0].text).toMatch(/m\.id AS machine_id, m\.machine_serial_no, .* m\.controller, m\.api_key, m\.program_path/);
+    expect(mockDb.calls()[0].text).toMatch(/m\.id AS machine_id, m\.machine_serial_no, .* m\.controller, m\.controller_type, m\.api_key, m\.program_path/);
   });
 
   describe('which machine a call is about', () => {

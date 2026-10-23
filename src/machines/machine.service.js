@@ -9,7 +9,7 @@ const { validateImageReference } = require('../files/media.service');
 
 const EDITABLE = ['machine_serial_no', 'line_id', 'plant_id', 'x_axis', 'y_axis', 'z_axis',
   'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table', 'atc_tool_capacity', 'model',
-  'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'program_path'];
+  'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'program_path', 'controller_type'];
 async function lockCompany(client, companyId) {
   if (!companyId) throw { status: 403, message: 'No company on this account' };
   const { rows } = await client.query('SELECT id FROM companies WHERE id = $1 AND is_active = TRUE FOR UPDATE', [companyId]);
@@ -61,10 +61,10 @@ exports.createMachine = async (req) => {
     const imageUrl = await validateImageReference({ user: req.user, imageUrl: req.body.image_url, plantId, client });
     const columns = ['plant_id', 'company_id', 'line_id', 'machine_serial_no',
       'x_axis', 'y_axis', 'z_axis', 'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table',
-      'atc_tool_capacity', 'model', 'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'api_key', 'program_path'];
+      'atc_tool_capacity', 'model', 'mmc_no', 'controller', 'spindle_rpm', 'image_url', 'hour_rate', 'api_key', 'program_path', 'controller_type'];
     const params = [plantId, req.user.company_id, lineId, serial,
       ...columns.slice(4, 17).map(key => key === 'image_url' ? imageUrl : specs[key] ?? null), hourRate, crypto.randomBytes(16).toString('hex'),
-      specs.program_path ?? null];
+      specs.program_path ?? null, specs.controller_type ?? null];
     const { rows } = await client.query(
       `INSERT INTO machines (${columns.join(', ')}) VALUES (${params.map((_, i) => '$' + (i + 1)).join(', ')})
        RETURNING id, plant_id, machine_serial_no, api_key`, params
@@ -151,6 +151,7 @@ exports.getMachines = async (req) => {
       m.model,
       m.mmc_no,
       m.controller,
+      m.controller_type,
       m.spindle_rpm,
       m.hour_rate,
       m.api_key,

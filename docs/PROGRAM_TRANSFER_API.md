@@ -6,7 +6,7 @@ all the company's machines, and one status call for all of them.**
 
 | Call | What it does |
 | --- | --- |
-| `GET  /api/device/v1/status` | Every machine at once: its `machine_id`, name, controller, `api_key` and program path; is a program waiting for it? Did someone ask for a backup? |
+| `GET  /api/device/v1/status` | Every machine at once: its `machine_id`, name, controller and controller type (Fanuc / Mitsubishi), `api_key` and program path; is a program waiting for it? Did someone ask for a backup? |
 | `GET  /api/device/v1/program?machine_id=ID` | Download the program waiting for that machine |
 | `POST /api/device/v1/backup` | Upload a backup file from a machine (form fields `machine_id`, `file`) |
 | `POST /api/device/v1/report` | Say what happened: program written, machine refused it, backup could not be read |
@@ -125,6 +125,7 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
       "machine": "VMC-01",
       "machine_ip": "192.168.1.10",
       "controller_name": "FANUC 0i-MF",
+      "controller_type": "FANUC",
       "api_key": "3f9a…32 characters…",
       "program_path": "//CNC_MEM/USER/PATH1/",
       "program": {
@@ -141,7 +142,8 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
       "machine_id": 8,
       "machine": "VMC-02",
       "machine_ip": null,
-      "controller_name": null,
+      "controller_name": "M80",
+      "controller_type": "MITSUBISHI",
       "api_key": "b71c…32 characters…",
       "program_path": null,
       "program": null,
@@ -159,6 +161,8 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
   then).
 - `controller_name` is the **Controller** on the Machines page (`null` when
   not filled in).
+- `controller_type` is the **Controller type** chosen there: `"FANUC"` or
+  `"MITSUBISHI"` (`null` when not chosen) — how the gateway talks to that CNC.
 - `api_key` is the machine's telemetry key — the one in its MQTT topic
   `machines/{api_key}/telemetry` — so the gateway can match the machines it
   already sends data for. Keep this answer as private as the token.
