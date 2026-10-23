@@ -18,6 +18,11 @@ const WHOLE_NUMBERS = {
 // ATC capacity stays free text: capacities are written like "20+1".
 const TEXT = { model: 'Model', controller: 'Controller', mmc_no: 'MMC no', atc_tool_capacity: 'ATC tool capacity' };
 const SWITCHES = { twin_spindle: 'Twin spindle', twin_table: 'Twin table' };
+// Program Transfer: where the machine keeps its programs, e.g. //CNC_MEM/USER/PATH1/
+// on a Fanuc — given to the company's gateway in GET /status (23 Oct 2026)
+const PATHS = { program_path: 'Program path' };
+const PATH_MAX = 255;
+const PATH_CHARS = /^[A-Za-z0-9 _\-.:/\\]+$/;
 
 const fail = (message) => Object.assign(new Error(message), { code: 'BAD_MACHINE_SPEC', status: 400 });
 const blank = (value) => value === null || value === undefined || (typeof value === 'string' && !value.trim());
@@ -35,6 +40,20 @@ function text(value, label) {
   return String(value).trim();
 }
 
+/**
+ * A folder as the gateway will be told it. The gateway writes programs there
+ * and reads backups from there, so it holds only what a path needs and can
+ * never climb out of itself ("..").
+ */
+function folder(value, label) {
+  const t = text(value, label);
+  if (t === null) return null;
+  if (t.length > PATH_MAX) throw fail(`${label} can be at most ${PATH_MAX} characters.`);
+  if (!PATH_CHARS.test(t)) throw fail(`${label} can hold letters, digits, spaces and _ - . : / \\ only.`);
+  if (t.split(/[\\/]+/).some(segment => segment === '..')) throw fail(`${label} cannot contain "..".`);
+  return t;
+}
+
 function onOff(value, label) {
   if (blank(value)) return null;
   if (value === true || value === 'true') return true;
@@ -46,7 +65,7 @@ function onOff(value, label) {
  *  out, so an edit changes only what it sends. */
 function cleanSpecs(body = {}) {
   const specs = {};
-  for (const [rules, clean] of [[WHOLE_NUMBERS, wholeNumber], [TEXT, text], [SWITCHES, onOff]]) {
+  for (const [rules, clean] of [[WHOLE_NUMBERS, wholeNumber], [TEXT, text], [SWITCHES, onOff], [PATHS, folder]]) {
     for (const [key, label] of Object.entries(rules)) {
       if (body[key] !== undefined) specs[key] = clean(body[key], label);
     }

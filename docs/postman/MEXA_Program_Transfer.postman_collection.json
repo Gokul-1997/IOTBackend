@@ -2,13 +2,13 @@
   "info": {
     "_postman_id": "f1d8654b-d90a-5a3c-9b4f-358cf0bee233",
     "name": "MEXA Program Transfer — Gateway API",
-    "description": "The company's gateway (Node-RED PC, laptop, any program) and the MEXA server: **4 HTTPS calls, one token for all machines**.\n\n| Call | |\n|---|---|\n| `GET /api/device/v1/status` | Every machine at once: program waiting? backup asked for? |\n| `GET /api/device/v1/program?machine=NAME` | Download the program waiting for that machine |\n| `POST /api/device/v1/backup` | Upload a backup (multipart `machine`, `file`) |\n| `POST /api/device/v1/report` | Program written / refused, backup could not be read |\n\n**Set the variables** (collection → Variables): `baseUrl` = the server, e.g. `https://stmapi.stmcnc.com`; `token` = the company's gateway token (`mxg_…`, from S&T); `machine` = a machine's name as /status lists it.\n\nHow the gateway talks to the CNC (FTP, FOCAS, a folder, anything) is up to the gateway. Full guide: docs/PROGRAM_TRANSFER_API.md.",
+    "description": "The company's gateway (Node-RED PC, laptop, any program) and the MEXA server: **4 HTTPS calls, one token for all machines**.\n\n| Call | |\n|---|---|\n| `GET /api/device/v1/status` | Every machine at once: machine_id, name, controller, api_key, program path; program waiting? backup asked for? |\n| `GET /api/device/v1/program?machine_id=ID` | Download the program waiting for that machine |\n| `POST /api/device/v1/backup` | Upload a backup (multipart `machine_id`, `file`) |\n| `POST /api/device/v1/report` | Program written / refused, backup could not be read |\n\n**Set the variables** (collection → Variables): `baseUrl` = the server, e.g. `https://stmapi.stmcnc.com`; `token` = the company's gateway token (`mxg_…`, from S&T); `machineId` = a machine's `machine_id` as /status lists it.\n\nHow the gateway talks to the CNC (FTP, FOCAS, a folder, anything) is up to the gateway. Full guide: docs/PROGRAM_TRANSFER_API.md.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
     {
       "name": "Gateway — the 4 calls (give this to the gateway team)",
-      "description": "Every call sends the company's token: `Authorization: Bearer {{token}}` (set on the collection). **One token for all machines**; S&T makes it. A call about one machine names it: `machine` (its name as /status lists it) or `machine_ip`.\n\n**The gateway loop**\n\n```\nevery 15 s:  GET /status                      ← one call, every machine\n  for each machine with a program  → GET /program?machine=NAME → write to the CNC\n                                   → POST /report {file_id, status: DONE}\n                                     or {file_id, status: FAILED, message}\n                                     next_program in the answer → the same again\n  for each machine with backup_request → read the program from the CNC\n                                   → POST /backup (machine, file)\n                                     or POST /report {backup_request_id, status: FAILED, message}\n```\n\nPrograms for one machine wait in line and go one after the other; different machines do not wait for each other.\n\nErrors are always JSON: `{\"status\":\"error\",\"code\":\"…\",\"message\":\"…\"}`. 429 = too many calls: wait and try again.",
+      "description": "Every call sends the company's token: `Authorization: Bearer {{token}}` (set on the collection). **One token for all machines**; S&T makes it. A call about one machine names it by its `machine_id`, as /status lists it.\n\n**The gateway loop**\n\n```\nevery 15 s:  GET /status                      ← one call, every machine\n  for each machine with a program  → GET /program?machine_id=ID → write to the CNC (program_path)\n                                   → POST /report {file_id, status: DONE}\n                                     or {file_id, status: FAILED, message}\n                                     next_program in the answer → the same again\n  for each machine with backup_request → read the program from the CNC\n                                   → POST /backup (machine_id, file)\n                                     or POST /report {backup_request_id, status: FAILED, message}\n```\n\nPrograms for one machine wait in line and go one after the other; different machines do not wait for each other.\n\nErrors are always JSON: `{\"status\":\"error\",\"code\":\"…\",\"message\":\"…\"}`. 429 = too many calls: wait and try again.",
       "item": [
         {
           "name": "1. Status — every machine, poll every 15 s",
@@ -27,7 +27,7 @@
                 "status"
               ]
             },
-            "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+            "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP as MEXA knows it (`null` until its telemetry has reported one).\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
           },
           "event": [
             {
@@ -39,16 +39,16 @@
                   "const body = pm.response.json();",
                   "pm.test('every machine in one answer', () => pm.expect(body.machines).to.be.an('array'));",
                   "pm.test('poll_seconds is given', () => pm.expect(body.poll_seconds).to.be.a('number'));",
-                  "const want = String(pm.collectionVariables.get('machine') || '').trim().toLowerCase();",
-                  "const m = body.machines.find(x => x.machine.toLowerCase() === want) || body.machines.find(x => x.program || x.backup_request);",
+                  "const want = Number(pm.collectionVariables.get('machineId'));",
+                  "const m = body.machines.find(x => x.machine_id === want) || body.machines.find(x => x.program || x.backup_request);",
                   "if (!m) {",
                   "  console.log('Nothing to do for any machine of ' + body.company + '.');",
                   "} else {",
-                  "  pm.collectionVariables.set('machine', m.machine);",
+                  "  pm.collectionVariables.set('machineId', m.machine_id);",
                   "  if (m.program) {",
                   "    pm.collectionVariables.set('fileId', m.program.file_id);",
                   "    pm.collectionVariables.set('sha256', m.program.sha256);",
-                  "    console.log(m.machine + ': ' + m.program.program_name + ' waiting (' + m.programs_waiting + ' in line) → call 2. Download the program');",
+                  "    console.log(m.machine + ' (machine_id ' + m.machine_id + ', program path ' + (m.program_path || 'not set') + '): ' + m.program.program_name + ' waiting (' + m.programs_waiting + ' in line) → call 2. Download the program');",
                   "  } else console.log(m.machine + ': nothing waiting.');",
                   "  if (m.backup_request) {",
                   "    pm.collectionVariables.set('backupRequestId', m.backup_request.id);",
@@ -77,7 +77,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP as MEXA knows it (`null` until its telemetry has reported one).\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "OK",
               "code": 200,
@@ -88,7 +88,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"program\": {\n        \"file_id\": 42,\n        \"program_name\": \"O1001.nc\",\n        \"size_bytes\": 1472,\n        \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n        \"uploaded_at\": \"2026-10-22T08:00:00.000Z\"\n      },\n      \"programs_waiting\": 2,\n      \"backup_request\": null\n    },\n    {\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": {\n        \"id\": 9,\n        \"requested_at\": \"2026-10-22T08:05:00.000Z\"\n      }\n    },\n    {\n      \"machine\": \"VMC-03\",\n      \"machine_ip\": \"192.168.1.12\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
+              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine_id\": 7,\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"api_key\": \"3f9a2c1e7b4d8a0c6e5f1b2d3a4c5e6f\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"program\": {\n        \"file_id\": 42,\n        \"program_name\": \"O1001.nc\",\n        \"size_bytes\": 1472,\n        \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n        \"uploaded_at\": \"2026-10-22T08:00:00.000Z\"\n      },\n      \"programs_waiting\": 2,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 8,\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"controller_name\": null,\n      \"api_key\": \"b71c0d9e8f7a6b5c4d3e2f1a0b9c8d7e\",\n      \"program_path\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": {\n        \"id\": 9,\n        \"requested_at\": \"2026-10-22T08:05:00.000Z\"\n      }\n    },\n    {\n      \"machine_id\": 9,\n      \"machine\": \"VMC-03\",\n      \"machine_ip\": \"192.168.1.12\",\n      \"controller_name\": \"Mitsubishi M80\",\n      \"api_key\": \"0a1b2c3d4e5f60718293a4b5c6d7e8f9\",\n      \"program_path\": \"M01:\\\\PRG\\\\USER\\\\\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
             },
             {
               "name": "Nothing to do",
@@ -107,7 +107,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP as MEXA knows it (`null` until its telemetry has reported one).\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "OK",
               "code": 200,
@@ -118,7 +118,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    },\n    {\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
+              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine_id\": 7,\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"api_key\": \"3f9a2c1e7b4d8a0c6e5f1b2d3a4c5e6f\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 8,\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"controller_name\": null,\n      \"api_key\": \"b71c0d9e8f7a6b5c4d3e2f1a0b9c8d7e\",\n      \"program_path\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
             },
             {
               "name": "Wrong, replaced or stopped token",
@@ -137,7 +137,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP as MEXA knows it (`null` until its telemetry has reported one).\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Unauthorized",
               "code": 401,
@@ -167,7 +167,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP as MEXA knows it (`null` until its telemetry has reported one).\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Unauthorized",
               "code": 401,
@@ -197,7 +197,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_ip` is the machine's IP as MEXA knows it (`null` until its telemetry has reported one).\n\nThe tests below pick the machine in the `machine` variable (or the first one with something to do) and save `machine`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP as MEXA knows it (`null` until its telemetry has reported one).\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Forbidden",
               "code": 403,
@@ -218,7 +218,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+              "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -230,9 +230,9 @@
               ],
               "query": [
                 {
-                  "key": "machine",
-                  "value": "{{machine}}",
-                  "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                  "key": "machine_id",
+                  "value": "{{machineId}}",
+                  "description": "The machine, as /status lists it (machine_id)"
                 }
               ]
             },
@@ -259,7 +259,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
                   "host": [
                     "{{baseUrl}}"
                   ],
@@ -271,9 +271,9 @@
                   ],
                   "query": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
-                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
+                      "description": "The machine, as /status lists it (machine_id)"
                     }
                   ]
                 },
@@ -300,6 +300,10 @@
                   "value": "O1001.nc"
                 },
                 {
+                  "key": "X-Machine-Id",
+                  "value": "7"
+                },
+                {
                   "key": "X-Machine",
                   "value": "VMC-01"
                 },
@@ -316,7 +320,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
                   "host": [
                     "{{baseUrl}}"
                   ],
@@ -328,9 +332,9 @@
                   ],
                   "query": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
-                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
+                      "description": "The machine, as /status lists it (machine_id)"
                     }
                   ]
                 },
@@ -353,7 +357,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
                   "host": [
                     "{{baseUrl}}"
                   ],
@@ -365,9 +369,9 @@
                   ],
                   "query": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
-                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
+                      "description": "The machine, as /status lists it (machine_id)"
                     }
                   ]
                 },
@@ -382,15 +386,15 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_NOT_FOUND\",\n  \"message\": \"No machine \\\"VMC-9\\\" in Acme Gears. Use the names and IPs GET /status lists.\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_NOT_FOUND\",\n  \"message\": \"No machine 70 in Acme Gears. Use the machine_id GET /status lists.\"\n}"
             },
             {
-              "name": "Two machines with that name",
+              "name": "machine_id not a number",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
                   "host": [
                     "{{baseUrl}}"
                   ],
@@ -402,46 +406,9 @@
                   ],
                   "query": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
-                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
-                    }
-                  ]
-                },
-                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
-              },
-              "status": "Conflict",
-              "code": 409,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json; charset=utf-8"
-                }
-              ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_AMBIGUOUS\",\n  \"message\": \"2 machines are named \\\"VMC-01\\\". Send \\\"machine_ip\\\" as well, or give them different names on the Machines page.\"\n}"
-            },
-            {
-              "name": "No machine named",
-              "originalRequest": {
-                "method": "GET",
-                "header": [],
-                "url": {
-                  "raw": "{{baseUrl}}/api/device/v1/program?machine={{machine}}",
-                  "host": [
-                    "{{baseUrl}}"
-                  ],
-                  "path": [
-                    "api",
-                    "device",
-                    "v1",
-                    "program"
-                  ],
-                  "query": [
-                    {
-                      "key": "machine",
-                      "value": "{{machine}}",
-                      "description": "The machine's name as /status lists it (or send machine_ip=… instead)"
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
+                      "description": "The machine, as /status lists it (machine_id)"
                     }
                   ]
                 },
@@ -456,7 +423,44 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_REQUIRED\",\n  \"message\": \"Say which machine: \\\"machine\\\" (its name in MEXA, as GET /status lists it) or \\\"machine_ip\\\".\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"BAD_MACHINE_ID\",\n  \"message\": \"machine_id must be a whole number: machine_id from GET /status.\"\n}"
+            },
+            {
+              "name": "No machine named",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
+                      "description": "The machine, as /status lists it (machine_id)"
+                    }
+                  ]
+                },
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_REQUIRED\",\n  \"message\": \"Say which machine: \\\"machine_id\\\", as GET /status lists it.\"\n}"
             }
           ]
         },
@@ -484,14 +488,14 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+              "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
           },
           "event": [
             {
@@ -536,14 +540,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -554,7 +558,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"next_program\": {\n    \"file_id\": 44,\n    \"program_name\": \"O1002.nc\",\n    \"size_bytes\": 980,\n    \"sha256\": \"4b7d0e9c2a1f8e3d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170f6e\",\n    \"uploaded_at\": \"2026-10-22T08:01:00.000Z\"\n  }\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine_id\": 7,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"next_program\": {\n    \"file_id\": 44,\n    \"program_name\": \"O1002.nc\",\n    \"size_bytes\": 980,\n    \"sha256\": \"4b7d0e9c2a1f8e3d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170f6e\",\n    \"uploaded_at\": \"2026-10-22T08:01:00.000Z\"\n  }\n}"
             },
             {
               "name": "Recorded — nothing else waiting",
@@ -580,14 +584,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -598,7 +602,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"next_program\": null\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine_id\": 7,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"next_program\": null\n}"
             },
             {
               "name": "Same report again (retry)",
@@ -624,14 +628,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -642,7 +646,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"unchanged\": true,\n  \"next_program\": null\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine_id\": 7,\n  \"machine\": \"VMC-01\",\n  \"status\": \"DONE\",\n  \"unchanged\": true,\n  \"next_program\": null\n}"
             },
             {
               "name": "No such program in the company",
@@ -668,14 +672,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Not Found",
               "code": 404,
@@ -712,14 +716,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Bad Request",
               "code": 400,
@@ -756,14 +760,14 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"DONE\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"DONE\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Bad Request",
               "code": 400,
@@ -802,7 +806,7 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+              "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -848,7 +852,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -866,7 +870,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"file_id\": 42,\n  \"machine\": \"VMC-01\",\n  \"status\": \"FAILED\",\n  \"next_program\": null\n}"
+              "body": "{\n  \"file_id\": 42,\n  \"machine_id\": 7,\n  \"machine\": \"VMC-01\",\n  \"status\": \"FAILED\",\n  \"next_program\": null\n}"
             },
             {
               "name": "No reason given",
@@ -892,7 +896,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -936,7 +940,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine\": \"{{machine}}\",\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
+                  "raw": "{\n  \"file_id\": {{fileId}},\n  \"machine_id\": {{machineId}},\n  \"status\": \"FAILED\",\n  \"message\": \"CNC memory full\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -979,10 +983,10 @@
               "mode": "formdata",
               "formdata": [
                 {
-                  "key": "machine",
-                  "value": "{{machine}}",
+                  "key": "machine_id",
+                  "value": "{{machineId}}",
                   "type": "text",
-                  "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                  "description": "The machine, as /status lists it (machine_id). Required."
                 },
                 {
                   "key": "file",
@@ -998,7 +1002,7 @@
                 }
               ]
             },
-            "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+            "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
           },
           "event": [
             {
@@ -1035,10 +1039,10 @@
                   "mode": "formdata",
                   "formdata": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
                       "type": "text",
-                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                      "description": "The machine, as /status lists it (machine_id). Required."
                     },
                     {
                       "key": "file",
@@ -1054,7 +1058,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Created",
               "code": 201,
@@ -1065,7 +1069,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"machine\": \"VMC-02\",\n  \"file\": {\n    \"file_id\": 43,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-22T08:06:10.000Z\"\n  },\n  \"answered_request\": 9\n}"
+              "body": "{\n  \"machine_id\": 8,\n  \"machine\": \"VMC-02\",\n  \"file\": {\n    \"file_id\": 43,\n    \"program_name\": \"O1001.nc\",\n    \"size_bytes\": 1472,\n    \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n    \"uploaded_at\": \"2026-10-22T08:06:10.000Z\"\n  },\n  \"answered_request\": 9\n}"
             },
             {
               "name": "No machine named",
@@ -1088,10 +1092,10 @@
                   "mode": "formdata",
                   "formdata": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
                       "type": "text",
-                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                      "description": "The machine, as /status lists it (machine_id). Required."
                     },
                     {
                       "key": "file",
@@ -1107,7 +1111,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -1118,7 +1122,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_REQUIRED\",\n  \"message\": \"Say which machine: \\\"machine\\\" (its name in MEXA, as GET /status lists it) or \\\"machine_ip\\\".\"\n}"
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_REQUIRED\",\n  \"message\": \"Say which machine: \\\"machine_id\\\", as GET /status lists it.\"\n}"
             },
             {
               "name": "No file attached",
@@ -1141,10 +1145,10 @@
                   "mode": "formdata",
                   "formdata": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
                       "type": "text",
-                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                      "description": "The machine, as /status lists it (machine_id). Required."
                     },
                     {
                       "key": "file",
@@ -1160,7 +1164,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -1194,10 +1198,10 @@
                   "mode": "formdata",
                   "formdata": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
                       "type": "text",
-                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                      "description": "The machine, as /status lists it (machine_id). Required."
                     },
                     {
                       "key": "file",
@@ -1213,7 +1217,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -1247,10 +1251,10 @@
                   "mode": "formdata",
                   "formdata": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
                       "type": "text",
-                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                      "description": "The machine, as /status lists it (machine_id). Required."
                     },
                     {
                       "key": "file",
@@ -1266,7 +1270,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Bad Request",
               "code": 400,
@@ -1300,10 +1304,10 @@
                   "mode": "formdata",
                   "formdata": [
                     {
-                      "key": "machine",
-                      "value": "{{machine}}",
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
                       "type": "text",
-                      "description": "The machine's name as /status lists it (or send machine_ip instead). Required."
+                      "description": "The machine, as /status lists it (machine_id). Required."
                     },
                     {
                       "key": "file",
@@ -1319,7 +1323,7 @@
                     }
                   ]
                 },
-                "description": "Multipart form data: `machine` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
+                "description": "Multipart form data: `machine_id` and `file`. Answers that machine's open backup request (the person who asked is notified). A backup can also be sent without a request — after a change on the machine, or every night. A backup needs no report.\n\nText NC programs up to 20 MB; extensions `.nc .prg .cnc .txt .tap .eia .min .gcode .ptp .mpf .spf` or none (`O1234`)."
               },
               "status": "Payload Too Large",
               "code": 413,
@@ -1421,7 +1425,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"backup_request_id\": 9,\n  \"machine\": \"VMC-02\",\n  \"status\": \"FAILED\"\n}"
+              "body": "{\n  \"backup_request_id\": 9,\n  \"machine_id\": 8,\n  \"machine\": \"VMC-02\",\n  \"status\": \"FAILED\"\n}"
             },
             {
               "name": "Already closed (retry)",
@@ -1465,7 +1469,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"backup_request_id\": 9,\n  \"machine\": \"VMC-02\",\n  \"status\": \"FAILED\",\n  \"unchanged\": true\n}"
+              "body": "{\n  \"backup_request_id\": 9,\n  \"machine_id\": 8,\n  \"machine\": \"VMC-02\",\n  \"status\": \"FAILED\",\n  \"unchanged\": true\n}"
             },
             {
               "name": "No such request in the company",
@@ -1775,7 +1779,7 @@
                 "machines"
               ]
             },
-            "description": "The company's machines, each with the program in front of its line (or the last one reported), how many wait, last backup and open backup request; beside them, whether the gateway is online. Saves the first machine as `machineId` and `machine` unless set.",
+            "description": "The company's machines, each with the program in front of its line (or the last one reported), how many wait, last backup and open backup request; beside them, whether the gateway is online. Saves the first machine as `machineId` unless set.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1797,7 +1801,6 @@
                   "const list = pm.response.json().data;",
                   "if (!pm.collectionVariables.get('machineId') && list.length) {",
                   "  pm.collectionVariables.set('machineId', list[0].id);",
-                  "  pm.collectionVariables.set('machine', list[0].machine_serial_no);",
                   "}",
                   "console.log(list.map(m => m.id + ' ' + m.machine_serial_no + (m.waiting ? ' (' + m.waiting + ' waiting)' : '')).join('\\n'));"
                 ]
@@ -1934,10 +1937,10 @@
       "description": "The company's gateway token, from S&T (one for all machines)"
     },
     {
-      "key": "machine",
-      "value": "VMC-01",
+      "key": "machineId",
+      "value": "7",
       "type": "string",
-      "description": "A machine's name as /status lists it (1. Status picks one with work when this one has none)"
+      "description": "A machine's machine_id as /status lists it (1. Status picks one with work when this one has none)"
     },
     {
       "key": "fileId",
@@ -1998,12 +2001,6 @@
       "value": "",
       "type": "string",
       "description": "Set by d. Sign in"
-    },
-    {
-      "key": "machineId",
-      "value": "",
-      "type": "string",
-      "description": "Set by e. Machines (or type it)"
     }
   ]
 }

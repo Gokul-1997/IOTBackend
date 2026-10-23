@@ -8,7 +8,7 @@
  * (docs/PROGRAM_TRANSFER_API.md):
  *
  *   every 15 s   GET /status  — every machine in one answer
- *     a machine with a program waiting → GET /program?machine=NAME → check
+ *     a machine with a program waiting → GET /program?machine_id=ID → check
  *                its SHA-256 → write it into the machine's folder → POST
  *                /report DONE (or FAILED, and why); the answer names the
  *                machine's next program, which goes the same way at once
@@ -19,7 +19,9 @@
  * the folder given for it (the CNC's network share, its DNC folder). To try
  * the whole flow on a laptop, any PROGRAM_DIR will do. A controller reached
  * another way (FTP, FOCAS…) replaces the two functions marked MACHINE below;
- * they are given the machine's name and IP. Nothing else changes.
+ * they are given the machine as /status lists it — its machine_id, name, IP,
+ * controller and program path (the CNC's folder, from the Machines page).
+ * Nothing else changes.
  *
  * Node.js 20 or newer, nothing to install:
  *
@@ -32,7 +34,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const DEVICE_API = '/api/device/v1';
-const AGENT = 'mexa-gateway 2';
+const AGENT = 'mexa-gateway 3';
 const NAME_MAX = 100;
 /** Programs written to one machine in one round, one after the other; the rest wait for the next round. */
 const PER_ROUND = 10;
@@ -93,10 +95,16 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
 
   const report = async body => (await call('POST', '/report', { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
   const reason = err => String(err?.message || err).slice(0, 500);
+  /** How a call names a machine: its machine_id (since 23 Oct 2026); its name for a server older than that. */
+  const named = machine => (machine.machine_id ? { machine_id: machine.machine_id } : { machine: machine.machine });
 
   /* ── MACHINE ── how this gateway reaches a machine: its program folder.
      For FTP, FOCAS or a controller's own tool, replace these two; `machine`
-     is the machine from GET /status: { machine (its name), machine_ip }. ── */
+     is the machine from GET /status: { machine_id, machine (its name),
+     machine_ip, controller_name, program_path, … }. program_path is the
+     CNC's own folder as typed on the Machines page (//CNC_MEM/USER/PATH1/ on
+     a Fanuc), for such a version; this folder version never takes it for a
+     folder on this PC — only PROGRAM_DIR and MACHINE_DIRS, set here. ── */
 
   /** Put the program where the machine takes it from — whole, or not at all. */
   async function writeToMachine(machine, name, data) {
@@ -130,7 +138,8 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
    * whether another one waits.
    */
   async function deliver(machine) {
-    const res = await call('GET', `/program?machine=${encodeURIComponent(machine.machine)}`);
+    const who = named(machine);
+    const res = await call('GET', `/program?${new URLSearchParams(who)}`);
     const fileId = Number(res.headers.get('x-file-id'));
     const data = Buffer.from(await res.arrayBuffer());
     let name = machine.program?.program_name || `file ${fileId}`;
@@ -141,11 +150,11 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
       }
       await writeToMachine(machine, name, data);
     } catch (err) {
-      const answer = await report({ file_id: fileId, machine: machine.machine, status: 'FAILED', message: reason(err) });
+      const answer = await report({ file_id: fileId, ...who, status: 'FAILED', message: reason(err) });
       log(`${machine.machine}: ${name} NOT written — ${reason(err)}`);
       return answer;
     }
-    const answer = await report({ file_id: fileId, machine: machine.machine, status: 'DONE' });
+    const answer = await report({ file_id: fileId, ...who, status: 'DONE' });
     log(`${machine.machine}: ${name} written (${data.length} bytes)`);
     return answer;
   }
@@ -168,16 +177,17 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
   /** Someone pressed Backup now for this machine: send its program, or say why it cannot be read. */
   async function backup(machine) {
     const requestId = machine.backup_request.id;
+    const who = named(machine);
     let file;
     try {
       file = await readFromMachine(machine);
     } catch (err) {
-      await report({ backup_request_id: requestId, machine: machine.machine, status: 'FAILED', message: reason(err) });
+      await report({ backup_request_id: requestId, ...who, status: 'FAILED', message: reason(err) });
       log(`${machine.machine}: backup NOT sent — ${reason(err)}`);
       return 'FAILED';
     }
     const form = new FormData();
-    form.append('machine', machine.machine);
+    for (const [key, value] of Object.entries(who)) form.append(key, String(value));
     form.append('program_name', file.name);
     form.append('file', new Blob([file.data]), file.name);
     try {
@@ -185,7 +195,7 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
     } catch (err) {
       // refused for what it is (not a text program, too large…): tell the person; anything else, try again
       if (!(err instanceof ServerError) || err.status === 401 || err.status === 429 || err.status >= 500) throw err;
-      await report({ backup_request_id: requestId, machine: machine.machine, status: 'FAILED', message: reason(err) });
+      await report({ backup_request_id: requestId, ...who, status: 'FAILED', message: reason(err) });
       log(`${machine.machine}: backup of ${file.name} refused — ${reason(err)}`);
       return 'FAILED';
     }

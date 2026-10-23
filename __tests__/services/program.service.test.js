@@ -276,28 +276,55 @@ describe('the gateway side: one token, every machine', () => {
   const gateway = { id: 3, company_id: 5, company_name: 'Acme Gears' };
   const vmc1 = (o = {}) => ({ ...machine, is_active: true, machine_ip: '192.168.1.10', ...o });
 
-  test('status: every machine of the token\'s company, one query, and how often to ask', async () => {
+  /* 23 Oct 2026, the user: "machine_id, not the name; the controller name, the api_key and the program path
+     from the Machines page in the status" */
+  test('status: every machine of the token\'s company — its id, name, IP, controller, api_key and program path — one query, and how often to ask', async () => {
     mockDb.queueResponse({ rows: [
-      { machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', file_id: '42', program_name: 'O1001.nc', size_bytes: 24,
+      { machine_id: '7', machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', controller: 'FANUC 0i-MF', api_key: 'k'.repeat(32),
+        program_path: ' //CNC_MEM/USER/PATH1/ ', file_id: '42', program_name: 'O1001.nc', size_bytes: 24,
         sha256: 'a'.repeat(64), created_at: 'T0', waiting: '3', request_id: '9', requested_at: 'T1' },
-      { machine_serial_no: 'VMC-2', machine_ip: null, file_id: null, waiting: null, request_id: null }
+      { machine_id: '8', machine_serial_no: 'VMC-2', machine_ip: null, controller: null, api_key: null, program_path: '',
+        file_id: null, waiting: null, request_id: null }
     ], rowCount: 2 });
     await expect(svc.gatewayStatus(gateway)).resolves.toEqual({
       company: 'Acme Gears',
       machines: [
-        { machine: 'VMC-1', machine_ip: '192.168.1.10',
+        { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', api_key: 'k'.repeat(32),
+          program_path: '//CNC_MEM/USER/PATH1/',
           program: { file_id: 42, program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), uploaded_at: 'T0' },
           programs_waiting: 3, backup_request: { id: 9, requested_at: 'T1' } },
-        { machine: 'VMC-2', machine_ip: null, program: null, programs_waiting: 0, backup_request: null }
+        { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: null, api_key: null, program_path: null,
+          program: null, programs_waiting: 0, backup_request: null }
       ],
       poll_seconds: 15
     });
     expect(mockDb.calls()).toHaveLength(1);
     expect(mockDb.calls()[0].params).toEqual([5, 30]);
+    expect(mockDb.calls()[0].text).toMatch(/m\.id AS machine_id, m\.machine_serial_no, .* m\.controller, m\.api_key, m\.program_path/);
   });
 
   describe('which machine a call is about', () => {
     const find = input => svc._internal.machineOf(gateway, input);
+
+    test('by machine_id, as GET /status lists it — inside the token\'s company; a name or IP sent with it must be its own', async () => {
+      mockDb.queueResponse(one(vmc1()), one(vmc1()), one(vmc1()));
+      await expect(find({ machine_id: 7 })).resolves.toMatchObject({ id: 7, machine_serial_no: 'VMC-1' });
+      await expect(find({ machine_id: ' 7 ', machine: 'vmc-1', machine_ip: '192.168.1.10' })).resolves.toMatchObject({ id: 7 });
+      await expect(find({ machine_id: '7', machine: 'VMC-2' })).rejects.toMatchObject({ status: 400, code: 'MACHINE_MISMATCH',
+        message: 'machine_id 7 is VMC-1 (192.168.1.10), not "VMC-2".' });
+      expect(mockDb.calls().map(c => c.params)).toEqual([[7, 5], [7, 5], [7, 5]]);
+      expect(mockDb.calls()[0].text).toMatch(/WHERE m\.id = \$1 AND m\.company_id = \$2/);
+
+      resetDb();
+      mockDb.queueResponse(none, one(vmc1({ is_active: false })));
+      await expect(find({ machine_id: 70 })).rejects.toMatchObject({ status: 404, code: 'MACHINE_NOT_FOUND',
+        message: 'No machine 70 in Acme Gears. Use the machine_id GET /status lists.' });
+      await expect(find({ machine_id: 7 })).rejects.toMatchObject({ status: 403, code: 'MACHINE_INACTIVE' });
+      for (const bad of ['VMC-1', '7.5', '-1', '0', 1e12, '{{machineId}}']) {
+        await expect(find({ machine_id: bad })).rejects.toMatchObject({ status: 400, code: 'BAD_MACHINE_ID' });
+      }
+      expect(mockDb.calls()).toHaveLength(2);                          // nothing asked for a malformed id
+    });
 
     test('by name (any case, spaces trimmed), by IP, or both — always inside the token\'s company', async () => {
       mockDb.queueResponse(one(vmc1()), one(vmc1()), one(vmc1()));
@@ -309,7 +336,7 @@ describe('the gateway side: one token, every machine', () => {
     });
 
     test('nothing named: 400; two of the same name: 409 with what to send; switched off: 403; unknown: 404 naming the company', async () => {
-      await expect(find({})).rejects.toMatchObject({ status: 400, code: 'MACHINE_REQUIRED' });
+      await expect(find({})).rejects.toMatchObject({ status: 400, code: 'MACHINE_REQUIRED', message: 'Say which machine: "machine_id", as GET /status lists it.' });
       expect(mockDb.calls()).toHaveLength(0);
 
       mockDb.queueResponse({ rows: [vmc1(), vmc1({ id: 8, machine_ip: '192.168.1.11' })], rowCount: 2 });
@@ -321,11 +348,11 @@ describe('the gateway side: one token, every machine', () => {
 
       mockDb.queueResponse(none, none, none);
       await expect(find({ machine: 'VMC-9' })).rejects.toMatchObject({ status: 404, code: 'MACHINE_NOT_FOUND',
-        message: 'No machine "VMC-9" in Acme Gears. Use the names and IPs GET /status lists.' });
+        message: 'No machine "VMC-9" in Acme Gears. Use the machine_id GET /status lists.' });
       await expect(find({ machine_ip: '10.0.0.9' })).rejects.toMatchObject({
-        message: 'No machine with IP 10.0.0.9 in Acme Gears. Use the names and IPs GET /status lists.' });
+        message: 'No machine with IP 10.0.0.9 in Acme Gears. Use the machine_id GET /status lists.' });
       await expect(find({ machine: 'VMC-1', machine_ip: '10.0.0.9' })).rejects.toMatchObject({
-        message: 'No machine "VMC-1" with IP 10.0.0.9 in Acme Gears. Use the names and IPs GET /status lists.' });
+        message: 'No machine "VMC-1" with IP 10.0.0.9 in Acme Gears. Use the machine_id GET /status lists.' });
     });
 
     test('an old machine that shares a name with a switched-on one does not get in the way', async () => {
@@ -353,8 +380,8 @@ describe('the gateway side: one token, every machine', () => {
     mockDb.queueResponse(one(vmc1()),
       one({ id: '43', machine_id: 7, program_name: 'O1001.nc', kind: 'BACKUP', size_bytes: 14, sha256: 'b'.repeat(64), created_at: 'T2' }),
       one({ id: '9', requested_by: 2 }), none);
-    const r = await svc.gatewayBackup(gateway, stage('%\nO1001\nM30\n%\n'), { machine: 'VMC-1', program_name: 'O1001.nc' });
-    expect(r).toEqual({ machine: 'VMC-1', file: { file_id: 43, program_name: 'O1001.nc', size_bytes: 14, sha256: 'b'.repeat(64), uploaded_at: 'T2' },
+    const r = await svc.gatewayBackup(gateway, stage('%\nO1001\nM30\n%\n'), { machine_id: '7', program_name: 'O1001.nc' });
+    expect(r).toEqual({ machine_id: 7, machine: 'VMC-1', file: { file_id: 43, program_name: 'O1001.nc', size_bytes: 14, sha256: 'b'.repeat(64), uploaded_at: 'T2' },
                         answered_request: 9 });
     const insert = sql(/INSERT INTO program_files/);
     expect(insert.params[2]).toBe('company-5/programs/machine-7/backups');
@@ -387,7 +414,7 @@ describe('the gateway reports what happened — and the line moves on', () => {
   test("DONE: the program is on the machine, the uploader is told, and the answer names the machine's next program", async () => {
     mockDb.queueResponse(reported(), none, next);
     await expect(svc.gatewayReport(gateway, { file_id: 42, status: 'done' })).resolves.toEqual({
-      file_id: 42, machine: 'VMC-1', status: 'DONE',
+      file_id: 42, machine_id: 7, machine: 'VMC-1', status: 'DONE',
       next_program: { file_id: 43, program_name: 'O1002.nc', size_bytes: 30, sha256: 'c'.repeat(64), uploaded_at: 'T3' }
     });
     const update = sql(/UPDATE program_files f SET delivery_status/);
@@ -407,7 +434,15 @@ describe('the gateway reports what happened — and the line moves on', () => {
       'VMC-1 could not use "O1001.nc": CNC memory full', '/programs?machine_id=7&file_id=42']);
   });
 
-  test('a machine sent with the report must be the program\'s machine', async () => {
+  test('a machine_id sent with the report must be the program\'s machine', async () => {
+    mockDb.queueResponse(one({ id: 8, company_id: 5, machine_serial_no: 'VMC-2', is_active: true }), none,
+      one({ id: '42', kind: 'NEW', machine_id: 7, machine_serial_no: 'VMC-1' }));
+    await expect(svc.gatewayReport(gateway, { file_id: 42, machine_id: 8, status: 'DONE' })).rejects.toMatchObject({
+      status: 400, code: 'MACHINE_MISMATCH', message: 'Program 42 is for VMC-1, not VMC-2.' });
+    expect(mockDb.calls()[0].params).toEqual([8, 5]);
+  });
+
+  test('a machine name sent with the report (an older gateway) must be the program\'s machine too', async () => {
     mockDb.queueResponse(one({ id: 8, company_id: 5, machine_serial_no: 'VMC-2', is_active: true }), none,
       one({ id: '42', kind: 'NEW', machine_id: 7, machine_serial_no: 'VMC-1' }));
     await expect(svc.gatewayReport(gateway, { file_id: 42, machine: 'VMC-2', status: 'DONE' })).rejects.toMatchObject({
@@ -418,7 +453,7 @@ describe('the gateway reports what happened — and the line moves on', () => {
   test('the same report again (a retry) changes nothing and tells no one twice', async () => {
     mockDb.queueResponse(none, one({ id: '42', kind: 'NEW', machine_id: 7, machine_serial_no: 'VMC-1' }), none);
     await expect(svc.gatewayReport(gateway, { file_id: 42, status: 'DONE' }))
-      .resolves.toEqual({ file_id: 42, machine: 'VMC-1', status: 'DONE', unchanged: true, next_program: null });
+      .resolves.toEqual({ file_id: 42, machine_id: 7, machine: 'VMC-1', status: 'DONE', unchanged: true, next_program: null });
     expect(sql(/INSERT INTO notifications/)).toBeUndefined();
   });
 
@@ -450,7 +485,7 @@ describe('the gateway reports what happened — and the line moves on', () => {
   test('a backup that could not be read closes the request and warns who asked', async () => {
     mockDb.queueResponse(one({ id: '9', machine_id: 7, requested_by: 2, machine_serial_no: 'VMC-1' }), none);
     await expect(svc.gatewayReport(gateway, { backup_request_id: 9, status: 'FAILED', message: 'CNC not reachable' }))
-      .resolves.toEqual({ backup_request_id: 9, machine: 'VMC-1', status: 'FAILED' });
+      .resolves.toEqual({ backup_request_id: 9, machine_id: 7, machine: 'VMC-1', status: 'FAILED' });
     const update = sql(/UPDATE program_backup_requests r SET closed_at = NOW\(\), error_message = \$3/);
     expect(update.params).toEqual([9, 5, 'CNC not reachable', null]);
     expect(update.text).toMatch(/r\.company_id = \$2/);
@@ -461,7 +496,7 @@ describe('the gateway reports what happened — and the line moves on', () => {
   test("a backup request already closed: unchanged; another company's: not found", async () => {
     mockDb.queueResponse(none, one({ id: '9', machine_id: 7, machine_serial_no: 'VMC-1' }));
     await expect(svc.gatewayReport(gateway, { backup_request_id: 9, status: 'FAILED', message: 'x' }))
-      .resolves.toEqual({ backup_request_id: 9, machine: 'VMC-1', status: 'FAILED', unchanged: true });
+      .resolves.toEqual({ backup_request_id: 9, machine_id: 7, machine: 'VMC-1', status: 'FAILED', unchanged: true });
     resetDb();
     mockDb.queueResponse(none, none);
     await expect(svc.gatewayReport(gateway, { backup_request_id: 10, status: 'FAILED', message: 'x' }))

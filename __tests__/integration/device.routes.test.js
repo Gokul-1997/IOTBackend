@@ -1,8 +1,9 @@
 /*
  * /api/device/v1 over HTTP — the four calls a company's gateway makes with
- * its one token: GET /status (every machine), GET /program?machine=,
- * POST /backup (machine + file), POST /report. The database is the mock;
- * files go to a temporary storage folder.
+ * its one token: GET /status (every machine), GET /program?machine_id=,
+ * POST /backup (machine_id + file), POST /report. A machine is named by its
+ * machine_id since 23 Oct 2026; older gateways' names still work. The
+ * database is the mock; files go to a temporary storage folder.
  */
 const fs = require('fs');
 const os = require('os');
@@ -68,12 +69,14 @@ test('no token, a wrong one, or an old machine token: 401 with a code the gatewa
   expect(old.body.code).toBe('TOKEN_REPLACED');
 });
 
-test('status: every machine of the company in one call — its name, IP, next program, line and backup request', async () => {
+test('status: every machine of the company in one call — its id, name, IP, controller, api_key, program path, next program, line and backup request', async () => {
   authRow();
   mockDb.queueResponse({ rows: [
-    { machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', file_id: '81', program_name: 'O8001.nc', size_bytes: 20,
+    { machine_id: 7, machine_serial_no: 'VMC-1', machine_ip: '192.168.1.10', controller: ' FANUC 0i-MF ', api_key: 'k'.repeat(32),
+      program_path: '//CNC_MEM/USER/PATH1/', file_id: '81', program_name: 'O8001.nc', size_bytes: 20,
       sha256: 'a'.repeat(64), created_at: '2026-10-22T05:00:00Z', waiting: '2', request_id: '9', requested_at: '2026-10-22T05:10:00Z' },
-    { machine_serial_no: 'VMC-2', machine_ip: null, file_id: null, waiting: null, request_id: null }
+    { machine_id: 8, machine_serial_no: 'VMC-2', machine_ip: null, controller: '', api_key: null, program_path: null,
+      file_id: null, waiting: null, request_id: null }
   ], rowCount: 2 });
   const res = await request(app).get('/api/device/v1/status').set(AUTH);
   expect(res.status).toBe(200);
@@ -81,11 +84,13 @@ test('status: every machine of the company in one call — its name, IP, next pr
   expect(res.body).toEqual({
     company: 'Acme Gears',
     machines: [
-      { machine: 'VMC-1', machine_ip: '192.168.1.10',
+      { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', api_key: 'k'.repeat(32),
+        program_path: '//CNC_MEM/USER/PATH1/',
         program: { file_id: 81, program_name: 'O8001.nc', size_bytes: 20, sha256: 'a'.repeat(64), uploaded_at: '2026-10-22T05:00:00Z' },
         programs_waiting: 2,
         backup_request: { id: 9, requested_at: '2026-10-22T05:10:00Z' } },
-      { machine: 'VMC-2', machine_ip: null, program: null, programs_waiting: 0, backup_request: null }
+      { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: null, api_key: null, program_path: null,
+        program: null, programs_waiting: 0, backup_request: null }
     ],
     poll_seconds: 15
   });
@@ -98,7 +103,7 @@ test('status: every machine of the company in one call — its name, IP, next pr
 test('program: the machine named gets the file in front of its line, with its id, name and checksum in the headers', async () => {
   const body = Buffer.from('%\nO8001\nG0 X25\nM30\n%\n');
   const file = await savedProgram(body);
-  for (const query of ['machine=VMC-1', 'machine=vmc-1', 'machine_ip=192.168.1.10']) {
+  for (const query of ['machine_id=7', 'machine=VMC-1', 'machine=vmc-1', 'machine_ip=192.168.1.10']) {   // the id; names from older gateways
     authRow();
     machineRow();
     mockDb.queueResponse(one(file));
@@ -107,6 +112,7 @@ test('program: the machine named gets the file in front of its line, with its id
     expect(res.body.equals(body)).toBe(true);
     expect(res.headers['x-program-name']).toBe('O8001.nc');
     expect(res.headers['x-file-id']).toBe('81');
+    expect(res.headers['x-machine-id']).toBe('7');
     expect(res.headers['x-machine']).toBe('VMC-1');
     expect(res.headers['x-sha256']).toBe(file.sha256);
     expect(res.headers['content-length']).toBe(String(body.length));
@@ -125,32 +131,47 @@ test('program: no machine named, an unknown machine, nothing waiting — each a 
   let res = await request(app).get('/api/device/v1/program').set(AUTH);
   expect([res.status, res.body.code]).toEqual([400, 'MACHINE_REQUIRED']);
 
+  expect(res.body.message).toBe('Say which machine: "machine_id", as GET /status lists it.');
+
+  authRow();
+  mockDb.queueResponse(none);
+  res = await request(app).get('/api/device/v1/program?machine_id=70').set(AUTH);
+  expect([res.status, res.body.code]).toEqual([404, 'MACHINE_NOT_FOUND']);
+  expect(res.body.message).toBe('No machine 70 in Acme Gears. Use the machine_id GET /status lists.');
+  expect(mockDb.calls().at(-1).params).toEqual([70, 5]);               // within the token's company
+
+  for (const bad of ['abc', '7.5', '-7', '0', '99999999999']) {
+    authRow();
+    res = await request(app).get(`/api/device/v1/program?machine_id=${bad}`).set(AUTH);
+    expect([res.status, res.body.code]).toEqual([400, 'BAD_MACHINE_ID']);
+  }
+
   authRow();
   mockDb.queueResponse(none);
   res = await request(app).get('/api/device/v1/program?machine=VMC-9').set(AUTH);
   expect([res.status, res.body.code]).toEqual([404, 'MACHINE_NOT_FOUND']);
-  expect(res.body.message).toBe('No machine "VMC-9" in Acme Gears. Use the names and IPs GET /status lists.');
+  expect(res.body.message).toBe('No machine "VMC-9" in Acme Gears. Use the machine_id GET /status lists.');
 
   authRow();
   machineRow();
   mockDb.queueResponse(none);
-  res = await request(app).get('/api/device/v1/program?machine=VMC-1').set(AUTH);
+  res = await request(app).get('/api/device/v1/program?machine_id=7').set(AUTH);
   expect(res.status).toBe(404);
   expect(res.body).toMatchObject({ status: 'error', code: 'NO_PROGRAM', message: 'Nothing is waiting for VMC-1.' });
 });
 
-test('backup: one multipart call with the machine and the file; saved as a backup of that machine', async () => {
+test('backup: one multipart call with the machine_id and the file; saved as a backup of that machine', async () => {
   authRow();
   machineRow();
   mockDb.queueResponse(one({ id: '90', machine_id: 7, program_name: 'O1234.nc', kind: 'BACKUP', size_bytes: 13, sha256: 'c'.repeat(64), created_at: 'T0' }),
     none);
   const res = await request(app).post('/api/device/v1/backup').set(AUTH)
-    .field('machine', 'VMC-1').field('program_name', 'O1234.nc').attach('file', Buffer.from('%\nO1234\nM30\n%'), 'running.nc');
+    .field('machine_id', '7').field('program_name', 'O1234.nc').attach('file', Buffer.from('%\nO1234\nM30\n%'), 'running.nc');
   expect(res.status).toBe(201);
-  expect(res.body).toEqual({ machine: 'VMC-1',
+  expect(res.body).toEqual({ machine_id: 7, machine: 'VMC-1',
                              file: { file_id: 90, program_name: 'O1234.nc', size_bytes: 13, sha256: 'c'.repeat(64), uploaded_at: 'T0' },
                              answered_request: null });
-  expect(mockDb.calls()[1].params).toEqual([5, 'VMC-1', null]);       // found within the token's company
+  expect(mockDb.calls()[1].params).toEqual([7, 5]);                    // found within the token's company
   const insert = mockDb.calls().find(c => /INSERT INTO program_files/.test(c.text));
   expect(insert.params.slice(0, 2)).toEqual([5, 7]);
   expect(insert.params[2]).toBe('company-5/programs/machine-7/backups');
@@ -160,9 +181,10 @@ test('backup: one multipart call with the machine and the file; saved as a backu
 
 test.each([
   ['no machine', r => r.attach('file', Buffer.from('M30'), 'O1.nc'), false, 400, 'MACHINE_REQUIRED'],
-  ['no file', r => r.field('machine', 'VMC-1'), true, 400, 'NO_FILE'],
-  ['a file over the size limit', r => r.field('machine', 'VMC-1').attach('file', Buffer.alloc(1024 * 1024 + 1, 'G'), 'big.nc'), true, 413, 'TOO_LARGE'],
-  ['a binary file', r => r.field('machine', 'VMC-1').attach('file', Buffer.from([0, 1, 2, 3]), 'O1.nc'), true, 400, 'NOT_TEXT']
+  ['no file', r => r.field('machine_id', '7'), true, 400, 'NO_FILE'],
+  ['a file over the size limit', r => r.field('machine_id', '7').attach('file', Buffer.alloc(1024 * 1024 + 1, 'G'), 'big.nc'), true, 413, 'TOO_LARGE'],
+  ['a binary file', r => r.field('machine_id', '7').attach('file', Buffer.from([0, 1, 2, 3]), 'O1.nc'), true, 400, 'NOT_TEXT'],
+  ['a machine_id that is not a number', r => r.field('machine_id', 'VMC-1').attach('file', Buffer.from('M30'), 'O1.nc'), false, 400, 'BAD_MACHINE_ID']
 ])('backup: %s is refused with a code', async (_, attach, found, status, code) => {
   authRow();
   if (found) machineRow();
@@ -178,7 +200,7 @@ test('report: JSON in, the result and the machine\'s next program out; a missing
     one({ id: '82', program_name: 'O8002.nc', size_bytes: 30, sha256: 'b'.repeat(64), created_at: 'T1' }));
   const done = await request(app).post('/api/device/v1/report').set(AUTH).send({ file_id: 81, status: 'DONE' });
   expect(done.status).toBe(200);
-  expect(done.body).toEqual({ file_id: 81, machine: 'VMC-1', status: 'DONE',
+  expect(done.body).toEqual({ file_id: 81, machine_id: 7, machine: 'VMC-1', status: 'DONE',
     next_program: { file_id: 82, program_name: 'O8002.nc', size_bytes: 30, sha256: 'b'.repeat(64), uploaded_at: 'T1' } });
 
   authRow();

@@ -9,10 +9,11 @@
  *   S&T Super Admin (/api/companies/:id/program-gateway):
  *     make, replace or stop a company's gateway token.
  *   The company's gateway (/api/device/v1, that token):
- *     GET  /status   every machine in one answer: the next program waiting
- *                    for it, and whether someone asked for a backup
- *     GET  /program  ?machine=NAME (or ?machine_ip=…): that machine's next program
- *     POST /backup   a backup file from a machine (form field "machine")
+ *     GET  /status   every machine in one answer: its machine_id, name, IP,
+ *                    controller, api_key and program path, the next program
+ *                    waiting for it, and whether someone asked for a backup
+ *     GET  /program  ?machine_id=ID: that machine's next program
+ *     POST /backup   a backup file from a machine (form field "machine_id")
  *     POST /report   what happened: the program is on the machine, the
  *                    machine refused it, or a backup could not be read
  *
@@ -399,17 +400,42 @@ const given = value => {
   return text ? text.slice(0, NAME_MAX) : null;
 };
 
+/** A machine_id the gateway sent, or null when it sent none; a malformed one is refused. */
+function machineIdOf(input = {}) {
+  const raw = input.machine_id == null ? '' : String(input.machine_id).trim();
+  if (!raw) return null;
+  const id = /^\d{1,10}$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(id) || id <= 0) throw fail('machine_id must be a whole number: machine_id from GET /status.', 'BAD_MACHINE_ID');
+  return id;
+}
+
 /**
- * The machine a gateway call is about: "machine" is its name in MEXA (as
- * GET /status lists it, any case), "machine_ip" its address — either, or
- * both. With both, an address MEXA does not know yet (no telemetry) does not
- * stand in the way of the name.
+ * The machine a gateway call is about: "machine_id" as GET /status lists it
+ * (23 Oct 2026, the user: "machine_id, not the name"). Gateways built before
+ * then may still send its name ("machine", any case) or address
+ * ("machine_ip"), or both; with both, an address MEXA does not know yet (no
+ * telemetry) does not stand in the way of the name. A name or address sent
+ * with machine_id must be that machine's.
  */
 async function machineOf(gateway, input = {}) {
+  const id = machineIdOf(input);
   const name = given(input.machine);
   const ip = given(input.machine_ip);
+  if (id) {
+    const { rows: [m] } = await pool.query(
+      `SELECT m.id, m.company_id, m.machine_serial_no, m.is_active, ${MACHINE_IP} AS machine_ip
+         FROM machines m WHERE m.id = $1 AND m.company_id = $2`,
+      [id, gateway.company_id]
+    );
+    if (!m) throw fail(`No machine ${id} in ${gateway.company_name}. Use the machine_id GET /status lists.`, 'MACHINE_NOT_FOUND', 404);
+    if (!m.is_active) throw fail(`${m.machine_serial_no} is switched off in MEXA.`, 'MACHINE_INACTIVE', 403);
+    if ((name && name.toLowerCase() !== String(m.machine_serial_no).trim().toLowerCase()) || (ip && m.machine_ip && ip !== m.machine_ip)) {
+      throw fail(`machine_id ${id} is ${m.machine_serial_no}${m.machine_ip ? ` (${m.machine_ip})` : ''}, not ${name ? `"${name}"` : ip}.`, 'MACHINE_MISMATCH');
+    }
+    return m;
+  }
   if (!name && !ip) {
-    throw fail('Say which machine: "machine" (its name in MEXA, as GET /status lists it) or "machine_ip".', 'MACHINE_REQUIRED');
+    throw fail('Say which machine: "machine_id", as GET /status lists it.', 'MACHINE_REQUIRED');
   }
   const { rows } = await pool.query(
     `SELECT m.id, m.company_id, m.machine_serial_no, m.is_active, ${MACHINE_IP} AS machine_ip
@@ -428,17 +454,19 @@ async function machineOf(gateway, input = {}) {
   }
   if (rows.length) throw fail(`${rows[0].machine_serial_no} is switched off in MEXA.`, 'MACHINE_INACTIVE', 403);
   const which = name ? `"${name}"${ip ? ` with IP ${ip}` : ''}` : `with IP ${ip}`;
-  throw fail(`No machine ${which} in ${gateway.company_name}. Use the names and IPs GET /status lists.`, 'MACHINE_NOT_FOUND', 404);
+  throw fail(`No machine ${which} in ${gateway.company_name}. Use the machine_id GET /status lists.`, 'MACHINE_NOT_FOUND', 404);
 }
 
 /**
- * What the gateway polls — one call for every machine of the company: the
- * program in front of each machine's line (and how many wait), and an open
- * backup request.
+ * What the gateway polls — one call for every machine of the company: who it
+ * is (machine_id — what the other calls send —, name, IP, controller, its
+ * telemetry api_key and its program path from the Machines page), the
+ * program in front of its line (and how many wait), and an open backup
+ * request. The answer carries each machine's api_key: as private as the token.
  */
 exports.gatewayStatus = async (gateway) => {
   const { rows } = await pool.query(
-    `SELECT m.machine_serial_no, ${MACHINE_IP} AS machine_ip,
+    `SELECT m.id AS machine_id, m.machine_serial_no, ${MACHINE_IP} AS machine_ip, m.controller, m.api_key, m.program_path,
             q.id AS file_id, q.program_name, q.size_bytes, q.sha256, q.created_at, q.waiting,
             r.id AS request_id, r.requested_at
        FROM machines m
@@ -456,8 +484,12 @@ exports.gatewayStatus = async (gateway) => {
   return {
     company: gateway.company_name,
     machines: rows.map(r => ({
+      machine_id: Number(r.machine_id),
       machine: r.machine_serial_no,
       machine_ip: r.machine_ip || null,
+      controller_name: given(r.controller),
+      api_key: r.api_key || null,
+      program_path: given(r.program_path),
       program: r.file_id ? fileView({ id: r.file_id, program_name: r.program_name, size_bytes: r.size_bytes,
                                       sha256: r.sha256, created_at: r.created_at }) : null,
       programs_waiting: Number(r.waiting || 0),
@@ -492,7 +524,8 @@ exports.gatewayBackup = async (gateway, staged, body = {}) => {
     await tellUser(machine, request.requested_by, 'INFO', `Backup received — ${machine.machine_serial_no}`,
                    `"${file.program_name}" was saved from ${machine.machine_serial_no}.`, file.id);
   }
-  return { machine: machine.machine_serial_no, file: fileView(file), answered_request: request ? Number(request.id) : null };
+  return { machine_id: Number(machine.id), machine: machine.machine_serial_no, file: fileView(file),
+           answered_request: request ? Number(request.id) : null };
 };
 
 const REPORT_STATUSES = ['DONE', 'FAILED'];
@@ -520,7 +553,7 @@ exports.gatewayReport = async (gateway, body = {}) => {
   if (body.file_id == null && status !== 'FAILED') {
     throw fail('A backup that worked is answered by sending the file to POST /backup. Report only FAILED here.', 'BAD_STATUS');
   }
-  const named = given(body.machine) || given(body.machine_ip) ? await machineOf(gateway, body) : null;
+  const named = machineIdOf(body) || given(body.machine) || given(body.machine_ip) ? await machineOf(gateway, body) : null;
   const mismatch = (what, row) => fail(`${what} is for ${row.machine_serial_no}, not ${named.machine_serial_no}.`, 'MACHINE_MISMATCH');
 
   if (body.file_id != null) {
@@ -560,7 +593,7 @@ exports.gatewayReport = async (gateway, body = {}) => {
         : tellUser(machine, file.uploaded_by, 'WARNING', `Program not accepted — ${machine.machine_serial_no}`,
                    `${machine.machine_serial_no} could not use "${file.program_name}": ${message}`, file.id));
     }
-    return { file_id: id, machine: machine.machine_serial_no, status, ...(file ? {} : { unchanged: true }),
+    return { file_id: id, machine_id: Number(machine.id), machine: machine.machine_serial_no, status, ...(file ? {} : { unchanged: true }),
              next_program: fileView(await nextProgram(machine.id)) };
   }
 
@@ -589,7 +622,8 @@ exports.gatewayReport = async (gateway, body = {}) => {
     await tellUser(machine, request.requested_by, 'WARNING', `Backup failed — ${machine.machine_serial_no}`,
                    `${machine.machine_serial_no} could not send a backup: ${message}`);
   }
-  return { backup_request_id: id, machine: machine.machine_serial_no, status, ...(request ? {} : { unchanged: true }) };
+  return { backup_request_id: id, machine_id: Number(machine.id), machine: machine.machine_serial_no, status,
+           ...(request ? {} : { unchanged: true }) };
 };
 
 /** Respects Settings → Program transfer notifications, like transfers always did. */
@@ -609,4 +643,4 @@ async function tellUser(machine, userId, type, title, message, fileId = null) {
   }
 }
 
-exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, REPORT_WAIT_MIN, POLL_SECONDS, nextProgram, machineOf, backupFailure };
+exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, REPORT_WAIT_MIN, POLL_SECONDS, nextProgram, machineOf, machineIdOf, backupFailure };

@@ -35,8 +35,9 @@ describe('against the real gateway API', () => {
   /* The few rows the four calls read and write, answered by what each query asks. */
   function fakeDatabase() {
     const state = {
-      machines: [{ id: 7, company_id: 5, machine_serial_no: 'VMC-1', is_active: true, machine_ip: '192.168.1.10' },
-                 { id: 8, company_id: 5, machine_serial_no: 'VMC-2', is_active: true, machine_ip: null }],
+      machines: [{ id: 7, company_id: 5, machine_serial_no: 'VMC-1', is_active: true, machine_ip: '192.168.1.10', controller: 'FANUC 0i-MF',
+                   api_key: 'a'.repeat(32), program_path: '//CNC_MEM/USER/PATH1/' },
+                 { id: 8, company_id: 5, machine_serial_no: 'VMC-2', is_active: true, machine_ip: null, controller: null, api_key: null, program_path: null }],
       files: [], requests: [], statusCalls: 0
     };
     const waiting = machineId => state.files.filter(f => f.machine_id === machineId && f.kind === 'NEW' && !f.delivery_status);
@@ -46,19 +47,24 @@ describe('against the real gateway API', () => {
       if (/FROM program_gateway_tokens g/.test(text)) {
         return params[0] === deviceToken.hash(token)
           ? one({ id: 3, company_id: 5, last_seen_at: new Date().toISOString(), last_seen_ip: '127.0.0.1',
-                  agent_version: 'mexa-gateway 2', company_name: 'Acme Gears', company_active: true })
+                  agent_version: 'mexa-gateway 3', company_name: 'Acme Gears', company_active: true })
           : none;
       }
       if (/FROM machines m\s+LEFT JOIN LATERAL/.test(text)) {                       // GET /status: every machine at once
         state.statusCalls += 1;
         return { rows: state.machines.map(m => {
           const line = waiting(m.id), head = line[0], request = state.requests.find(r => r.machine_id === m.id && !r.closed_at);
-          return { machine_serial_no: m.machine_serial_no, machine_ip: m.machine_ip, file_id: head?.id ?? null,
+          return { machine_id: m.id, machine_serial_no: m.machine_serial_no, machine_ip: m.machine_ip, controller: m.controller,
+                   api_key: m.api_key, program_path: m.program_path, file_id: head?.id ?? null,
                    program_name: head?.program_name, size_bytes: head?.size_bytes, sha256: head?.sha256, created_at: head?.created_at,
                    waiting: line.length ? String(line.length) : null, request_id: request?.id ?? null, requested_at: request?.requested_at };
         }) };
       }
-      if (/lower\(btrim\(m\.machine_serial_no\)\)/.test(text)) {                     // which machine a call names
+      if (/FROM machines m WHERE m\.id = \$1 AND m\.company_id = \$2/.test(text)) {      // which machine a call names: its machine_id
+        const m = state.machines.find(x => x.id === params[0] && x.company_id === params[1]);
+        return m ? one(m) : none;
+      }
+      if (/lower\(btrim\(m\.machine_serial_no\)\)/.test(text)) {                     // …or, from an older gateway, its name
         const rows = state.machines.filter(m => (params[1] == null || m.machine_serial_no.toLowerCase() === params[1].toLowerCase())
           && (params[2] == null || m.machine_ip === params[2]));
         return { rows, rowCount: rows.length };
@@ -132,7 +138,10 @@ describe('against the real gateway API', () => {
     const status = await gateway.tick();
     expect(db.statusCalls).toBe(1);
     expect(status.company).toBe('Acme Gears');
-    expect(status.machines.map(m => [m.machine, m.programs_waiting])).toEqual([['VMC-1', 2], ['VMC-2', 1]]);
+    expect(status.machines.map(m => [m.machine_id, m.machine, m.programs_waiting])).toEqual([[7, 'VMC-1', 2], [8, 'VMC-2', 1]]);
+    expect(status.machines[0]).toMatchObject({ controller_name: 'FANUC 0i-MF', api_key: 'a'.repeat(32), program_path: '//CNC_MEM/USER/PATH1/' });
+    // the CNC's own folder is for a gateway that talks to the CNC; this one writes only under PROGRAM_DIR
+    expect(fs.existsSync(path.join(dir, 'VMC-1'))).toBe(true);
     expect(fs.readFileSync(path.join(dir, 'VMC-1', 'O1001.nc'), 'utf8')).toBe(first);
     expect(fs.readFileSync(path.join(dir, 'VMC-1', 'O1002.nc'), 'utf8')).toBe(second);
     expect(fs.readFileSync(path.join(dir, 'VMC-2', 'O2001.nc'), 'utf8')).toBe(other);
@@ -207,9 +216,9 @@ describe('edge cases, against a scripted server', () => {
     };
     return { fetch, sent, reports: () => sent.filter(s => s.route === 'POST /report').map(s => JSON.parse(s.init.body)) };
   }
-  const status = (program, backup_request = null) => () => new Response(JSON.stringify({
+  const status = (program, backup_request = null, o = { machine_id: 7 }) => () => new Response(JSON.stringify({
     company: 'Acme Gears',
-    machines: [{ machine: 'VMC-1', machine_ip: '192.168.1.10', program, programs_waiting: program ? 1 : 0, backup_request }],
+    machines: [{ ...o, machine: 'VMC-1', machine_ip: '192.168.1.10', program, programs_waiting: program ? 1 : 0, backup_request }],
     poll_seconds: 15 }), { status: 200 });
   const file = (text, headers = {}) => () => new Response(text, { status: 200, headers: {
     'X-File-Id': '42', 'X-Program-Name': encodeURIComponent('O1001.nc'), 'X-Sha256': sum(text), ...headers } });
@@ -217,8 +226,15 @@ describe('edge cases, against a scripted server', () => {
   const waiting = { file_id: 42, program_name: 'O1001.nc', sha256: 'x' };
   const dirOf = name => path.join(TMP, name);
 
-  test('the program is asked for by the machine\'s name, and the report names the machine too', async () => {
+  test('the program is asked for by the machine_id, and the report names the machine_id too', async () => {
     const api = scripted({ 'GET /status': status(waiting), 'GET /program': file('G0 X1'), 'POST /report': ok });
+    await createGateway({ url: 'https://mexa.test', token: 't', programDir: dirOf('by-id'), fetch: api.fetch }).tick();
+    expect(api.sent[1].address).toBe('https://mexa.test/api/device/v1/program?machine_id=7');
+    expect(api.reports()).toEqual([{ file_id: 42, machine_id: 7, status: 'DONE' }]);
+  });
+
+  test('a server from before machine ids: the machine\'s name, as before', async () => {
+    const api = scripted({ 'GET /status': status(waiting, null, {}), 'GET /program': file('G0 X1'), 'POST /report': ok });
     await createGateway({ url: 'https://mexa.test', token: 't', programDir: dirOf('named'), fetch: api.fetch }).tick();
     expect(api.sent[1].address).toBe('https://mexa.test/api/device/v1/program?machine=VMC-1');
     expect(api.reports()).toEqual([{ file_id: 42, machine: 'VMC-1', status: 'DONE' }]);
@@ -228,7 +244,7 @@ describe('edge cases, against a scripted server', () => {
     const api = scripted({ 'GET /status': status(waiting), 'GET /program': file('G0 X1', { 'X-Sha256': sum('something else') }), 'POST /report': ok });
     await createGateway({ url: 'https://mexa.test', token: 't', programDir: dirOf('dmg'), fetch: api.fetch }).tick();
     expect(fs.existsSync(path.join(dirOf('dmg'), 'VMC-1', 'O1001.nc'))).toBe(false);
-    expect(api.reports()).toEqual([{ file_id: 42, machine: 'VMC-1', status: 'FAILED',
+    expect(api.reports()).toEqual([{ file_id: 42, machine_id: 7, status: 'FAILED',
       message: 'The file arrived damaged (its SHA-256 does not match); upload it again' }]);
   });
 
@@ -290,19 +306,20 @@ describe('edge cases, against a scripted server', () => {
     const api = scripted({ 'GET /status': status(null, { id: 9 }), 'POST /report': ok,
       'POST /backup': () => new Response(JSON.stringify({ code: 'NOT_TEXT', message: 'Only text NC programs can be stored.' }), { status: 400 }) });
     await createGateway({ url: 'https://mexa.test', token: 't', programDir: dir, fetch: api.fetch }).tick();
-    expect(api.reports()).toEqual([{ backup_request_id: 9, machine: 'VMC-1', status: 'FAILED', message: 'Only text NC programs can be stored.' }]);
+    expect(api.reports()).toEqual([{ backup_request_id: 9, machine_id: 7, status: 'FAILED', message: 'Only text NC programs can be stored.' }]);
   });
 
-  test('every call carries the token as a Bearer header and the agent version; the backup is multipart with the machine and its name', async () => {
+  test('every call carries the token as a Bearer header and the agent version; the backup is multipart with the machine_id and its name', async () => {
     const dir = dirOf('hdr');
     fs.mkdirSync(path.join(dir, 'VMC-1'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'VMC-1', 'O7.nc'), 'M30');
     const api = scripted({ 'GET /status': status(null, { id: 9 }), 'POST /backup': () => new Response('{}', { status: 201 }) });
     await createGateway({ url: 'https://mexa.test/', token: 'mxg_abc', programDir: dir, fetch: api.fetch }).tick();
     expect(api.sent.map(s => s.init.headers.Authorization)).toEqual(['Bearer mxg_abc', 'Bearer mxg_abc']);
-    expect(api.sent.map(s => s.init.headers['X-Agent-Version'])).toEqual(['mexa-gateway 2', 'mexa-gateway 2']);
+    expect(api.sent.map(s => s.init.headers['X-Agent-Version'])).toEqual(['mexa-gateway 3', 'mexa-gateway 3']);
     const form = api.sent[1].init.body;
-    expect(form.get('machine')).toBe('VMC-1');
+    expect(form.get('machine_id')).toBe('7');
+    expect(form.get('machine')).toBeNull();
     expect(form.get('program_name')).toBe('O7.nc');
     expect(form.get('file').name).toBe('O7.nc');
   });

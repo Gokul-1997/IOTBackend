@@ -8,12 +8,13 @@ function begin() { mockDb.queueResponse(response(), response([{ id: 4 }]), respo
 test('quota, owned placement and shift links commit together under the company lock', async () => {
   begin();
   mockDb.queueResponse(response([{ id: 8, plant_id: 5 }]), response([{ id: 5 }]), response([{ id: 7, plant_id: 5 }]), response(), response());
-  await svc.createMachine(req({ line_id: 8, ip_address: 'ignored', program_path: '/ignored' }));
+  await svc.createMachine(req({ line_id: 8, ip_address: 'ignored', program_path: '//CNC_MEM/USER/PATH1/' }));
   const calls = mockDb.calls();
   expect(calls[1].text).toMatch(/companies.*FOR UPDATE/);
   const insert = calls.find(call => /INSERT INTO machines/.test(call.text));
   expect(insert.params.slice(0, 4)).toEqual([5, 4, 8, 'VMC-7']);
-  expect(insert.text).not.toMatch(/ip_address|program_path/);
+  expect(insert.text).not.toMatch(/ip_address/);                        // the IP comes from telemetry, never the form
+  expect(insert.params.at(-1)).toBe('//CNC_MEM/USER/PATH1/');             // the program path, for the gateway (23 Oct 2026)
   expect(calls.find(call => /INSERT INTO machine_shift_config/.test(call.text)).params).toEqual([5, 7, 4]);
   expect(calls.at(-1).text).toBe('COMMIT');
 });
@@ -53,9 +54,32 @@ test('machine list clamps page size and keeps a plant-bound user in their own pl
   expect(mockDb.calls()[0].params).toEqual([4, 5, 100, 0]);
   for (const call of mockDb.calls()) expect(call.text).toMatch(/m.plant_id = \$2/);
 });
-test('the generic edit API cannot set transfer settings', async () => {
-  await expect(svc.updateMachine({ ...req(), body: { ip_address: '1.2.3.4', program_path: '/programs' } })).rejects.toMatchObject({ status: 400 });
+test('the edit API cannot set the IP (telemetry gives it)', async () => {
+  await expect(svc.updateMachine({ ...req(), body: { ip_address: '1.2.3.4' } })).rejects.toMatchObject({ status: 400 });
   expect(mockDb.calls()).toHaveLength(0);
+});
+
+/* 23 Oct 2026, the user: "the machine's program path, from the Machines page, in the gateway's status".
+   The gateway writes programs there and reads backups from there: the path holds only what a path needs,
+   and never climbs out of itself. */
+test('the program path: a plain path is saved; anything a path does not need is refused before anything is written', async () => {
+  for (const [path, message] of [
+    ['//CNC_MEM/USER/../../etc', /cannot contain "\.\."/], ['C:\\DNC\\..\\Windows', /cannot contain "\.\."/],
+    ['/programs; rm -rf /', /letters, digits, spaces and/], ['/programs\nX', /letters, digits, spaces and/],
+    ['$(id)', /letters, digits, spaces and/], ['/p'.repeat(130), /at most 255 characters/]
+  ]) {
+    await expect(svc.updateMachine({ ...req(), body: { program_path: path } })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(message) });
+  }
+  expect(mockDb.calls()).toHaveLength(0);
+  mockDb.queueResponse(response([{ id: 7, machine_serial_no: 'VMC-7', program_path: '//CNC_MEM/USER/PATH1/', ip_address: '10.0.0.9' }]));
+  const saved = await svc.updateMachine({ ...req(), body: { program_path: '  //CNC_MEM/USER/PATH1/  ' } });
+  expect(mockDb.calls()[0].params[0]).toBe('//CNC_MEM/USER/PATH1/');
+  expect(saved).toMatchObject({ program_path: '//CNC_MEM/USER/PATH1/' });
+  expect(saved).not.toHaveProperty('ip_address');
+  resetDb();
+  mockDb.queueResponse(response([{ id: 7, program_path: null }]));
+  await svc.updateMachine({ ...req(), body: { program_path: '' } });          // emptied: not set
+  expect(mockDb.calls()[0].params[0]).toBeNull();
 });
 test('moving plants removes incompatible shifts and attaches the new timetable in the placement transaction', async () => {
   mockDb.queueResponse(response(), response([{ id: 7, plant_id: 5, line_id: 8 }]), response([{ id: 6 }]),

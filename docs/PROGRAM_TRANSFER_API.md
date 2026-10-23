@@ -6,9 +6,9 @@ all the company's machines, and one status call for all of them.**
 
 | Call | What it does |
 | --- | --- |
-| `GET  /api/device/v1/status` | Every machine at once: is a program waiting for it? Did someone ask for a backup? |
-| `GET  /api/device/v1/program?machine=NAME` | Download the program waiting for that machine |
-| `POST /api/device/v1/backup` | Upload a backup file from a machine (form fields `machine`, `file`) |
+| `GET  /api/device/v1/status` | Every machine at once: its `machine_id`, name, controller, `api_key` and program path; is a program waiting for it? Did someone ask for a backup? |
+| `GET  /api/device/v1/program?machine_id=ID` | Download the program waiting for that machine |
+| `POST /api/device/v1/backup` | Upload a backup file from a machine (form fields `machine_id`, `file`) |
 | `POST /api/device/v1/report` | Say what happened: program written, machine refused it, backup could not be read |
 
 That is all. How the gateway talks to a CNC (FTP, FOCAS, a shared folder,
@@ -16,7 +16,7 @@ anything) is up to the gateway; the server never connects to a machine.
 
 **Postman:** `docs/postman/MEXA_Program_Transfer.postman_collection.json`
 has every call with example answers and errors. Import it, set `baseUrl`,
-`token` and `machine`, and run the folder *Gateway — the 4 calls* top to
+`token` and `machineId`, and run the folder *Gateway — the 4 calls* top to
 bottom.
 
 ## The gateway's loop
@@ -25,13 +25,13 @@ bottom.
 every 15 s:  GET /status                                ← ONE call for every machine
   for each machine in machines:
     program is not null
-      → GET /program?machine=NAME  → write it to the CNC (machine_ip)
+      → GET /program?machine_id=ID  → write it to the CNC (machine_ip, program_path)
       → POST /report {file_id, status: DONE}
         or POST /report {file_id, status: FAILED, message: "why"}
         the answer's next_program: the next one for this machine (or null)
     backup_request is not null
-      → read the program from the CNC
-      → POST /backup (machine=NAME, file)
+      → read the program from the CNC (program_path)
+      → POST /backup (machine_id, file)
         or POST /report {backup_request_id, status: FAILED, message: "why"}
 ```
 
@@ -76,7 +76,9 @@ Only some machines on this PC: `MACHINE_DIRS='{"VMC-01":"\\\\cnc01\\programs","V
 — then only those are served here, and another gateway can serve the rest.
 For a controller reached another way (FTP, FOCAS), replace the two functions
 marked MACHINE in the file, `writeToMachine` and `readFromMachine`; they are
-given the machine's name and IP.
+given the machine as `/status` lists it — its `machine_id`, name, IP,
+controller and `program_path`. The folder version itself writes only into
+`PROGRAM_DIR` or `MACHINE_DIRS`, never into a `program_path`.
 
 ## The token
 
@@ -100,14 +102,13 @@ Use HTTPS and keep certificate checks on.
 
 ## Naming a machine
 
-A call about one machine names it with `machine` — its name in MEXA exactly
-as `/status` lists it (upper or lower case does not matter) — or with
-`machine_ip`, or both:
+A call about one machine names it with **`machine_id`** — the number
+`/status` lists for it. It never changes, whatever the machine is renamed to.
 
-- `machine` alone is enough when the name is unique in the company.
-- `machine_ip` alone works when MEXA knows the machine's IP (from its
-  telemetry); `/status` shows it, or `null` when not known yet.
-- Two machines with the same name: send both (`409 MACHINE_AMBIGUOUS` says so).
+Gateways built before 23 Oct 2026 may still send the machine's name
+(`machine`, as `/status` lists it, any case) or its IP (`machine_ip`); that
+keeps working. Sent together with `machine_id`, a name or IP must be that
+machine's (`400 MACHINE_MISMATCH` otherwise).
 
 ## 1. GET /status — call it every `poll_seconds` (15 s)
 
@@ -120,8 +121,12 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
   "company": "Acme Gears",
   "machines": [
     {
+      "machine_id": 7,
       "machine": "VMC-01",
       "machine_ip": "192.168.1.10",
+      "controller_name": "FANUC 0i-MF",
+      "api_key": "3f9a…32 characters…",
+      "program_path": "//CNC_MEM/USER/PATH1/",
       "program": {
         "file_id": 42,
         "program_name": "O1001.nc",
@@ -133,8 +138,12 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
       "backup_request": null
     },
     {
+      "machine_id": 8,
       "machine": "VMC-02",
       "machine_ip": null,
+      "controller_name": null,
+      "api_key": "b71c…32 characters…",
+      "program_path": null,
       "program": null,
       "programs_waiting": 0,
       "backup_request": { "id": 9, "requested_at": "2026-10-22T08:05:00.000Z" }
@@ -145,6 +154,19 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
 ```
 
 - `machines` lists every machine of the company that is switched on in MEXA.
+- `machine_id` names the machine in calls 2, 3 and 4.
+- `machine_ip` is its IP as MEXA knows it from its telemetry (`null` until
+  then).
+- `controller_name` is the **Controller** on the Machines page (`null` when
+  not filled in).
+- `api_key` is the machine's telemetry key — the one in its MQTT topic
+  `machines/{api_key}/telemetry` — so the gateway can match the machines it
+  already sends data for. Keep this answer as private as the token.
+- `program_path` is the **Program path** on the Machines page: the folder on
+  the CNC where its programs go, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc
+  (`null` when not filled in). Write programs there, and read backups from
+  there, on the CNC. It is typed in MEXA: never take it for a folder on the
+  gateway PC without checking it against the folders that PC may use.
 - `program` is the program in front of the machine's line (`null`: nothing
   waiting). Download it (call 2), write it, report it (call 4).
 - `programs_waiting` counts it and the ones behind it.
@@ -153,19 +175,19 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
   30 minutes lapses: it is no longer listed, and the page tells the person
   the gateway did not answer.
 
-## 2. GET /program?machine=NAME — download the program
+## 2. GET /program?machine_id=ID — download the program
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" -o program.nc "https://SERVER/api/device/v1/program?machine=VMC-01"
+curl -H "Authorization: Bearer $TOKEN" -o program.nc "https://SERVER/api/device/v1/program?machine_id=7"
 ```
 
-`?machine_ip=192.168.1.10` works too. URL-encode a name with spaces
-(`VMC%2001`). The body is the file itself. The headers say what it is:
+The body is the file itself. The headers say what it is:
 
 | Header | Example |
 | --- | --- |
 | `X-File-Id` | `42` — report this one (call 4) |
 | `X-Program-Name` | `O1001.nc` (URL-encoded) |
+| `X-Machine-Id` | `7` |
 | `X-Machine` | `VMC-01` (URL-encoded) |
 | `X-Sha256` | the file's SHA-256 — check it before writing to the CNC |
 | `Content-Length` | `1472` |
@@ -181,18 +203,19 @@ Multipart form data:
 
 | Field | |
 | --- | --- |
-| `machine` | the machine's name (or send `machine_ip`) — required |
+| `machine_id` | the machine, as `/status` lists it — required |
 | `file` | the program file read from the CNC — required |
 | `program_name` | its name on the CNC, e.g. `O1001.nc` (optional; else the file's name) |
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-     -F "machine=VMC-02" -F "program_name=O1001.nc" -F "file=@O1001.nc" \
+     -F "machine_id=8" -F "program_name=O1001.nc" -F "file=@O1001.nc" \
      https://SERVER/api/device/v1/backup
 ```
 
 ```json
 {
+  "machine_id": 8,
   "machine": "VMC-02",
   "file": { "file_id": 43, "program_name": "O1001.nc", "size_bytes": 1472,
             "sha256": "…", "uploaded_at": "2026-10-22T08:06:10.000Z" },
@@ -217,13 +240,13 @@ JSON. One of three:
 ```
 
 `file_id` and `backup_request_id` already say which machine. You may add
-`"machine": "VMC-01"` as a check: a report about another machine's program
-is then refused (`MACHINE_MISMATCH`) instead of recorded.
+`"machine_id": 7` as a check: a report about another machine's program is
+then refused (`MACHINE_MISMATCH`) instead of recorded.
 
 The answer to a program report names the machine's next program:
 
 ```json
-{ "file_id": 42, "machine": "VMC-01", "status": "DONE",
+{ "file_id": 42, "machine_id": 7, "machine": "VMC-01", "status": "DONE",
   "next_program": { "file_id": 44, "program_name": "O1002.nc", "size_bytes": 980,
                     "sha256": "…", "uploaded_at": "2026-10-22T08:01:00.000Z" } }
 ```
@@ -272,12 +295,13 @@ Every error is JSON: `{"status":"error","code":"…","message":"…"}`.
 | 401 | `TOKEN_REPLACED` | A machine token (`mxd_…`) from before 22 Oct 2026: ask S&T for the company's `mxg_` token |
 | 403 | `COMPANY_DISABLED` | The company is switched off in MEXA |
 | 403 | `MACHINE_INACTIVE` | The machine named is switched off in MEXA |
-| 400 | `MACHINE_REQUIRED` | Send `machine` (or `machine_ip`) |
-| 404 | `MACHINE_NOT_FOUND` | No such machine in the company: use the names and IPs `/status` lists |
-| 409 | `MACHINE_AMBIGUOUS` | Two machines share that name (or IP): send both `machine` and `machine_ip` |
+| 400 | `MACHINE_REQUIRED` | Send `machine_id` |
+| 400 | `BAD_MACHINE_ID` | `machine_id` is not a whole number: use the one `/status` lists |
+| 404 | `MACHINE_NOT_FOUND` | No such machine in the company: use the `machine_id` `/status` lists |
+| 409 | `MACHINE_AMBIGUOUS` | (by name, from an older gateway) two machines share that name: send `machine_id` |
 | 404 | `NO_PROGRAM` | Nothing is waiting for that machine |
 | 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report: no such program / backup request in the company |
-| 400 | `MACHINE_MISMATCH` | Report: the `machine` sent is not the program's (or request's) machine |
+| 400 | `MACHINE_MISMATCH` | The `machine_id` sent with a report is not the program's (or request's) machine; or a name or IP sent with `machine_id` is not that machine's |
 | 400 | `BAD_STATUS` / `NO_MESSAGE` / `NOTHING_TO_REPORT` | Report: status must be DONE or FAILED; FAILED needs a message; send file_id or backup_request_id |
 | 400 | `BACKUP_NEEDS_NO_REPORT` | Report: that file_id is a backup the gateway sent — a backup needs no report |
 | 400 | `NO_FILE` / `BAD_UPLOAD` | Send the file as multipart field `file` |
