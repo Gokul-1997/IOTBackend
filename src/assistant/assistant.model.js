@@ -23,35 +23,53 @@ function headersFor(config) {
 }
 
 /** A small POST: the part of fetch this needs, on any Node version. */
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 function post(url, { headers = {}, body = '', signal } = {}) {
   return new Promise((resolve, reject) => {
-    const lib = String(url).startsWith('http:') ? http : https;      // http only for local tests
-    const req = lib.request(url, { method: 'POST', headers: { ...headers, 'content-length': Buffer.byteLength(body) } }, res => {
+    let settled = false;
+    let req;
+    const abort = () => req.destroy(Object.assign(new Error('Model request cancelled'), { name: 'AbortError' }));
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      error ? reject(error) : resolve(value);
+    };
+    const lib = String(url).startsWith('http:') ? http : https;
+    req = lib.request(url, { method: 'POST', headers: { ...headers, 'content-length': Buffer.byteLength(body) } }, res => {
       const chunks = [];
-      res.on('data', c => chunks.push(c));
+      let bytes = 0;
+      res.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > MAX_RESPONSE_BYTES) {
+          const error = Object.assign(new Error('Model response exceeds the limit'), { code: 'RESPONSE_TOO_LARGE' });
+          finish(error);
+          req.destroy(error);
+          res.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
-        resolve({
-          ok: res.statusCode >= 200 && res.statusCode < 300,
-          status: res.statusCode,
-          text: async () => text,
-          json: async () => JSON.parse(text)
-        });
+        finish(null, { ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode,
+          text: async () => text, json: async () => JSON.parse(text) });
       });
-      res.on('error', reject);
+      res.on('error', error => finish(error));
+      res.on('aborted', () => finish(new Error('Model response interrupted')));
     });
-    req.on('error', reject);
-    if (signal) {
-      const abort = () => req.destroy(Object.assign(new Error('The model did not answer in time'), { name: 'AbortError' }));
-      if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
-    }
+    req.on('error', error => finish(error));
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener('abort', abort, { once: true });
     req.end(body);
   });
 }
 
-async function callModel({ config, system, tools, toolChoice, messages, fetch: send = post }) {
+async function callModel({ config, system, tools, toolChoice, messages, signal, fetch: send = post }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, config.timeoutMs);
   let res;
   try {
     res = await send(config.apiUrl, {
@@ -71,6 +89,7 @@ async function callModel({ config, system, tools, toolChoice, messages, fetch: s
     throw fail(503, err.name === 'AbortError' ? 'ASSISTANT_TIMEOUT' : 'ASSISTANT_UNREACHABLE', `${err.code || ''} ${err.message}`.trim());
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 
   let body = null;
@@ -85,4 +104,4 @@ async function callModel({ config, system, tools, toolChoice, messages, fetch: s
   return body;
 }
 
-module.exports = { callModel, post, headersFor };
+module.exports = { callModel, post, headersFor, MAX_RESPONSE_BYTES };

@@ -55,6 +55,21 @@ function attach(io, { db }) {
   });
 
   io.on('connection', (socket) => {
+    // A connection must not outlive the access token which authorized it.
+    // Clients already refresh/reconnect after a server disconnect.
+    const expiresAt = Number(socket.user?.exp) * 1000;
+    let expiryTimer;
+    if (Number.isFinite(expiresAt)) {
+      const expire = () => {
+        const remaining = expiresAt - Date.now();
+        if (remaining <= 0) return socket.disconnect(true);
+        expiryTimer = setTimeout(expire, Math.min(remaining, 2_147_483_647));
+        expiryTimer.unref?.();
+      };
+      expire();
+      socket.once('disconnect', () => clearTimeout(expiryTimer));
+      if (expiresAt <= Date.now()) return;
+    }
     const userId = socket.user?.user_id;
     if (userId) socket.join(`user:${userId}`);
 

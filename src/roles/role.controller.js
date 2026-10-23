@@ -1,10 +1,11 @@
+const sendError = require('../utils/controller-error');
 const svc = require('./role.service');
 
 exports.seedPages = async (req, res) => {
   try {
     res.json(await svc.seedPagePermissions());
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -15,7 +16,7 @@ exports.create = async (req, res) => {
     const { role_name, description, permission_ids } = req.body || {};
     res.status(201).json(await svc.create({ role_name, description, permission_ids }, req.user));
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -24,7 +25,7 @@ exports.copy = async (req, res) => {
     const { role_name, description } = req.body || {};
     res.status(201).json(await svc.copy(Number(req.params.id), { role_name, description }, req.user));
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -35,7 +36,7 @@ exports.list = async (req, res) => {
       is_snt_super: req.user.is_snt_super
     }));
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -43,7 +44,7 @@ exports.getById = async (req, res) => {
   try {
     res.json(await svc.getById(req.params.id, req.user));
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -52,7 +53,7 @@ exports.update = async (req, res) => {
     const { role_name, description } = req.body || {};
     res.json(await svc.update(req.params.id, { role_name, description }, req.user));
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -63,7 +64,7 @@ exports.listPermissions = async (req, res) => {
       is_snt_super: req.user.is_snt_super
     }));
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -75,7 +76,7 @@ exports.assignPermissions = async (req, res) => {
     await svc.assignPermissions(req.params.id, req.body.permission_ids, req.user);
     res.json({ success: true });
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -84,7 +85,7 @@ exports.remove = async (req, res) => {
     await svc.remove(req.params.id, req.user);
     res.json({ success: true });
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };
 
@@ -93,6 +94,6 @@ exports.assign = async (req, res) => {
     await svc.assign(req.params.id, req.body.role_ids, req.user);
     res.json({ success: true });
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    return sendError(err, req, res);
   }
 };

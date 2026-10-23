@@ -61,6 +61,7 @@ module.exports = () => ({
   model: String(process.env.ASSISTANT_MODEL || '').trim() || 'claude-haiku-5-5',
   maxTokens: positive(process.env.ASSISTANT_MAX_TOKENS, 800, 4096),
   timeoutMs: positive(process.env.ASSISTANT_TIMEOUT_MS, 45000, 120000),
+  questionTimeoutMs: positive(process.env.ASSISTANT_QUESTION_TIMEOUT_MS, 90000, 180000),
   maxConcurrent: positive(process.env.ASSISTANT_MAX_CONCURRENT, 8, 100),
   dailyLimitMax: positive(process.env.ASSISTANT_DAILY_LIMIT_MAX, 50, 1000),
   companyDailyMax: positive(process.env.ASSISTANT_COMPANY_DAILY_MAX, 50, 100000),

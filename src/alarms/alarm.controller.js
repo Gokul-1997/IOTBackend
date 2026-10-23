@@ -1,9 +1,10 @@
+const sendError = require('../utils/controller-error');
 const service = require('./alarm.service');
 const notificationRules = require('./alarm-notification.service');
 
 const configuration = (method, args) => async (req, res) => {
   try { res.json({ success: true, data: await notificationRules[method](req.user, ...args(req)) }); }
-  catch (error) { res.status(error.status || 500).json({ success: false, message: error.message }); }
+  catch (error) { return sendError(error, req, res, { success: false }); }
 };
 exports.getNotificationPolicy = configuration('getPolicy', () => []);
 exports.updateNotificationPolicy = configuration('updatePolicy', req => [req.body]);
@@ -24,7 +25,7 @@ exports.getAlarms = async (req, res) => {
     });
     res.json({ success: true, ...result });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message });
+    return sendError(e, req, res, { success: false });
   }
 };
 
@@ -38,7 +39,7 @@ exports.resolveAlarm = async (req, res) => {
     });
     res.json({ success: true, data: alarm });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message });
+    return sendError(e, req, res, { success: false });
   }
 };
 
@@ -47,7 +48,7 @@ exports.getPreferences = async (req, res) => {
     const prefs = await service.getAlertPreferences(req.user.company_id);
     res.json({ success: true, data: prefs });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    return sendError(e, req, res, { success: false });
   }
 };
 
@@ -56,6 +57,6 @@ exports.updatePreferences = async (req, res) => {
     const prefs = await service.updateAlertPreferences(req.user.company_id, req.body);
     res.json({ success: true, data: prefs });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    return sendError(e, req, res, { success: false });
   }
 };

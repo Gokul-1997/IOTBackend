@@ -13,8 +13,9 @@ const crypto = require('crypto');
  * reference, so a support call can find them.
  */
 module.exports = (err, req, res, next) => {
-  const status = Number(err.status || err.statusCode) || 500;
-  const expected = status < 500 && (err.status || err.statusCode);
+  const supplied = Number(err.status || err.statusCode);
+  const status = Number.isInteger(supplied) && supplied >= 400 && supplied <= 599 ? supplied : 500;
+  const expected = status < 500 || err.expose === true;
 
   if (!expected) {
     const ref = crypto.randomBytes(4).toString('hex');
@@ -22,7 +23,7 @@ module.exports = (err, req, res, next) => {
     if (res.headersSent) return next(err);
     return res.status(status >= 500 ? status : 500).json({
       status: 'error',
-      message: status === 503 && err.message ? err.message : 'Something went wrong on the server. Please try again.',
+      message: 'Something went wrong on the server. Please try again.',
       ref
     });
   }

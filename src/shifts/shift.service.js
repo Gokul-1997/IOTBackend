@@ -1,3 +1,4 @@
+const inputError = message => Object.assign(new Error(message), { status: message === 'Shift not found' ? 404 : 400 });
 const pool = require('../db');
 
 /* =====================================================
@@ -24,15 +25,15 @@ function validateShiftInput(start_time, end_time, breakMin) {
   const duration = calculateDuration(startMin, endMin);
 
   if (duration <= 0 || duration > 1440) {
-    throw new Error('Invalid shift duration');
+    throw inputError('Invalid shift duration');
   }
 
   if (breakMin < 0) {
-    throw new Error('Break minutes cannot be negative');
+    throw inputError('Break minutes cannot be negative');
   }
 
   if (breakMin >= duration) {
-    throw new Error('Break cannot be greater than or equal to shift duration');
+    throw inputError('Break cannot be greater than or equal to shift duration');
   }
 
   return { startMin, endMin, duration };
@@ -65,7 +66,7 @@ async function validateOverlap(company_id, startMin, duration, ignoreId = null) 
       newStart < oldEnd && newEnd > oldStart;
 
     if (overlap) {
-      throw new Error('Shift overlaps with existing shift');
+      throw inputError('Shift overlaps with existing shift');
     }
   }
 }
@@ -108,7 +109,7 @@ exports.createShift = async (req) => {
   } = req.body;
 
   if (!shift_code || !start_time || !end_time) {
-    throw new Error('Shift code, start time and end time are required');
+    throw inputError('Shift code, start time and end time are required');
   }
 
   const breakMin = Number(break_minutes || 0);
@@ -117,7 +118,7 @@ exports.createShift = async (req) => {
     `SELECT id FROM shifts WHERE company_id = $1 AND shift_code = $2`,
     [req.user.company_id, shift_code]
   );
-  if (dup.rowCount > 0) throw new Error('A shift with this code already exists');
+  if (dup.rowCount > 0) throw inputError('A shift with this code already exists');
 
   const { startMin, duration } =
     validateShiftInput(start_time, end_time, breakMin);
@@ -162,7 +163,7 @@ exports.updateShift = async (id, data, company_id) => {
   `, [id, company_id]);
 
   if (!existing.rowCount) {
-    throw new Error('Shift not found');
+    throw inputError('Shift not found');
   }
 
   const current = existing.rows[0];
@@ -172,7 +173,7 @@ exports.updateShift = async (id, data, company_id) => {
       `SELECT id FROM shifts WHERE company_id = $1 AND shift_code = $2 AND id != $3`,
       [company_id, data.shift_code, id]
     );
-    if (dup.rowCount > 0) throw new Error('A shift with this code already exists');
+    if (dup.rowCount > 0) throw inputError('A shift with this code already exists');
   }
 
   const start_time = data.start_time ?? current.start_time;
@@ -221,7 +222,7 @@ exports.deleteShift = async (id, company_id) => {
   `, [id, company_id]);
 
   if (!existing.rowCount) {
-    throw new Error('Shift not found');
+    throw inputError('Shift not found');
   }
 
   // Remove or nullify all FK references before deleting the shift
@@ -263,7 +264,7 @@ exports.toggleShift = async (req) => {
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 const MAX_BREAKS = 10;
 const hm = t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
-const breakError = (message, status = 400) => Object.assign(new Error(message), { status });
+const breakError = (message, status = 400) => Object.assign(new Error(message), { status, expose: status === 503 });
 
 /* Before 028 is applied the table does not exist; say so rather than 500. */
 const NOT_SET_UP = 'Break times are not set up on this server yet (database update 028 is pending).';

@@ -20,10 +20,16 @@ exports.status = async (req, res, next) => {
 };
 
 exports.chat = async (req, res, next) => {
+  const controller = new AbortController();
+  const stop = () => { if (!res.writableEnded) controller.abort(); };
+  req.once('aborted', stop);
+  res.once('close', stop);
   try {
-    res.setHeader('Cache-Control', 'no-store');          // an answer is this person's, never a shared cache's
-    res.json({ status: 'success', data: await assistant.chat(req.user, req.body || {}) });
-  } catch (err) { next(err); }
+    res.setHeader('Cache-Control', 'no-store');
+    const data = await assistant.chat(req.user, req.body || {}, { signal: controller.signal });
+    if (!res.destroyed) res.json({ status: 'success', data });
+  } catch (err) { if (!res.destroyed) next(err); }
+  finally { req.removeListener('aborted', stop); res.removeListener('close', stop); }
 };
 
 exports.getSettings = async (req, res, next) => {

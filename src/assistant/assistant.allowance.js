@@ -66,13 +66,18 @@ async function allowanceOf(user) {
 
 /**
  * Take one question from today's ceilings, before the model is asked — in
- * one statement, so two questions at once cannot both slip under them.
+ * one short company-serialized transaction. A SUM inside an upsert alone
+ * cannot protect the company ceiling: different users lock different rows.
  * Answers null when taken, else which ceiling was reached: 'PERSON' or
  * 'COMPANY'.
  */
 async function reserveQuestion(user, allowance) {
   const companyMax = readConfig().companyDailyMax;
-  const { rows } = await db.query(`
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended('assistant-question:' || $1::text, 0))", [user.company_id]);
+    const { rows } = await client.query(`
     INSERT INTO assistant_usage AS u (user_id, company_id, day, questions)
     SELECT $1, $2, $3::date, 1
      WHERE (SELECT COALESCE(SUM(questions), 0) FROM assistant_usage WHERE company_id = $2 AND day = $3::date) < $5
@@ -81,11 +86,19 @@ async function reserveQuestion(user, allowance) {
        AND (SELECT COALESCE(SUM(questions), 0) FROM assistant_usage WHERE company_id = $2 AND day = $3::date) < $5
     RETURNING questions`,
     [user.id, user.company_id, allowance.day, questionCap(allowance.limit), companyMax]);
-  if (rows.length) return null;
-  const { rows: [t] } = await db.query(
+    if (rows.length) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const { rows: [t] } = await client.query(
     `SELECT COALESCE(SUM(questions), 0)::int AS company FROM assistant_usage WHERE company_id = $1 AND day = $2::date`,
     [user.company_id, allowance.day]);
-  return Number(t?.company) >= companyMax ? 'COMPANY' : 'PERSON';
+    await client.query('COMMIT');
+    return Number(t?.company) >= companyMax ? 'COMPANY' : 'PERSON';
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally { client.release(); }
 }
 
 /** The question was never read (the model could not be reached): it does not count. */
@@ -109,8 +122,16 @@ async function record(user, allowance, { answered = false, inputTokens = 0, cach
            input_tokens = u.input_tokens + EXCLUDED.input_tokens,
            cached_tokens = u.cached_tokens + EXCLUDED.cached_tokens,
            output_tokens = u.output_tokens + EXCLUDED.output_tokens
+     WHERE $4 = 0 OR u.answers < $8
     RETURNING answers`,
-    [user.id, user.company_id, allowance.day, answered ? 1 : 0, count(inputTokens), count(cachedTokens), count(outputTokens)]);
+    [user.id, user.company_id, allowance.day, answered ? 1 : 0, count(inputTokens), count(cachedTokens), count(outputTokens), allowance.limit]);
+  // Two server processes may complete the person's last answer together.
+  // Only one wins the atomic update. Keep the loser's token bill, but do
+  // not return another completed answer beyond the displayed allowance.
+  if (answered && !r) {
+    const after = await record(user, allowance, { inputTokens, cachedTokens, outputTokens });
+    return { ...after, answer_limited: true };
+  }
   const used = Number(r?.answers ?? allowance.used + (answered ? 1 : 0));
   return { ...allowance, used, remaining: Math.max(0, allowance.limit - used) };
 }

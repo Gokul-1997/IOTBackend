@@ -1,3 +1,4 @@
+const sendError = require('../utils/controller-error');
 const service = require('./auth.service');
 
 exports.login = async (req, res) => {
@@ -89,10 +90,7 @@ exports.resetPassword = async (req, res) => {
       message: 'Password reset successful'
     });
   } catch (e) {
-    res.status(400).json({
-      success: false,
-      message: e.message || 'Invalid or expired token'
-    });
+    return sendError(e, req, res, { success: false });
   }
 };
 
@@ -101,7 +99,7 @@ exports.getMyProfile = async (req, res) => {
     const profile = await service.getMyProfile(req.user.id);
     res.json({ success: true, data: profile });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message || 'Unable to load profile' });
+    return sendError(e, req, res, { success: false });
   }
 };
 
@@ -110,7 +108,7 @@ exports.updateMyProfile = async (req, res) => {
     const profile = await service.updateMyProfile(req.user.id, req.body || {});
     res.json({ success: true, data: profile });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message || 'Unable to update profile' });
+    return sendError(e, req, res, { success: false });
   }
 };
 
@@ -120,6 +118,6 @@ exports.changeMyPassword = async (req, res) => {
     await service.changeMyPassword(req.user.id, current_password, new_password);
     res.json({ success: true, message: 'Password changed' });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message || 'Unable to change password' });
+    return sendError(e, req, res, { success: false });
   }
 };

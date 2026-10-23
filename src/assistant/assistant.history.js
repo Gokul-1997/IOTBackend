@@ -11,8 +11,9 @@
  * open chat starts afresh.
  */
 const crypto = require('crypto');
+const { effectivePlantId } = require('../lib/plant-scope');
 
-const PURPOSE = 'stm-mexa-assistant-history-v1';
+const PURPOSE = 'stm-mexa-assistant-history-v2';
 let fallback;
 
 function key() {
@@ -21,7 +22,14 @@ function key() {
   return (fallback ??= crypto.randomBytes(32));
 }
 
-const payload = (user, text) => `${user.id}\n${user.company_id}\n${text}`;
+// A reply from an earlier plant or access revision must not become a new
+// source after the person's access changes. Sorting avoids invalidating a
+// conversation merely because SQL returned the same grants in another order.
+const keys = value => Array.isArray(value) ? [...new Set(value.filter(x => typeof x === 'string'))].sort() : [];
+const payload = (user, text) => JSON.stringify([
+  user.id, user.company_id, effectivePlantId(user), user.auth_revision ?? null,
+  !!user.is_snt_super, keys(user.roles), keys(user.permissions), keys(user.company_permissions), text
+]);
 
 /** The signature the browser keeps with a reply: base64url HMAC-SHA256. */
 function sign(user, text) {

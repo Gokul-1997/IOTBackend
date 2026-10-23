@@ -20,6 +20,9 @@ const TIME_HMS_REGEX = /^([0-1]\d|2[0-3]):([0-5]\d):([0-5]\d)$/;
 const validate = (schema) => (req, res, next) => {
   const errors = [];
   const body = req.body || {};
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({ status: 'error', message: 'Validation failed', errors: ['Request body must be an object'] });
+  }
 
   for (const [field, rules] of Object.entries(schema)) {
     const value = body[field];
@@ -37,7 +40,7 @@ const validate = (schema) => (req, res, next) => {
     /* ── type checks ───────────────────────────────────────── */
     if (rules.type === 'number') {
       const num = Number(value);
-      if (isNaN(num)) {
+      if (!['string', 'number'].includes(typeof value) || !String(value).trim() || !Number.isFinite(num)) {
         errors.push(`${label} must be a number`);
         continue;
       }
@@ -66,6 +69,10 @@ const validate = (schema) => (req, res, next) => {
     }
 
     /* ── string rules ──────────────────────────────────────── */
+    if ((rules.type === 'string' || rules.minLength || rules.maxLength || rules.email || rules.time || rules.time_hms) && typeof value !== 'string') {
+      errors.push(`${label} must be a string`);
+      continue;
+    }
     if (typeof value === 'string') {
       const trimmed = value.trim();
 

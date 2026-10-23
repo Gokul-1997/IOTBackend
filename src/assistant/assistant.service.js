@@ -56,7 +56,7 @@ const REPORT_TITLES = {
   'oee-records': 'OEE Records', 'machine-oee': 'Machine OEE'
 };
 
-const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
+const fail = (status, code, message) => Object.assign(new Error(message), { status, code, expose: true });
 
 const RULES = name => `You are ${name}, the company assistant inside STM MEXA, a machine-monitoring platform for CNC factories. You help one signed-in person with their own company: its production and OEE, its machines right now, alarms, downtime, maintenance, energy, Program Transfer, its registered details — and how to use MEXA itself.
 
@@ -196,7 +196,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
   /** A reply the browser shows and may send back: signed for this person. */
   const replyFor = (user, reply) => ({ ...reply, sig: signed.sign(user, reply.text) });
 
-  async function chat(user, body = {}) {
+  async function chat(user, body = {}, { signal } = {}) {
     const cfg = config();
     const say = sentencesFor(cfg.name);
     if (!cfg.apiKey || !user?.company_id) throw fail(503, 'ASSISTANT_OFF', say.unavailable);
@@ -205,6 +205,12 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
     if (answering.has(user.id)) throw fail(429, 'ASSISTANT_ANSWERING', say.stillAnswering);
     if (running >= cfg.maxConcurrent) throw fail(503, 'ASSISTANT_BUSY', say.busy);
 
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, cfg.questionTimeoutMs || 90000);
+    timer.unref?.();
+    const active = () => { if (controller.signal.aborted) throw fail(503, 'ASSISTANT_TIMEOUT', say.unavailable); };
     answering.add(user.id);
     running += 1;
     let allowance = null;
@@ -212,6 +218,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
     let read = false;                  // …and read by the model (else it is given back)
     const spent = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, recorded: false };
     try {
+      active();
       allowance = await allowanceStore.allowanceOf(user);
       if (allowance.limit === 0) throw fail(403, 'ASSISTANT_SWITCHED_OFF', say.switchedOff);
       // hello / thanks: the app's own line — no model, nothing taken from any allowance
@@ -244,19 +251,22 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
       let grounded = false;            // a tool read company data, or a help topic matched, for this question
 
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const res = await callModel({ config: cfg, system, tools: definitions, toolChoice: { type: 'any' }, messages });
+        active();
+        const res = await callModel({ config: cfg, system, tools: definitions, toolChoice: { type: 'any' }, messages, signal: controller.signal });
         read = true;
         const u = res.usage || {};
         spent.inputTokens += (Number(u.input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0);
         spent.cachedTokens += Number(u.cache_read_input_tokens) || 0;
         spent.outputTokens += Number(u.output_tokens) || 0;
+        active();
         const calls = (res.content || []).filter(b => b.type === 'tool_use');
         const reply = calls.find(c => c.name === 'reply');
         if (reply || !calls.length) {
           return replyFor(user, await finish({ user, reply, res, say, allowance, sources, used, round, spent, grounded }));
         }
         const results = [];
-        for (const c of calls) {               // one at a time: a question is a few small reads
+        for (const c of calls) {
+          active();               // one at a time: a question is a few small reads
           // a model asking for report after report is stopped: each read is a database query and more tokens
           let r = ++reads > MAX_TOOL_CALLS ? { error: true, out: { problem: TOO_MANY } } : await tools.runTool(user, c.name, c.input, ctx);
           let content = JSON.stringify(r.out);
@@ -277,6 +287,8 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
       }
       throw err;
     } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       answering.delete(user.id);
       running -= 1;
       // a question the model never read (it could not be reached, or the server failed first) is given back
@@ -304,6 +316,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
 
     const after = await allowanceStore.record(user, allowance, { ...spent, answered: kind === 'answer' });
     spent.recorded = true;
+    if (after.answer_limited) return { kind: 'limit', text: say.limit(after.resets_text), sources: [], allowance: allowanceStore.present(after) };
     console.log('[assistant] reply', JSON.stringify({
       user: user.id, company: user.company_id, kind, rounds: round + 1, tools: used,
       tokens: { in: spent.inputTokens, cached: spent.cachedTokens, out: spent.outputTokens }

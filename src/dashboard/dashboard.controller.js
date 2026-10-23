@@ -1,3 +1,4 @@
+const sendError = require('../utils/controller-error');
 const { effectivePlantId } = require('../lib/plant-scope');
 const svc = require('./dashboard.service');
 const { parseFleetPage } = require('./fleet-page');
@@ -176,7 +177,7 @@ exports.energy = async (req, res) => {
     return await sendShared(res, 'energy', req, () => energySvc.getEnergy({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Energy dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -185,7 +186,7 @@ exports.getEnergySettings = async (req, res) => {
     const data = await energySvc.getSettings(req.user.company_id);
     return res.json({ status: 'success', data });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -196,7 +197,7 @@ exports.saveEnergySettings = async (req, res) => {
     });
     return res.json({ status: 'success', data });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -222,7 +223,7 @@ exports.exportEnergy = async (req, res) => {
     }
   } catch (err) {
     console.error('Energy export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -236,7 +237,7 @@ exports.oeeDashboard = async (req, res) => {
     return res.json({ status: 'success', data });
   } catch (err) {
     console.error('OEE dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -263,7 +264,7 @@ exports.exportOee = async (req, res) => {
     }
   } catch (err) {
     console.error('OEE export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -276,7 +277,7 @@ exports.operators = async (req, res) => {
     return await sendShared(res, 'operators', req, () => operatorSvc.getOperators({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Operator dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -303,7 +304,7 @@ exports.exportOperators = async (req, res) => {
     }
   } catch (err) {
     console.error('Operator export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -316,7 +317,7 @@ exports.downtime = async (req, res) => {
     return await sendShared(res, 'downtime', req, () => downtimeSvc.getDowntime({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Downtime dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -343,7 +344,7 @@ exports.exportDowntime = async (req, res) => {
     }
   } catch (err) {
     console.error('Downtime export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -356,7 +357,7 @@ exports.alarms = async (req, res) => {
     return await sendShared(res, 'alarms', req, () => alarmSvc.getAlarms({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Alarm dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -385,7 +386,7 @@ exports.exportAlarms = async (req, res) => {
     }
   } catch (err) {
     console.error('Alarm export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -409,7 +410,7 @@ exports.periodic = async (req, res) => {
     }), { live: true });
   } catch (err) {
     console.error('Periodic dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -421,7 +422,7 @@ exports.listPeriodicSchedules = async (req, res) => {
     });
     return res.json({ status: 'success', data });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -434,7 +435,7 @@ exports.savePeriodicSchedule = async (req, res) => {
     });
     return res.json({ status: 'success', data });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -443,7 +444,7 @@ exports.deletePeriodicSchedule = async (req, res) => {
     await periodicSvc.deleteSchedule({ id: req.params.id, company_id: req.user.company_id });
     return res.json({ status: 'success' });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -458,7 +459,7 @@ exports.runPeriodicEngine = async (req, res) => {
     });
   } catch (err) {
     console.error('Periodic engine error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -499,7 +500,7 @@ exports.exportPeriodic = async (req, res) => {
 
   } catch (err) {
     console.error('Periodic export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -511,7 +512,7 @@ exports.preventive = async (req, res) => {
     return await sendShared(res, 'preventive', req, () => preventiveSvc.getPreventiveDashboard(req), { live: true });
   } catch (err) {
     console.error('Preventive dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -521,7 +522,7 @@ exports.listThresholds = async (req, res) => {
     const data = await preventiveSvc.listThresholds(req.user.company_id);
     return res.json({ status: 'success', data });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -530,7 +531,7 @@ exports.saveThreshold = async (req, res) => {
     const data = await preventiveSvc.upsertThreshold(req.user.company_id, req.body, req.user.id);
     return res.json({ status: 'success', data });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -539,7 +540,7 @@ exports.deleteThreshold = async (req, res) => {
     await preventiveSvc.deleteThreshold(req.user.company_id, req.params.id);
     return res.json({ status: 'success' });
   } catch (err) {
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -552,7 +553,7 @@ exports.runPmEngine = async (req, res) => {
       message: `${result.created} preventive ticket(s) raised` });
   } catch (err) {
     console.error('PM engine error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -563,7 +564,7 @@ exports.maintenance = async (req, res) => {
     return res.json({ status: 'success', data });
   } catch (err) {
     console.error('Maintenance dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -573,7 +574,7 @@ exports.factory = async (req, res) => {
     return res.json({ status: 'success', data });
   } catch (err) {
     console.error('Factory dashboard error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -586,7 +587,7 @@ exports.maintenanceReport = async (req, res) => {
     return await sendShared(res, 'maintenance-report', req, () => maintReportSvc.getReport({ ...req.query, company_id: req.user.company_id }));
   } catch (err) {
     console.error('Maintenance report error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };
 
@@ -613,6 +614,6 @@ exports.exportMaintenanceReport = async (req, res) => {
     }
   } catch (err) {
     console.error('Maintenance report export error:', err);
-    return res.status(err.status || 500).json({ status: 'error', message: err.message });
+    return sendError(err, req, res, { status: 'error' });
   }
 };

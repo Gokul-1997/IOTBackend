@@ -87,6 +87,38 @@ const config = (extra = {}) => () => ({ name: 'STM Mexa AI', apiKey: 'test-key',
 const ask = text => ({ messages: [{ role: 'user', content: text }] });
 const toolResults = sent => sent.flatMap(r => r.messages).filter(m => Array.isArray(m.content)).flatMap(m => m.content).filter(b => b.type === 'tool_result');
 
+describe('question cancellation', () => {
+  test('a disconnected caller never starts report or model work, and the next question can run', async () => {
+    database();
+    const controller = new AbortController();
+    controller.abort();
+    const callModel = jest.fn();
+    const assistant = createAssistant({ callModel, config: config() });
+    await expect(assistant.chat(person(), ask('Production today'), { signal: controller.signal }))
+      .rejects.toMatchObject({ code: 'ASSISTANT_TIMEOUT' });
+    expect(db.queries).toHaveLength(0);
+    expect(callModel).not.toHaveBeenCalled();
+    await expect(assistant.chat(person(), ask('Hello'))).resolves.toMatchObject({ kind: 'note' });
+  });
+
+  test('the whole-question deadline aborts a pending model call and releases its allowance', async () => {
+    database();
+    let stopped = false;
+    const callModel = jest.fn(({ signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        stopped = true;
+        reject(Object.assign(new Error('cancelled'), { code: 'ASSISTANT_TIMEOUT' }));
+      }, { once: true });
+    }));
+    const assistant = createAssistant({ callModel, config: config({ questionTimeoutMs: 20 }) });
+    await expect(assistant.chat(person(), ask('Production today'))).rejects.toMatchObject({ code: 'ASSISTANT_TIMEOUT' });
+    expect(stopped).toBe(true);
+    expect(db.questions).toBe(0);
+    expect(db.inserts).toBe(0);
+    await expect(assistant.chat(person(), ask('Hello'))).resolves.toMatchObject({ kind: 'note' });
+  });
+});
+
 beforeEach(async () => {
   resetDb();
   mockDb.query.mockReset();
