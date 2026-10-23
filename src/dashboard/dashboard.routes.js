@@ -4,6 +4,7 @@ const auth = require('../middleware/auth.middleware');
 const access = require('../middleware/access.middleware');
 /* exports and long telemetry windows: a few at a time per company (see the middleware) */
 const heavy = require('../middleware/heavy.middleware');
+const audited = require('../middleware/audit.middleware');
 
 /* Each Phase 2 dashboard has a key of its own (see APP_MODULES). These routes
    were `auth` alone: any signed-in user of any company could call any of them,
@@ -78,6 +79,12 @@ router.get('/energy/meter', auth, view('energy'), ctrl.energyMeter);
    for SNT_SUPER alone, who has no company to save one for. */
 router.post('/energy/settings', auth, access('page:analytics-energy:settings'), ctrl.saveEnergySettings);
 router.get('/energy/export/:format', auth, export_('energy'), heavy, ctrl.exportEnergy);
+/* The electricity bill: its forecast for whoever sees the Energy screen; its
+   dates are set beside the tariff, by whoever may set the tariff. */
+router.get('/energy/bill', auth, view('energy'), ctrl.energyBill);
+router.get('/energy/bill-period', auth, view('energy'), ctrl.getBillPeriod);
+router.put('/energy/bill-period', auth, access('page:analytics-energy:settings'), audited('energy_bill_period'), ctrl.saveBillPeriod);
+router.delete('/energy/bill-period', auth, access('page:analytics-energy:settings'), audited('energy_bill_period'), ctrl.clearBillPeriod);
 
 /* Maintenance Report — the ticket record over a period, exportable.
    Its own key, not page:analytics-maintenance: the dashboard shows live

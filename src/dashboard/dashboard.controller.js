@@ -14,6 +14,7 @@ const operatorSvc   = require('./operator.service');
 const oeeDashSvc    = require('./oee.dashboard.service');
 const energySvc     = require('./energy.service');
 const meterSvc      = require('./energy-meter.service');
+const billSvc       = require('./energy-bill.service');
 const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
@@ -224,6 +225,42 @@ exports.exportEnergy = async (req, res) => {
     console.error('Energy export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
+};
+
+/* The electricity bill: its dates (Tariff & Rates) and its forecast (the
+   Energy Dashboard's "This bill"). A server fault answers in plain words;
+   what went wrong is in the log, not in the reply. */
+const billFault = (res, err, what) => {
+  if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
+  console.error(`Energy bill ${what} error:`, err);
+  return res.status(500).json({ status: 'error', message: `Could not ${what} just now. Try again in a moment.` });
+};
+
+exports.energyBill = async (req, res) => {
+  try {
+    return await sendShared(res, 'energy-bill', req,
+      () => billSvc.getBill({ machine_id: req.query.machine_id, company_id: req.user.company_id }), { live: true });
+  } catch (err) { return billFault(res, err, 'work out the bill forecast'); }
+};
+
+exports.getBillPeriod = async (req, res) => {
+  try { return res.json({ status: 'success', data: await billSvc.getBillPeriod(req.user.company_id) }); }
+  catch (err) { return billFault(res, err, 'load the bill dates'); }
+};
+
+exports.saveBillPeriod = async (req, res) => {
+  try {
+    const data = await billSvc.saveBillPeriod({
+      company_id: req.user.company_id, user_id: req.user.id,
+      period_start: req.body?.period_start, period_end: req.body?.period_end
+    });
+    return res.json({ status: 'success', data });
+  } catch (err) { return billFault(res, err, 'save the bill dates'); }
+};
+
+exports.clearBillPeriod = async (req, res) => {
+  try { return res.json({ status: 'success', data: await billSvc.clearBillPeriod({ company_id: req.user.company_id }) }); }
+  catch (err) { return billFault(res, err, 'remove the bill dates'); }
 };
 
 /* ─────────────────────────────────────────────────────────────

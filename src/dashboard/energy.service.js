@@ -50,14 +50,28 @@ function parseId(v, label) {
   return n;
 }
 
+/*
+ * The days are plant days (IST), whatever the database's own clock. The range
+ * used to be written without a zone, so on a database set to UTC (production)
+ * "1 Oct" began at 05:30 IST and "7 Oct" ran on to 05:30 on the 8th — the
+ * totals missed the first morning and took in the next one, which the daily
+ * chart (IST days) then left out.
+ */
+const IST = '+05:30';
+const plantToday = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+
 function resolveRange({ from, to }) {
-  const isDate = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v));
+  const isDate = v => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ''))) return false;
+    const d = new Date(`${v}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;   // 2026-02-31 is no date
+  };
   if (from && !isDate(from)) throw httpError('from must be a date in YYYY-MM-DD form', 400);
   if (to && !isDate(to))     throw httpError('to must be a date in YYYY-MM-DD form', 400);
 
-  const end   = to   ? `${to} 23:59:59.999` : new Date().toISOString();
-  const start = from ? `${from} 00:00:00`
-                     : new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10) + ' 00:00:00';
+  const end   = to ? `${to}T23:59:59.999${IST}` : new Date().toISOString();
+  const first = from || new Date(Date.parse(`${plantToday()}T00:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10);
+  const start = `${first}T00:00:00${IST}`;
   if (new Date(start) > new Date(end)) throw httpError('from must not be after to', 400);
   return { start, end };
 }
@@ -232,7 +246,8 @@ async function consumption({ companyId, machineId, start, end }) {
       GROUP BY GROUPING SETS ((machine_id), (day), (date_trunc('month', day)::date))
      UNION ALL
      SELECT 'calendar', NULL, g::date, NULL, NULL, NULL, NULL
-       FROM generate_series($2::timestamptz::date, $3::timestamptz::date, INTERVAL '1 day') AS g`,
+       FROM generate_series(($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date,
+                            ($3::timestamptz AT TIME ZONE 'Asia/Kolkata')::date, INTERVAL '1 day') AS g`,
     params
   );
   return rows;
