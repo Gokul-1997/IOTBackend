@@ -86,6 +86,8 @@ router.get('/energy/export/:format', auth, export_('energy'), heavy, ctrl.export
 router.get('/maintenance-report', auth, access('page:maintenance-report:view'), ctrl.maintenanceReport);
 router.get('/maintenance-report/export/:format', auth, access('page:maintenance-report:export'), heavy, ctrl.exportMaintenanceReport);
 
+/* the machine page's switcher: the other machines without going back to the list */
+router.get('/live', auth, access('page:dashboard:live:view'), ctrl.liveMachines);
 router.get('/live/:machine_id', auth, access('page:dashboard:live:view'), ctrl.machineDetail);
 router.get('/live/:machine_id/timeline', auth, access('page:dashboard:live:view'), ctrl.machineTimeline);
 router.get('/live/:machine_id/spindle', auth, access('page:dashboard:live:view'), heavy.forRanges('12h', '24h'), ctrl.machineSpindle);

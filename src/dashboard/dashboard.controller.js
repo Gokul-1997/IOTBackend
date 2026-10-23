@@ -1,7 +1,7 @@
 const sendError = require('../utils/controller-error');
 const { effectivePlantId } = require('../lib/plant-scope');
 const svc = require('./dashboard.service');
-const { parseFleetPage } = require('./fleet-page');
+const { parseFleetPage, fleetMachines } = require('./fleet-page');
 const timelineSvc = require('./timeline.service');
 const spindleSvc = require('./spindle.service');
 const factorySvc = require('./factory.service');
@@ -126,6 +126,19 @@ exports.energyMeter = (req, res) => sendMeter(res, {
 exports.machineMeter = (req, res) => sendMeter(res, {
   companyId: req.user.company_id, machineId: req.params.machine_id, range: req.query.range || '24h'
 });
+
+/* The machine page's switcher: every machine by name, with its status now.
+   GET /dashboard/live */
+exports.liveMachines = async (req, res) => {
+  try {
+    const data = await fleetMachines(req.user.company_id, effectivePlantId(req.user));
+    return res.json({ status: 'success', data });
+  } catch (err) {
+    if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
+    console.error('Live machines error:', err);
+    return res.status(500).json({ status: 'error', message: 'Failed to load the machines' });
+  }
+};
 
 exports.machineDetail = async (req, res) => {
 

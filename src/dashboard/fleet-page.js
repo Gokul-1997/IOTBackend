@@ -21,14 +21,9 @@ function parseFleetPage(query = {}) {
   return { page, perPage, status, search: search.trim() };
 }
 
-async function fleetPage(companyId, options, plantId = null) {
-  if (!companyId) throw Object.assign(new Error('No company assigned'), { status: 403 });
-  const { page, perPage, status, search } = options;
-  // The latest-reading lookup is indexed and time bounded. Full production,
-  // job and operator calculations below run only for the returned page IDs.
-  // Counts and page rows share one SQL snapshot, including when the page is empty.
-  const { rows } = await db.query(`
-    WITH fleet AS MATERIALIZED (
+/* Each active machine and its status now, as the Live Dashboard reads it:
+   OFFLINE after a minute without data. $1 is the company. */
+const fleetSql = (companyId, plantId) => `
       SELECT m.id, m.machine_serial_no, m.image_url,
              t.machine_status, COALESCE(t.alarm, false) AS alarm, t.received_at,
              CASE WHEN t.received_at IS NULL OR t.received_at < NOW() - INTERVAL '60 seconds' THEN 'OFFLINE'
@@ -41,7 +36,16 @@ async function fleetPage(companyId, options, plantId = null) {
              AND received_at > NOW() - INTERVAL '1 hour'
            ORDER BY received_at DESC LIMIT 1
         ) t ON true
-       WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}
+       WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}`;
+
+async function fleetPage(companyId, options, plantId = null) {
+  if (!companyId) throw Object.assign(new Error('No company assigned'), { status: 403 });
+  const { page, perPage, status, search } = options;
+  // The latest-reading lookup is indexed and time bounded. Full production,
+  // job and operator calculations below run only for the returned page IDs.
+  // Counts and page rows share one SQL snapshot, including when the page is empty.
+  const { rows } = await db.query(`
+    WITH fleet AS MATERIALIZED (${fleetSql(companyId, plantId)}
     ), filtered AS (
       SELECT * FROM fleet
        WHERE ($4 = 'all' OR ($4 = 'alarm' AND alarm) OR status = UPPER($4))
@@ -64,4 +68,19 @@ async function fleetPage(companyId, options, plantId = null) {
   };
 }
 
-module.exports = { parseFleetPage, fleetPage };
+/* Every machine by name, with its status now: the machine page's switcher
+   (23 Oct 2026, the user: to see the next machine they went back to the
+   Live Dashboard each time). In the Live Dashboard's order, so the machine
+   below is its next card there; nothing of the shift is worked out. */
+async function fleetMachines(companyId, plantId = null) {
+  if (!companyId) throw Object.assign(new Error('No company assigned'), { status: 403 });
+  const { rows } = await db.query(`
+    SELECT id AS machine_id, machine_serial_no, status, alarm
+      FROM (${fleetSql(companyId, plantId)}
+      ) fleet
+     ORDER BY id
+  `, [companyId]);
+  return rows;
+}
+
+module.exports = { parseFleetPage, fleetPage, fleetMachines };
