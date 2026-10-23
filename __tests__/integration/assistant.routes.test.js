@@ -24,11 +24,15 @@ const one = row => ({ rows: [row], rowCount: 1 });
 const allowanceRow = (o = {}) => one({ daily_limit: 50, timezone: 'Asia/Kolkata', company_name: 'S AND T', day: '2026-10-22',
                                        resets_at: '2026-10-22T18:30:00.000Z', used: 0, ...o });
 
+/** The company's grants (Manage Access) as the access check reads them. */
+const grant = keys => require('../../src/redis').set('company_grants:5', JSON.stringify(keys), 'EX', 60);
+
 beforeEach(async () => {
   resetDb();
   delete process.env.ANTHROPIC_API_KEY;
-  mockUser = { id: 2, company_id: 5, roles: ['SUPERVISOR'], permissions: ['page:reports:view'] };
-  await require('../../src/redis').set('company_grants:5', '[]', 'EX', 60);
+  // S&T gave the company the AI; the company admin gave it to this person's role
+  mockUser = { id: 2, company_id: 5, roles: ['SUPERVISOR'], permissions: ['page:reports:view', 'page:assistant:view'] };
+  await grant(['page:reports:view', 'page:assistant:view']);
 });
 afterAll(() => { delete process.env.ANTHROPIC_API_KEY; });
 
@@ -39,12 +43,32 @@ describe('who may use it', () => {
     expect(res.body.data).toEqual({ name: 'STM Mexa AI', enabled: false, reason: 'NOT_CONFIGURED' });
   });
 
-  test('everyone in a company may open it, whatever their role; S&T, with no company, may not', async () => {
-    mockUser.permissions = ['page:dashboard:view'];
+  test('any role the company admin gave it — reports or not; S&T, with no company, may not', async () => {
+    mockUser.permissions = ['page:dashboard:view', 'page:assistant:view'];
     expect((await request(app).get('/api/assistant/status')).status).toBe(200);
     mockUser = { id: 1, company_id: null, is_snt_super: true, roles: ['SNT_SUPER'], permissions: [] };
     expect((await request(app).get('/api/assistant/status')).status).toBe(403);
     expect((await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: 'hi' }] })).status).toBe(403);
+  });
+
+  /* 23 Oct 2026, the user: "super admin decides for that company — not all users". */
+  test('only a company S&T gave it to — never a company with no grants at all, whose other pages are all open', async () => {
+    await grant([]);                                               // fresh, unrestricted company
+    let res = await request(app).get('/api/assistant/status');
+    expect([res.status, res.body.code]).toEqual([403, 'NOT_IN_PLAN']);
+    await grant(['page:reports:view']);                           // S&T gave reports, not the AI
+    res = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: 'hi' }] });
+    expect([res.status, res.body.code]).toEqual([403, 'NOT_IN_PLAN']);
+    mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };   // not even the company admin
+    expect((await request(app).get('/api/assistant/settings')).status).toBe(403);
+    expect(mockDb.calls().filter(c => !/company_permissions/.test(c.text))).toHaveLength(0);
+  });
+
+  test('in a company that has it, only the roles the company admin gave it; the company admin always', async () => {
+    mockUser.permissions = ['page:reports:view'];
+    expect((await request(app).get('/api/assistant/status')).body).toMatchObject({ code: 'PERMISSION_DENIED' });
+    mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };
+    expect((await request(app).get('/api/assistant/status')).status).toBe(200);
   });
 
   test('a question that is not a question is refused before anything is asked', async () => {
@@ -100,7 +124,7 @@ describe('the company admin sets the allowance', () => {
 
 describe('how fast one person may ask', () => {
   test('six questions a minute; the seventh is refused before anything else runs', async () => {
-    mockUser = { id: 77, company_id: 5, roles: ['SUPERVISOR'], permissions: ['page:reports:view'] };
+    mockUser = { id: 77, company_id: 5, roles: ['SUPERVISOR'], permissions: ['page:assistant:view'] };
     for (let i = 0; i < 6; i++) {
       const res = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: `q${i}` }] });
       expect(res.status).toBe(503);                              // no key on this server: turned away by the service

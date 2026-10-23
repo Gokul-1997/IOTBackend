@@ -75,7 +75,7 @@ exports.seedPagePermissions = async () => {
     for (const mod of APP_MODULES) {
       for (const action of mod.actions) {
         const key = `page:${mod.key}:${action}`;
-        const friendlyAction = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+        const friendlyAction = require('../plans/plan.service').actionLabelFor(mod.key, action, ACTION_LABELS);
         const desc = `${friendlyAction} — ${mod.label}`;
         await client.query(
           `INSERT INTO permissions (permission_key, description)
@@ -246,11 +246,24 @@ async function pageIdsOnly(client, ids) {
   return rows.map(r => r.id);
 }
 
-/** Refuse any page the company has not paid for, naming it. */
+/**
+ * Refuse any page the company has not paid for, naming it. A fresh company
+ * with no grants may give any page — except an opt-in one (the AI
+ * assistant), which only S&T can give a company.
+ */
 async function assertCompanyMayGrant(client, companyId, pageIds) {
   const grants = await companyPageGrants(client, companyId);
-  if (!grants) return;
-  const missing = pageIds.filter(id => !grants.has(id));
+  let missing;
+  if (grants) {
+    missing = pageIds.filter(id => !grants.has(id));
+  } else {
+    const { OPT_IN_PREFIXES } = require('../plans/plan.service');
+    if (!OPT_IN_PREFIXES.length || !pageIds.length) return;
+    const { rows } = await client.query(
+      `SELECT id FROM permissions WHERE id = ANY($1::int[]) AND permission_key LIKE ANY($2::text[])`,
+      [pageIds, OPT_IN_PREFIXES.map(p => `${p}%`)]);
+    missing = rows.map(r => r.id);
+  }
   if (!missing.length) return;
   const { rows } = await client.query(
     `SELECT permission_key FROM permissions WHERE id = ANY($1::int[]) ORDER BY permission_key`, [missing]);
@@ -762,17 +775,20 @@ exports.listPermissions = async ({ company_id, is_snt_super } = {}) => {
   } else {
     /* What the company paid for — or, for a company with no grants at all,
        everything, which is what "unrestricted" means everywhere else. This
-       used to return nothing for that company, leaving its role editor empty. */
+       used to return nothing for that company, leaving its role editor empty.
+       An opt-in page (the AI assistant) only when S&T granted it. */
+    const { OPT_IN_PREFIXES } = require('../plans/plan.service');
     query = `SELECT p.id, p.permission_key, p.description
              FROM permissions p
              WHERE p.permission_key LIKE 'page:%'
-               AND (NOT EXISTS (SELECT 1 FROM company_permissions x
-                                  JOIN permissions xp ON xp.id = x.permission_id
-                                 WHERE x.company_id = $1 AND xp.permission_key LIKE 'page:%')
+               AND ((NOT EXISTS (SELECT 1 FROM company_permissions x
+                                   JOIN permissions xp ON xp.id = x.permission_id
+                                  WHERE x.company_id = $1 AND xp.permission_key LIKE 'page:%')
+                     AND NOT p.permission_key LIKE ANY($2::text[]))
                     OR EXISTS (SELECT 1 FROM company_permissions cp
                                 WHERE cp.company_id = $1 AND cp.permission_id = p.id))
              ORDER BY p.permission_key`;
-    params = [company_id];
+    params = [company_id, OPT_IN_PREFIXES.length ? OPT_IN_PREFIXES.map(p => `${p}%`) : ['page:-no-opt-in-%']];
   }
 
   const { rows } = await db.query(query, params);
@@ -793,8 +809,8 @@ exports.listPermissions = async ({ company_id, is_snt_super } = {}) => {
         permissions: []
       };
     }
-    const { ACTION_LABELS } = require('../plans/plan.service');
-    const actionLabel = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+    const { ACTION_LABELS, actionLabelFor } = require('../plans/plan.service');
+    const actionLabel = actionLabelFor(module, action, ACTION_LABELS);
     grouped[module].permissions.push({ ...row, action, actionLabel });
   }
 

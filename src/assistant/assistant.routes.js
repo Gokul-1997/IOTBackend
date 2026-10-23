@@ -6,17 +6,20 @@
  *   GET  /settings   the company admin: daily allowance, timezone
  *   PUT  /settings   { daily_limit: 0–ASSISTANT_DAILY_LIMIT_MAX, timezone? } (audited)
  *
- * For everyone in a company (22 Oct 2026, the user: "all company support");
- * what each person may ask about follows their role — a tool for a page they
- * may not open is never offered (assistant.tools). S&T, with no company of
- * its own, is not served. Questions are limited per minute
- * (assistantLimiter) on top of the daily ceilings the service takes them
- * from.
+ * Only where S&T gave the company "STM Mexa AI" in Manage Access, and only
+ * for the roles the company admin gave it (page:assistant:view — an opt-in
+ * page: a company with no grants does not have it; 23 Oct 2026, the user:
+ * "super admin decides for that company, not all users"). What each person
+ * may then ask about follows their role — a tool for a page they may not
+ * open is never offered (assistant.tools). S&T, with no company of its own,
+ * is not served. Questions are limited per minute (assistantLimiter) on top
+ * of the daily ceilings the service takes them from.
  */
 const router = require('express').Router();
 const ctrl = require('./assistant.controller');
 const auth = require('../middleware/auth.middleware');
 const role = require('../middleware/role.middleware');
+const access = require('../middleware/access.middleware');
 const audited = require('../middleware/audit.middleware');
 const { assistantLimiter } = require('../middleware/rateLimit.middleware');
 
@@ -25,9 +28,11 @@ const companyAdmin = role(['COMPANY_ADMIN', 'ADMIN']);
 const companyPerson = (req, res, next) => (req.user?.company_id
   ? next() : res.status(403).json({ status: 'error', code: 'NO_COMPANY', message: 'STM Mexa AI answers for a company account.' }));
 
-router.get('/status', auth, companyPerson, ctrl.status);
-router.post('/chat', auth, companyPerson, assistantLimiter, ctrl.chat);
-router.get('/settings', auth, companyAdmin, ctrl.getSettings);
-router.put('/settings', auth, companyAdmin, audited('assistant_settings'), ctrl.updateSettings);
+const assistantAccess = access('page:assistant:view');
+
+router.get('/status', auth, companyPerson, assistantAccess, ctrl.status);
+router.post('/chat', auth, companyPerson, assistantAccess, assistantLimiter, ctrl.chat);
+router.get('/settings', auth, companyAdmin, assistantAccess, ctrl.getSettings);
+router.put('/settings', auth, companyAdmin, assistantAccess, audited('assistant_settings'), ctrl.updateSettings);
 
 module.exports = router;

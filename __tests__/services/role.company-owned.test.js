@@ -66,6 +66,7 @@ describe('create — a company admin makes a role for their own company', () => 
       { rows: [] },                              // name clash check
       { rows: pages.map(p => ({ id: p.id })) },  // which ids are pages
       { rows: grants },                          // company grants
+      ...(grants.length ? [] : [{ rows: [] }]),  // no grants: which of them only S&T can give (the AI assistant)
       { rows: [{ id: 90, role_name: 'LINE LEAD', company_id: 4, is_system: false }] }, // INSERT
       { rows: pages },                           // page lookup
       {}, {}, {}                                 // DELETE, INSERT perms, COMMIT
@@ -103,6 +104,18 @@ describe('create — a company admin makes a role for their own company', () => 
   test('a company with no grants is unrestricted — its admin can still build a role', async () => {
     queueCreate({ grants: [] });
     await expect(svc.create({ role_name: 'LINE LEAD', permission_ids: [1] }, companyA)).resolves.toBeTruthy();
+  });
+
+  /* 23 Oct 2026: the AI assistant is opt-in — only S&T gives it to a company,
+     so "no grants means unrestricted" does not let a company admin give it to a role. */
+  test('…except the AI assistant, which only S&T can give the company', async () => {
+    mockDb.queueResponse({}, { rows: [] }, { rows: [{ id: 77 }] }, { rows: [] }, { rows: [{ id: 77 }] },
+      { rows: [{ permission_key: 'page:assistant:view' }] });
+    await expect(svc.create({ role_name: 'AI USERS', permission_ids: [77] }, companyA)).rejects.toMatchObject({ status: 403,
+      message: "Your company's plan does not include: page:assistant:view. Contact S&T to add it." });
+    const optIn = mockDb.calls().find(c => /permission_key LIKE ANY/.test(c.text));
+    expect(optIn.params).toEqual([[77], ['page:assistant:%']]);
+    expect(mockDb.calls().some(c => /INSERT INTO roles/.test(c.text))).toBe(false);
   });
 
   test('the pages bring the API keys they need', async () => {

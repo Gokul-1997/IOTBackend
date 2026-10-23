@@ -20,7 +20,9 @@
  *     had to be written around for Program Transfer.
  *   - Every other role needs the permission on the role AND the company grant.
  *   - A company with no grants at all is a fresh, unrestricted one — the same
- *     reading auth.service.ts and permission.guard.ts take.
+ *     reading auth.service.ts and permission.guard.ts take — except for an
+ *     opt-in page (the AI assistant, plan.service optIn): only a company S&T
+ *     granted it has it, whatever else it has.
  *
  * Legacy keys (machine.view, shift.create ...) are NOT routed through here.
  * They are not in the catalogue Manage Access offers, so no company has them
@@ -28,6 +30,7 @@
  */
 
 const db = require('../db');
+const { isOptInKey } = require('../plans/plan.service');
 
 const TTL_SECONDS = 60;
 const cacheKey = (id, revision, userId) => revision == null || userId == null
@@ -105,7 +108,8 @@ async function denialForAny(user, keys) {
   // revision. Fresh tokens can never reuse a cache entry from before it,
   // even if an in-flight read fills that old entry after invalidation.
   const grants = await loadCompanyGrants(user.company_id, user.auth_revision, user.id);
-  if (grants.size > 0 && !allowed.some(key => grants.has(key))) return 'COMPANY';
+  const granted = key => grants.has(key) || (grants.size === 0 && !isOptInKey(key));
+  if (!allowed.some(granted)) return 'COMPANY';
   return null;
 }
 

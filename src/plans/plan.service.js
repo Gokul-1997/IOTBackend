@@ -78,9 +78,31 @@ const APP_MODULES = [
   // ── Admin pages (CRUD) ──
   { key: 'users',          label: 'Users',            group: 'Admin',  actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'roles',          label: 'Roles',            group: 'Admin',  actions: ['view', 'create', 'edit', 'delete'] },
+
+  /* ── The AI assistant (23 Oct 2026, the user: "super admin decides for each
+     company whether it gets the AI — not all users") ──
+     optIn: a company has it only when S&T ticks it in Manage Access. Every
+     other page is open to a company with no grants at all ("fresh,
+     unrestricted"); this one never is — each answer is a paid AI call. Inside
+     the company, the company admin chooses which roles may use it, as with
+     any page (the company admin has it as soon as the company does). */
+  { key: 'assistant',      label: 'STM Mexa AI',      group: 'AI',     actions: ['view'], optIn: true,
+    actionLabels: { view: 'Use the AI assistant' } },
 ];
 
 exports.APP_MODULES = APP_MODULES;
+
+/** Modules a company has only when S&T grants them — "no grants means unrestricted" never covers these. */
+const OPT_IN_PREFIXES = APP_MODULES.filter(m => m.optIn).map(m => `page:${m.key}:`);
+const isOptInKey = key => OPT_IN_PREFIXES.some(prefix => String(key).startsWith(prefix));
+exports.OPT_IN_PREFIXES = OPT_IN_PREFIXES;
+exports.isOptInKey = isOptInKey;
+
+/** A permission's label in Manage Access and the role editor: the module's own word for it, else the common one. */
+exports.actionLabelFor = (moduleKey, action, labels) => {
+  const def = APP_MODULES.find(m => m.key === moduleKey);
+  return def?.actionLabels?.[action] || labels[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+};
 
 /**
  * Friendly labels for widget/action names shown in the permission UI.
@@ -136,7 +158,7 @@ exports.seedPermissions = async () => {
     for (const mod of APP_MODULES) {
       for (const action of mod.actions) {
         const key  = `page:${mod.key}:${action}`;
-        const friendlyAction = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+        const friendlyAction = exports.actionLabelFor(mod.key, action, ACTION_LABELS);
         const desc = `${friendlyAction} — ${mod.label}`;
         await client.query(
           `INSERT INTO permissions (permission_key, description)
@@ -183,7 +205,7 @@ exports.listPermissions = async () => {
         permissions: []
       };
     }
-    const actionLabel = ACTION_LABELS[action] || (action.charAt(0).toUpperCase() + action.slice(1));
+    const actionLabel = exports.actionLabelFor(module, action, ACTION_LABELS);
     grouped[module].permissions.push({ ...row, action, actionLabel });
   }
 

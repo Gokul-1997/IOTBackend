@@ -104,7 +104,7 @@ describe('listPermissions()', () => {
     await svc.listPermissions({ is_snt_super: false, company_id: 4 });
     const { text: sql, params } = mockDb.calls()[0];
     expect(sql).toMatch(/cp\.company_id = \$1 AND cp\.permission_id = p\.id/);
-    expect(params).toEqual([4]);
+    expect(params).toEqual([4, ['page:assistant:%']]);
   });
 
   /* A company with no grants at all is unrestricted everywhere else in the
@@ -114,6 +114,8 @@ describe('listPermissions()', () => {
     mockDb.queueResponse({ rows: [] });
     await svc.listPermissions({ is_snt_super: false, company_id: 4 });
     expect(mockDb.calls()[0].text).toMatch(/NOT EXISTS \(SELECT 1 FROM company_permissions x/);
+    // …but never the AI assistant, which only S&T gives a company
+    expect(mockDb.calls()[0].text).toMatch(/AND NOT p\.permission_key LIKE ANY\(\$2::text\[\]\)/);
   });
 
   test('neither SNT_SUPER nor a known company: empty, not the full catalogue', async () => {

@@ -210,3 +210,42 @@ describe('the grant cache', () => {
     await expect(invalidateCompanyGrants(4)).resolves.toBeUndefined();
   });
 });
+
+/*
+ * An opt-in page (23 Oct 2026: the AI assistant — "super admin decides for
+ * that company"): only a company S&T ticked it for has it. "No grants means
+ * unrestricted" opens every other page to a fresh company, never this one.
+ */
+describe('an opt-in page: the AI assistant', () => {
+  const AI = 'page:assistant:view';
+
+  test('a fresh company with no grants does not have it — though it has every other page', async () => {
+    mockDb.queueResponse(grants());
+    expect(await denialFor(roleUser({ permissions: [AI] }), AI)).toBe('COMPANY');
+    mockDb.queueResponse(grants());
+    expect(await denialFor(roleUser(), KEY)).toBeNull();
+  });
+
+  test('not even the company admin, until S&T grants it; then the admin and the roles given it', async () => {
+    const admin = roleUser({ roles: ['COMPANY_ADMIN'], permissions: [] });
+    mockDb.queueResponse(grants());
+    expect(await denialFor(admin, AI)).toBe('COMPANY');
+    mockDb.queueResponse(grants(KEY));
+    expect(await denialFor(admin, AI)).toBe('COMPANY');
+    mockDb.queueResponse(grants(KEY, AI));
+    expect(await denialFor(admin, AI)).toBeNull();
+    mockDb.queueResponse(grants(KEY, AI));
+    expect(await denialFor(roleUser({ permissions: [AI] }), AI)).toBeNull();
+    expect(await denialFor(roleUser(), AI)).toBe('ROLE');             // a role the company admin did not give it
+  });
+
+  test('the catalogue marks it, and only it, as opt-in — with its own action label', () => {
+    const plans = require('../../src/plans/plan.service');
+    expect(plans.OPT_IN_PREFIXES).toEqual(['page:assistant:']);
+    expect(plans.isOptInKey(AI)).toBe(true);
+    expect(plans.isOptInKey('page:analytics-oee:view')).toBe(false);
+    expect(plans.actionLabelFor('assistant', 'view', plans.ACTION_LABELS)).toBe('Use the AI assistant');
+    expect(plans.actionLabelFor('machines', 'view', plans.ACTION_LABELS)).toBe('View Page');
+    expect(plans.APP_MODULES.find(m => m.key === 'assistant')).toMatchObject({ label: 'STM Mexa AI', group: 'AI', actions: ['view'] });
+  });
+});
