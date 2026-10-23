@@ -4,7 +4,6 @@ const auth = require('../middleware/auth.middleware');
 const access = require('../middleware/access.middleware');
 /* exports and long telemetry windows: a few at a time per company (see the middleware) */
 const heavy = require('../middleware/heavy.middleware');
-const audited = require('../middleware/audit.middleware');
 
 /* Each Phase 2 dashboard has a key of its own (see APP_MODULES). These routes
    were `auth` alone: any signed-in user of any company could call any of them,
@@ -79,20 +78,6 @@ router.get('/energy/meter', auth, view('energy'), ctrl.energyMeter);
    for SNT_SUPER alone, who has no company to save one for. */
 router.post('/energy/settings', auth, access('page:analytics-energy:settings'), ctrl.saveEnergySettings);
 router.get('/energy/export/:format', auth, export_('energy'), heavy, ctrl.exportEnergy);
-/* The electricity (EB) bill: its forecast and the bills as printed for
-   whoever sees the Energy screen; the service connections, their bills and
-   EB meter readings are entered beside the tariff, by whoever may set it. */
-const ebSettings = access('page:analytics-energy:settings');
-router.get('/energy/bill', auth, view('energy'), ctrl.energyBill);
-router.get('/energy/connections', auth, view('energy'), ctrl.listEnergyConnections);
-router.post('/energy/connections', auth, ebSettings, audited('energy_connection'), ctrl.saveEnergyConnection);
-router.put('/energy/connections/:id', auth, ebSettings, audited('energy_connection'), ctrl.saveEnergyConnection);
-router.delete('/energy/connections/:id', auth, ebSettings, audited('energy_connection'), ctrl.deleteEnergyConnection);
-router.post('/energy/connections/:id/bills', auth, ebSettings, audited('energy_bill'), ctrl.saveEnergyBill);
-router.put('/energy/connections/:id/bills/:billId', auth, ebSettings, audited('energy_bill'), ctrl.saveEnergyBill);
-router.delete('/energy/connections/:id/bills/:billId', auth, ebSettings, audited('energy_bill'), ctrl.deleteEnergyBill);
-router.post('/energy/connections/:id/readings', auth, ebSettings, audited('energy_reading'), ctrl.saveEnergyReading);
-router.delete('/energy/connections/:id/readings/:readingId', auth, ebSettings, audited('energy_reading'), ctrl.deleteEnergyReading);
 
 /* Maintenance Report — the ticket record over a period, exportable.
    Its own key, not page:analytics-maintenance: the dashboard shows live

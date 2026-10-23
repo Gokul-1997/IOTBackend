@@ -5,7 +5,6 @@ const shiftJob = require('./shiftOee.job');
 const preventiveJob = require('./preventiveMaintenance.job');
 const periodicJob = require('./periodicMaintenance.job');
 const alarmNotifications = require('./alarmNotifications.job');
-const energyHourly = require('./energyHourly.job');
 
 /*
  * Scheduled jobs, run by exactly one process at a time.
@@ -50,7 +49,6 @@ if (process.env.CRON_ENABLED !== 'false' && process.env.NODE_ENV !== 'test') {
   schedule('0 * * * *',    'hourly-oee',       hourlyJob);           // on the hour (IST)
   schedule('*/15 * * * *', 'preventive',       preventiveJob);       // raise PM tickets from breached alarm thresholds
   schedule('*/15 * * * *', 'periodic',         periodicJob);         // raise periodic tickets whose due date has arrived
-  schedule('5-55/10 * * * *', 'energy-hourly', energyHourly);      // energy per machine per hour, for the bill forecast
 } else {
   console.log('Scheduled jobs are off in this process (CRON_ENABLED=false)');
 }

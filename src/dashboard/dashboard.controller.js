@@ -14,7 +14,6 @@ const operatorSvc   = require('./operator.service');
 const oeeDashSvc    = require('./oee.dashboard.service');
 const energySvc     = require('./energy.service');
 const meterSvc      = require('./energy-meter.service');
-const billSvc       = require('./energy-bill.service');
 const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
@@ -225,75 +224,6 @@ exports.exportEnergy = async (req, res) => {
     console.error('Energy export error:', err);
     return res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
-};
-
-/* The electricity bill: its dates (Tariff & Rates) and its forecast (the
-   Energy Dashboard's "This bill"). A server fault answers in plain words;
-   what went wrong is in the log, not in the reply. */
-const billFault = (res, err, what) => {
-  if (err.status && err.status < 500) return res.status(err.status).json({ status: 'error', message: err.message });
-  console.error(`Energy bill ${what} error:`, err);
-  return res.status(500).json({ status: 'error', message: `Could not ${what} just now. Try again in a moment.` });
-};
-
-exports.energyBill = async (req, res) => {
-  try {
-    return await sendShared(res, 'energy-bill', req,
-      () => billSvc.getBill({ company_id: req.user.company_id }), { live: true });
-  } catch (err) { return billFault(res, err, 'work out the bill forecast'); }
-};
-
-exports.listEnergyConnections = async (req, res) => {
-  try { return res.json({ status: 'success', data: await billSvc.listConnections(req.user.company_id) }); }
-  catch (err) { return billFault(res, err, 'load the electricity bills'); }
-};
-
-exports.saveEnergyConnection = async (req, res) => {
-  try {
-    const data = await billSvc.saveConnection({
-      company_id: req.user.company_id, user_id: req.user.id, id: req.params.id ?? null,
-      sc_number: req.body?.sc_number, name: req.body?.name, meter_machine_id: req.body?.meter_machine_id
-    });
-    return res.json({ status: 'success', data });
-  } catch (err) { return billFault(res, err, 'save the service connection'); }
-};
-
-exports.deleteEnergyConnection = async (req, res) => {
-  try { return res.json({ status: 'success', data: await billSvc.deleteConnection({ company_id: req.user.company_id, id: req.params.id }) }); }
-  catch (err) { return billFault(res, err, 'remove the service connection'); }
-};
-
-exports.saveEnergyBill = async (req, res) => {
-  try {
-    const data = await billSvc.saveBill({
-      company_id: req.user.company_id, user_id: req.user.id,
-      connection_id: req.params.id, id: req.params.billId ?? null, body: req.body || {}
-    });
-    return res.json({ status: 'success', data });
-  } catch (err) { return billFault(res, err, 'save the bill'); }
-};
-
-exports.deleteEnergyBill = async (req, res) => {
-  try {
-    return res.json({ status: 'success', data: await billSvc.deleteBill({
-      company_id: req.user.company_id, connection_id: req.params.id, id: req.params.billId }) });
-  } catch (err) { return billFault(res, err, 'remove the bill'); }
-};
-
-exports.saveEnergyReading = async (req, res) => {
-  try {
-    const data = await billSvc.saveReading({
-      company_id: req.user.company_id, user_id: req.user.id, connection_id: req.params.id, body: req.body || {}
-    });
-    return res.json({ status: 'success', data });
-  } catch (err) { return billFault(res, err, 'save the meter reading'); }
-};
-
-exports.deleteEnergyReading = async (req, res) => {
-  try {
-    return res.json({ status: 'success', data: await billSvc.deleteReading({
-      company_id: req.user.company_id, connection_id: req.params.id, id: req.params.readingId }) });
-  } catch (err) { return billFault(res, err, 'remove the meter reading'); }
 };
 
 /* ─────────────────────────────────────────────────────────────
