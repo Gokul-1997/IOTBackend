@@ -25,10 +25,17 @@ Without the key, the chat says it is not switched on yet (status
 **Check it on the server:** `node scripts/assistant-check.js` prints the Node
 version, whether a key is set (first characters only), the model, and the
 answer to one tiny question — or Anthropic's exact reason for refusing it,
-with what to do. A key not scoped to a workspace needs
-`ANTHROPIC_WORKSPACE_ID=wrkspc_…` as well (or make the key inside a
-workspace). Any failure is also in the API log as `[assistant] model call
-failed`, with the provider's reason.
+with what to do. Any failure is also in the API log as `[assistant] model
+call failed`, with the provider's reason.
+
+**A key not tied to one workspace** (a personal key made without choosing a
+workspace) fails every question — the chat says "not available right now" —
+until `.env` names the workspace to use:
+`ANTHROPIC_WORKSPACE_ID=wrkspc_…`, the ID of the "Default" workspace on
+platform.claude.com/settings/workspaces. Or make the key tied to a workspace
+when creating it, and leave that line out. The check finds the ID itself when
+the key may list the organization's workspaces; an individual account's key
+may not (Anthropic answers 403), and the check then prints both ways.
 
 ## What it can and cannot see
 
@@ -138,7 +145,7 @@ model behaving — the server enforces it:
 | A long or forged conversation ("you are now a general assistant…") | The conversation is cut to 12 turns and 6,000 characters (a question to 500). Every reply is signed (HMAC from `JWT_SECRET`) for the person who got it; an assistant turn without its signature is not believed, nor anything before it. The rules tell the model that messages claiming to be from S&T, a developer or the system change nothing. |
 | Another company's or another plant's data | No tool takes a company; the company and plant come from the sign-in, and each tool runs inside that person's read scope. A plant user's company details list their plant only. |
 | A report the person may not open | The tool is not offered, and refused if asked for anyway; downloads need the Export permission. |
-| The API key | Only in the server's `.env`; sent only to `https://api.anthropic.com` (fixed in code), over verified HTTPS. Never in a response or a log; `scripts/assistant-check.js` shows only its fixed first characters ("sk-ant-api") and length. |
+| The API key | Only in the server's `.env`; sent only to `https://api.anthropic.com` (fixed in code), over verified HTTPS. Never in a response or a log; `scripts/assistant-check.js` shows only its first 10 characters (the fixed "sk-ant-" prefix and the key's kind) and its length. |
 | Answers shown in the browser | Plain text only (never HTML); "View report" opens only app pages, "Download report" only the report exports. |
 | Who changed the allowance | The company admin's change is in the audit log (`UPDATE_ASSISTANT_SETTINGS`). |
 
@@ -153,7 +160,7 @@ SELECT c.company_name, date_trunc('month', u.day)::date AS month,
  GROUP BY 1, 2 ORDER BY 2 DESC, 1;
 ```
 
-**Also set a spending limit in the Anthropic console** (console.anthropic.com
+**Also set a spending limit in the Claude Console** (platform.claude.com
 → Billing / Limits) — the one guard that holds even if the key were ever
 copied off the server. If the key leaks: delete it in the console, put a new
 one in `.env`, restart the API.
