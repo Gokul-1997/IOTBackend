@@ -32,6 +32,15 @@ router.get('/:id/program-gateway',          auth, isSNT,  ctrl.getProgramGateway
 router.post('/:id/program-gateway/token',   auth, isSNT,  ctrl.createProgramGatewayToken);
 router.delete('/:id/program-gateway/token', auth, isSNT,  ctrl.revokeProgramGatewayToken);
 
+/* ── STM Mexa AI: how much the company may use it (SNT_SUPER only) ──
+   23 Oct 2026, the user: "only the super admin decides how much — up or
+   down — not the company side". Answers a day for each person, questions a
+   day for the whole company, a monthly cost limit, and the company's
+   timezone; with its use today and this month. */
+const assistantCtrl = require('../assistant/assistant.controller');
+router.get('/:id/assistant', auth, isSNT, assistantCtrl.getCompanySettings);
+router.put('/:id/assistant', auth, audited('assistant_settings'), isSNT, assistantCtrl.updateCompanySettings);
+
 /* ── Plant management under a company (SNT_SUPER only) ── */
 
 // Inject target company_id so checkQuota works correctly for SNT_SUPER

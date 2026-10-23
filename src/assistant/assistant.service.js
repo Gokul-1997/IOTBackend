@@ -176,7 +176,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
     if (!cfg.apiKey) return { ...base, enabled: false, reason: 'NOT_CONFIGURED' };
     if (!user?.company_id) return { ...base, enabled: false, reason: 'NO_COMPANY' };
     const allowance = await allowanceStore.allowanceOf(user);
-    if (allowance.limit === 0) return { ...base, enabled: false, reason: 'SWITCHED_OFF' };
+    if (allowanceStore.switchedOff(allowance)) return { ...base, enabled: false, reason: 'SWITCHED_OFF' };
     const can = await tools.accessFor(user);
     // what this person can ask about, most useful first; six at most
     const suggestions = [
@@ -220,14 +220,14 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
     try {
       active();
       allowance = await allowanceStore.allowanceOf(user);
-      if (allowance.limit === 0) throw fail(403, 'ASSISTANT_SWITCHED_OFF', say.switchedOff);
+      if (allowanceStore.switchedOff(allowance)) throw fail(403, 'ASSISTANT_SWITCHED_OFF', say.switchedOff);
       // hello / thanks: the app's own line — no model, nothing taken from any allowance
       const small = smallTalk(history.at(-1).content);
       if (small) return replyFor(user, { kind: 'note', text: say[small], sources: [], allowance: allowanceStore.present(allowance) });
       const limited = text => replyFor(user, { kind: 'limit', text, sources: [], allowance: allowanceStore.present(allowance) });
       if (allowance.remaining <= 0) return limited(say.limit(allowance.resets_text));
       // the company's month: a money ceiling no question passes, whatever it would cost
-      const month = await budget.monthOf(user);
+      const month = await budget.monthOf(user, allowance.monthly_usd);
       if (month.reached) return limited(say.monthLimit(month.resets_on));
       // every question the model reads is taken from the day's hard ceilings first
       const full = await allowanceStore.reserveQuestion(user, allowance);

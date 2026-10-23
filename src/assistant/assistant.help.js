@@ -103,14 +103,14 @@ The bell (top right) holds notifications; your name opens Profile, Settings and 
     keywords: 'assistant ai chatbot stm mexa allowance limit answers left reset switch off',
     text: `- STM Mexa AI answers from your company's own MEXA data and only what your role may see. It only reads: it cannot change anything in MEXA.
 - It answers questions about your company in MEXA and about using MEXA — nothing else (no general questions).
-- The whole company has up to 50 questions a day. Each person has a daily allowance of answers, set by the company admin in Settings → STM Mexa AI (lower it, or 0 to switch it off). It resets at midnight, company time.
+- How much it may be used is set by S&T for the whole company: answers a day for each person (shown under the question box as "left today"), questions a day for the company, and a monthly limit. It resets at midnight, company time. To have more, ask S&T.
 - Answers can be wrong: check important figures on the report itself (View report under an answer).`
   },
   {
     id: 'support', title: 'Getting more help',
     keywords: 'help support contact problem issue error bug not working broken who',
     text: `- Access, roles, users and passwords: your company admin.
-- The company's pages, plan limits (machines, users, plants) and the Program Transfer gateway token: S&T.
+- The company's pages, plan limits (machines, users, plants), how much STM Mexa AI may be used, and the Program Transfer gateway token: S&T.
 - When something shows an error, note the reference ("ref") in the message — it helps support find what happened.`
   }
 ];

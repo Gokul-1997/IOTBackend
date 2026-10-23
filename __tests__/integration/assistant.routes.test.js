@@ -1,6 +1,7 @@
 /*
- * /api/assistant over HTTP: who may open it, the company admin's allowance
- * setting, and the one call out to the model (headers, body, errors).
+ * /api/assistant over HTTP: who may open it, that the company side sets
+ * nothing about the allowance (S&T does: assistant-limits.routes.test.js),
+ * and the one call out to the model (headers, body, errors).
  */
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 let mockUser;
@@ -20,9 +21,6 @@ app.use(express.json());
 app.use('/api/assistant', require('../../src/assistant/assistant.routes'));
 app.use(require('../../src/middleware/error.middleware'));
 
-const one = row => ({ rows: [row], rowCount: 1 });
-const allowanceRow = (o = {}) => one({ daily_limit: 50, timezone: 'Asia/Kolkata', company_name: 'S AND T', day: '2026-10-22',
-                                       resets_at: '2026-10-22T18:30:00.000Z', used: 0, ...o });
 
 /** The company's grants (Manage Access) as the access check reads them. */
 const grant = keys => require('../../src/redis').set('company_grants:5', JSON.stringify(keys), 'EX', 60);
@@ -60,7 +58,7 @@ describe('who may use it', () => {
     res = await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: 'hi' }] });
     expect([res.status, res.body.code]).toEqual([403, 'NOT_IN_PLAN']);
     mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };   // not even the company admin
-    expect((await request(app).get('/api/assistant/settings')).status).toBe(403);
+    expect((await request(app).get('/api/assistant/status')).status).toBe(403);
     expect(mockDb.calls().filter(c => !/company_permissions/.test(c.text))).toHaveLength(0);
   });
 
@@ -80,47 +78,14 @@ describe('who may use it', () => {
   });
 });
 
-describe('the company admin sets the allowance', () => {
-  test('only the company admin', async () => {
-    expect((await request(app).get('/api/assistant/settings')).status).toBe(403);
-    expect((await request(app).put('/api/assistant/settings').send({ daily_limit: 10 })).status).toBe(403);
-  });
-
-  // 23 Oct 2026, the user: "50 a day — the client may lower it, never raise it"
-  test('a whole number up to the platform\'s ceiling (50 unless the server says) — lower, never higher — and a real timezone', async () => {
+/* 23 Oct 2026, the user: "only the super admin decides how much — up or down — not the company side".
+   S&T's figures: assistant-limits.routes.test.js. */
+describe('the company side sets nothing', () => {
+  test('the company admin\'s allowance settings are gone, and nothing about the allowance is read or written', async () => {
     mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };
-    for (const [body, message] of [
-      [{ daily_limit: -1 }, /from 0 to 50\./], [{ daily_limit: 51 }, /from 0 to 50\./], [{ daily_limit: 100 }, /from 0 to 50\./],
-      [{ daily_limit: '50' }, /from 0 to 50\./], [{ daily_limit: 20, timezone: 'Mars/Olympus' }, /timezone/]
-    ]) {
-      const res = await request(app).put('/api/assistant/settings').send(body);
-      expect(res.status).toBe(400);
-      expect(res.body.message).toMatch(message);
-    }
-    expect(mockDb.calls()).toHaveLength(0);
-
-    mockDb.queueResponse({ rows: [], rowCount: 1 }, { rows: [], rowCount: 1 }, allowanceRow({ daily_limit: 20, timezone: 'Asia/Dubai' }));
-    const res = await request(app).put('/api/assistant/settings').send({ daily_limit: 20, timezone: 'Asia/Dubai' });
-    expect(res.status).toBe(200);
-    // the company's own total for the day comes with it: the admin sees it, and cannot change it
-    expect(res.body.data).toEqual({ daily_limit: 20, timezone: 'Asia/Dubai', default_limit: 50, max_limit: 50, company_daily_max: 50 });
-    const [upsert, tz] = mockDb.calls();
-    expect(upsert.params).toEqual([5, 20, 1]);
-    expect(tz.params).toEqual([5, 'Asia/Dubai']);
-    // who changed what it may cost is on record
-    const audit = mockDb.calls().find(c => /INSERT INTO audit_logs/.test(c.text));
-    expect(audit.params.slice(0, 4)).toEqual([1, 5, 'UPDATE_ASSISTANT_SETTINGS', 'assistant_settings']);
-  });
-
-  test('S&T can raise the ceiling on the server; a stored allowance above it is used as the ceiling', async () => {
-    mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };
-    process.env.ASSISTANT_DAILY_LIMIT_MAX = '1000';
-    mockDb.queueResponse({ rows: [], rowCount: 1 }, allowanceRow({ daily_limit: 1000 }));
-    expect((await request(app).put('/api/assistant/settings').send({ daily_limit: 1000 })).body.data.max_limit).toBe(1000);
-    delete process.env.ASSISTANT_DAILY_LIMIT_MAX;
-    resetDb();
-    mockDb.queueResponse(allowanceRow({ daily_limit: 1000 }));
-    expect((await request(app).get('/api/assistant/settings')).body.data).toMatchObject({ daily_limit: 50, max_limit: 50 });
+    expect((await request(app).get('/api/assistant/settings')).status).toBe(404);
+    expect((await request(app).put('/api/assistant/settings').send({ daily_limit: 1000 })).status).toBe(404);
+    expect(mockDb.calls().filter(c => /assistant_settings|audit_logs/.test(c.text))).toHaveLength(0);
   });
 });
 

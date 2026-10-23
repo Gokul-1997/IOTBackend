@@ -28,13 +28,15 @@ const person = (permissions = ALL, extra = {}) => ({ id: 2, company_id: 5, roles
 
 let db;
 function database({ used = 0, limit = null, rows = productionRows(), machines = MACHINES, questions = 0, companyQuestions = 0,
-                   month = { input: 0, cached: 0, output: 0 } } = {}) {
+                   month = { input: 0, cached: 0, output: 0 }, companyLimit = null, monthlyUsd = null } = {}) {
   db = { usage: used, inserts: 0, questions, companyQuestions, tokens: { input: 0, cached: 0, output: 0 }, queries: [] };
   mockDb.query.mockImplementation(async (sql, params = []) => {
     const text = typeof sql === 'string' ? sql : sql.text;
     db.queries.push({ text, params });
+    // what S&T set for the company (null: the defaults — 50 a day, US$5 a month)
     if (/FROM companies c\s+LEFT JOIN assistant_settings/.test(text)) {
-      return one({ daily_limit: limit ?? 50, timezone: 'Asia/Kolkata', company_name: 'S AND T', day: '2026-10-22',
+      return one({ daily_limit: limit ?? 50, company_daily_limit: companyLimit, monthly_budget_usd: monthlyUsd,
+                   timezone: 'Asia/Kolkata', company_name: 'S AND T', day: '2026-10-22',
                    resets_at: '2026-10-22T18:30:00.000Z', used: db.usage, questions: db.questions });
     }
     // a question taken from the day's ceilings: the person's (params[3]) and the company's (params[4])
@@ -470,10 +472,51 @@ describe('what it may cost', () => {
     expect(results.slice(4).every(r => r.is_error && JSON.parse(r.content).problem.startsWith('Too many report reads'))).toBe(true);
   });
 
-  test('50 questions a day for the whole company, 50 answers a person at most, US$5 a month, and short replies — by default', () => {
+  test('until S&T sets its own: 50 questions a day for the company, 50 answers a person, US$5 a month — the server\'s ceilings far above', () => {
     const cfg = require('../../src/assistant/assistant.config')();
-    expect(cfg).toMatchObject({ companyDailyMax: 50, dailyLimitMax: 50, monthlyBudgetUsd: 5, maxTokens: 800,
+    expect(cfg).toMatchObject({ companyDailyMax: 10000, dailyLimitMax: 1000, monthlyBudgetUsd: 1000, maxTokens: 800,
                                 priceInputPerM: 0.1, priceCachedPerM: 0.01, priceOutputPerM: 0.5, model: 'claude-haiku-5-5' });
+    const { DEFAULT_LIMIT, DEFAULT_COMPANY_LIMIT } = require('../../src/assistant/assistant.allowance');
+    const { DEFAULT_MONTHLY_USD } = require('../../src/assistant/assistant.budget');
+    expect([DEFAULT_LIMIT, DEFAULT_COMPANY_LIMIT, DEFAULT_MONTHLY_USD]).toEqual([50, 50, 5]);
+  });
+
+  /* 23 Oct 2026, the user: "only the super admin decides how much — up or down — not the company side" */
+  test('what S&T set for the company holds: its questions a day and its monthly limit, raised or lowered', async () => {
+    database({ companyLimit: 120 });
+    const turns = [reply('answer', 'Today: 65 parts.')];
+    await createAssistant({ callModel: jest.fn(async () => ({ content: turns.shift(), usage: {} })), config: config() })
+      .chat(person(), ask('Production today'));
+    const reserve = db.queries.find(q => /INSERT INTO assistant_usage AS u \(user_id, company_id, day, questions\)/.test(q.text));
+    expect(reserve.params[4]).toBe(120);                               // raised above the default 50
+
+    // lowered: US$2 a month — 16 million input tokens at US$0.10 × 1.25 a million
+    database({ monthlyUsd: '2.00', month: { input: 16_000_000, cached: 0, output: 0 } });
+    const { callModel } = scripted();
+    const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Production today'));
+    expect(r.text).toBe('STM Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports.');
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test.each([['answers a person', { limit: 0 }], ['questions a day', { companyLimit: 0 }], ['the monthly limit', { monthlyUsd: '0.00' }]])(
+    'S&T set %s to 0: the AI is off for the company — no button, and a question is refused', async (_, figures) => {
+      database(figures);
+      const ai = createAssistant({ callModel: jest.fn(), config: config() });
+      expect(await ai.status(person())).toMatchObject({ enabled: false, reason: 'SWITCHED_OFF' });
+      await expect(ai.chat(person(), ask('Production today'))).rejects.toMatchObject({ status: 403, code: 'ASSISTANT_SWITCHED_OFF' });
+    });
+
+  test('a stored figure is held to the server\'s ceiling', async () => {
+    process.env.ASSISTANT_COMPANY_DAILY_MAX = '100';
+    process.env.ASSISTANT_COMPANY_MONTHLY_USD = '20';
+    try {
+      database({ companyLimit: 5000, monthlyUsd: '900.00' });
+      const a = await require('../../src/assistant/assistant.allowance').allowanceOf(person());
+      expect([a.company_limit, a.monthly_usd]).toEqual([100, 20]);
+    } finally {
+      delete process.env.ASSISTANT_COMPANY_DAILY_MAX;
+      delete process.env.ASSISTANT_COMPANY_MONTHLY_USD;
+    }
   });
 
   test('the company\'s month at its money ceiling: told when it comes back, and the model is not asked', async () => {

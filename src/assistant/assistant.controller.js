@@ -1,16 +1,20 @@
 /*
- * /api/assistant — the report assistant ("STM Mexa AI").
+ * /api/assistant — the report assistant ("STM Mexa AI") — and, for S&T,
+ * /api/companies/:id/assistant: how much one company may use it.
  * Errors go to the error middleware: a refusal keeps its sentence, a server
  * fault is logged under a reference.
  */
 const { createAssistant } = require('./assistant.service');
 const allowance = require('./assistant.allowance');
-const readConfig = require('./assistant.config');
-
-/** The settings, and the company's own daily total the platform holds it to (the admin sees it, cannot change it). */
-const withCompanyMax = settings => ({ ...settings, company_daily_max: readConfig().companyDailyMax });
 
 const assistant = createAssistant();
+
+/** The company in the address, as a positive whole number. */
+function companyIdOf(req) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('Company not found.'), { status: 404, code: 'COMPANY_NOT_FOUND' });
+  return id;
+}
 
 exports.status = async (req, res, next) => {
   try {
@@ -32,15 +36,17 @@ exports.chat = async (req, res, next) => {
   finally { req.removeListener('aborted', stop); res.removeListener('close', stop); }
 };
 
-exports.getSettings = async (req, res, next) => {
+/** S&T: one company's figures, its timezone, and its use today and this month. */
+exports.getCompanySettings = async (req, res, next) => {
   try {
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ status: 'success', data: withCompanyMax(await allowance.settingsOf(req.user)) });
+    res.json({ status: 'success', data: await allowance.companySettings(companyIdOf(req)) });
   } catch (err) { next(err); }
 };
 
-exports.updateSettings = async (req, res, next) => {
-  try { res.json({ status: 'success', data: withCompanyMax(await allowance.updateSettings(req.user, req.body || {})) }); }
+/** S&T: raise or lower one company's figures (audited). */
+exports.updateCompanySettings = async (req, res, next) => {
+  try { res.json({ status: 'success', data: await allowance.updateCompanySettings(companyIdOf(req), req.body || {}, req.user) }); }
   catch (err) { next(err); }
 };
 

@@ -3,8 +3,10 @@
  *
  *   GET  /status     on for this person? suggestions, today's allowance
  *   POST /chat       { messages: [{role, content, sig?}], context? } → a signed reply
- *   GET  /settings   the company admin: daily allowance, timezone
- *   PUT  /settings   { daily_limit: 0–ASSISTANT_DAILY_LIMIT_MAX, timezone? } (audited)
+ *
+ * How much a company may use it is S&T's alone (23 Oct 2026, the user: "only
+ * the super admin — up or down — not the company side"):
+ * GET/PUT /api/companies/:id/assistant (company.routes).
  *
  * Only where S&T gave the company "STM Mexa AI" in Manage Access, and only
  * for the roles the company admin gave it (page:assistant:view — an opt-in
@@ -18,12 +20,9 @@
 const router = require('express').Router();
 const ctrl = require('./assistant.controller');
 const auth = require('../middleware/auth.middleware');
-const role = require('../middleware/role.middleware');
 const access = require('../middleware/access.middleware');
-const audited = require('../middleware/audit.middleware');
 const { assistantLimiter } = require('../middleware/rateLimit.middleware');
 
-const companyAdmin = role(['COMPANY_ADMIN', 'ADMIN']);
 /** A person of a company (not S&T): the assistant answers about one company, theirs. */
 const companyPerson = (req, res, next) => (req.user?.company_id
   ? next() : res.status(403).json({ status: 'error', code: 'NO_COMPANY', message: 'STM Mexa AI answers for a company account.' }));
@@ -32,7 +31,5 @@ const assistantAccess = access('page:assistant:view');
 
 router.get('/status', auth, companyPerson, assistantAccess, ctrl.status);
 router.post('/chat', auth, companyPerson, assistantAccess, assistantLimiter, ctrl.chat);
-router.get('/settings', auth, companyAdmin, assistantAccess, ctrl.getSettings);
-router.put('/settings', auth, companyAdmin, assistantAccess, audited('assistant_settings'), ctrl.updateSettings);
 
 module.exports = router;

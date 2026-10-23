@@ -15,18 +15,20 @@
  *   ASSISTANT_TIMEOUT_MS      one model call (default 45 s)
  *   ASSISTANT_MAX_CONCURRENT  questions answered at once across the server (8)
  *
- * What it may cost — the platform pays for every model call, so these are
- * hard ceilings no company setting can pass (22 Oct 2026; 23 Oct 2026, the
- * user: "50 a day per company; never more — less is fine"):
+ * What it may cost — the platform pays for every model call. S&T sets each
+ * company's figures in Company Management → AI (23 Oct 2026, the user: "only
+ * the super admin decides how much — up or down — not the company side"):
+ * answers a day for each person, questions a day for the whole company and a
+ * monthly cost limit — 50, 50 and US$5 until S&T changes them
+ * (assistant.allowance). These are the server's ceilings, which no figure
+ * passes, whoever set it — a guard against a slip of the keyboard:
  *
- *   ASSISTANT_COMPANY_DAILY_MAX  questions a day for a whole company, all its
- *                                people together (default 50)
- *   ASSISTANT_DAILY_LIMIT_MAX    the most answers a day a company admin may give
- *                                each person (default 50: the admin may lower it,
- *                                never raise it)
- *   ASSISTANT_COMPANY_MONTHLY_USD  the most one company's questions may cost in a
- *                                calendar month, in US$ (default 5); reached, the AI
- *                                stops for the company until the month turns
+ *   ASSISTANT_DAILY_LIMIT_MAX      answers a day for one person (default 1000)
+ *   ASSISTANT_COMPANY_DAILY_MAX    questions a day for one company, all its
+ *                                  people together (default 10000)
+ *   ASSISTANT_COMPANY_MONTHLY_USD  US$ a calendar month for one company (default
+ *                                  1000); a company's own limit reached, the AI
+ *                                  stops for it until the month turns
  *   ASSISTANT_PRICE_INPUT_PER_M, ASSISTANT_PRICE_CACHED_PER_M, ASSISTANT_PRICE_OUTPUT_PER_M
  *                                the model's US$ per million tokens — Claude Haiku 5.5:
  *                                0.10 input, 0.01 cache read, 0.50 output (prompts up to
@@ -35,7 +37,7 @@
  *
  * One question costs about US$0.0007–0.002 (two or three model calls of ~3,500
  * cached and ~1,000–4,000 other input tokens, ~300 output): 50 a day for a
- * month is about US$1.1–3 a company, never more than the monthly ceiling.
+ * month is about US$1.1–3 a company, never more than its monthly limit.
  *
  * The key stays on the server: the browser never sees it.
  */
@@ -63,9 +65,9 @@ module.exports = () => ({
   timeoutMs: positive(process.env.ASSISTANT_TIMEOUT_MS, 45000, 120000),
   questionTimeoutMs: positive(process.env.ASSISTANT_QUESTION_TIMEOUT_MS, 90000, 180000),
   maxConcurrent: positive(process.env.ASSISTANT_MAX_CONCURRENT, 8, 100),
-  dailyLimitMax: positive(process.env.ASSISTANT_DAILY_LIMIT_MAX, 50, 1000),
-  companyDailyMax: positive(process.env.ASSISTANT_COMPANY_DAILY_MAX, 50, 100000),
-  monthlyBudgetUsd: amount(process.env.ASSISTANT_COMPANY_MONTHLY_USD, 5, 10000),
+  dailyLimitMax: positive(process.env.ASSISTANT_DAILY_LIMIT_MAX, 1000, 1000),
+  companyDailyMax: positive(process.env.ASSISTANT_COMPANY_DAILY_MAX, 10000, 100000),
+  monthlyBudgetUsd: amount(process.env.ASSISTANT_COMPANY_MONTHLY_USD, 1000, 100000),
   priceInputPerM: amount(process.env.ASSISTANT_PRICE_INPUT_PER_M, 0.10, 100),
   priceCachedPerM: amount(process.env.ASSISTANT_PRICE_CACHED_PER_M, 0.01, 100),
   priceOutputPerM: amount(process.env.ASSISTANT_PRICE_OUTPUT_PER_M, 0.50, 500),

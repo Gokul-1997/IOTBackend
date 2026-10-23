@@ -11,7 +11,8 @@ not open is never read for them.
 ## Switching it on
 
 1. Run the migrations: `npm run migrate` (052 adds the allowance tables and
-   `companies.timezone`; 054 the question counts and token figures).
+   `companies.timezone`; 054 the question counts and token figures; 058 each
+   company's own daily total and monthly limit, set by S&T).
 2. Put an Anthropic API key in the server's `.env`: `ANTHROPIC_API_KEY=…`
    (and optionally `ASSISTANT_NAME`, default `STM Mexa AI`). Keep
    `ASSISTANT_MODEL` at its default, `claude-haiku-5-5`: the lowest cost, and
@@ -96,19 +97,29 @@ answered by the app itself — no model, nothing used.
 
 ## The allowance and what it may cost
 
-- **Per company: 50 questions a day** in all (`ASSISTANT_COMPANY_DAILY_MAX`),
-  every question the model reads counted, answered or not.
-- **Per company: US$5 a month at most** (`ASSISTANT_COMPANY_MONTHLY_USD`):
-  this month's tokens priced at Claude Haiku 5.5's rates (every input token
-  as a cache write, so never below the bill); reached, the AI stops for the
-  company until the month turns.
-- **Per person:** 50 completed answers a day by default. The company admin
-  sets it in **Settings → STM Mexa AI** — lower, or 0 to switch it off; never
-  above `ASSISTANT_DAILY_LIMIT_MAX` (default 50). The company timezone's
-  midnight resets it.
-- A clarifying question, a refusal, "no records" and a failure are not
-  counted as answers. With an allowance used up, the chat says when it comes
-  back; the reports themselves stay open.
+S&T alone sets how much each company may use it, in **Company Management →
+AI** (23 Oct 2026, the user: "only the super admin — up or down — not the
+company side"; the company admin sets nothing). There S&T sees the
+company's use today and this month — questions, answers, what they cost —
+and raises or lowers:
+
+- **Questions a day for the whole company** (50 until S&T sets it): every
+  question the model reads counted, answered or not.
+- **Answers a day for each person** (50 until S&T sets it): what the person
+  sees under the question box. A clarifying question, a refusal, "no
+  records" and a failure are not counted as answers.
+- **Monthly limit** (US$5 until S&T sets it): this month's tokens priced at
+  Claude Haiku 5.5's rates (every input token as a cache write, so never
+  below the bill); reached, the AI stops for the company until the month
+  turns.
+- **The company's timezone**: its midnight brings the day back.
+
+Any of the three at 0 switches the AI off for the company. No figure passes
+the server's ceilings — `ASSISTANT_DAILY_LIMIT_MAX` (1000 answers a person),
+`ASSISTANT_COMPANY_DAILY_MAX` (10,000 questions a company),
+`ASSISTANT_COMPANY_MONTHLY_USD` (US$1,000 a month) — a guard against a slip
+of the keyboard. With an allowance used up, the chat says when it comes
+back; the reports themselves stay open.
 
 **What a question costs** (Claude Haiku 5.5, per million tokens: US$0.10
 input, 0.125 cache write, 0.01 cache read, 0.50 output). A question is two
@@ -138,7 +149,7 @@ model behaving — the server enforces it:
 
 | Risk | What stops it |
 | --- | --- |
-| Questions that end in a refusal or a question back cost money but are not "answers" | Every question the model reads is first taken from two hard daily ceilings: per person three per answer of the allowance (at least 20), per company `ASSISTANT_COMPANY_DAILY_MAX` (default 50) — and the company's month from `ASSISTANT_COMPANY_MONTHLY_USD` (default US$5). |
+| Questions that end in a refusal or a question back cost money but are not "answers" | Every question the model reads is first taken from two hard daily ceilings: per person three per answer of the allowance (at least 20), per company its questions a day — and the company's month from its monthly limit (both S&T's; 50 and US$5 until set). |
 | Asking very fast | `ASSISTANT_PER_MINUTE` (default 6) per person, counted in Redis — and in memory while Redis is down. One question at a time per person, 8 at a time on the server. |
 | One question reading report after report | At most 4 report reads and 4 model calls per question; a read over 12,000 characters is not handed to the model (it is told to narrow the question); 800 output tokens per call; 45 s per call. |
 | An oversized response or a caller who has left | Provider response buffering stops at 1 MiB. The question has a 90 s deadline (`ASSISTANT_QUESTION_TIMEOUT_MS`, maximum 180 s); a disconnected HTTP caller cancels its active model request. Database reads keep their existing statement timeout. |
@@ -150,7 +161,7 @@ model behaving — the server enforces it:
 | A report the person may not open | The tool is not offered, and refused if asked for anyway; downloads need the Export permission. |
 | The API key | Only in the server's `.env`; sent only to `https://api.anthropic.com` (fixed in code), over verified HTTPS. Never in a response or a log; `scripts/assistant-check.js` shows only its first 10 characters (the fixed "sk-ant-" prefix and the key's kind) and its length. |
 | Answers shown in the browser | Plain text only (never HTML); "View report" opens only app pages, "Download report" only the report exports. |
-| Who changed the allowance | The company admin's change is in the audit log (`UPDATE_ASSISTANT_SETTINGS`). |
+| Who changed the allowance | Only S&T can (`PUT /api/companies/:id/assistant`); each change is in the audit log (`UPDATE_ASSISTANT_SETTINGS`, the company's id). |
 
 **What it cost, per company and month** (US$, priced as the ceiling prices
 it — `input` includes cache writes, `cached` is cache reads):

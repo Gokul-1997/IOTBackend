@@ -1,25 +1,38 @@
 /*
- * What the report assistant may use, per company day (migrations 052, 054).
+ * What the report assistant may use, per company day (migrations 052, 054,
+ * 058). S&T sets every figure, per company, in Company Management → AI
+ * (23 Oct 2026, the user: "only the super admin decides how much — up or
+ * down — not the company side"); the company admin sets nothing.
  *
- *   the allowance   completed answers per person per day, set by the company
- *                   admin (50 to start, 0 switches the assistant off) and never
- *                   above ASSISTANT_DAILY_LIMIT_MAX. What the person sees. A
+ *   the allowance   completed answers per person per day (50 until S&T sets
+ *                   it; 0 switches the assistant off). What the person sees. A
  *                   clarifying question, a refusal or a failure does not count.
  *   the ceilings    every question the model reads counts — answers or not —
- *                   against two hard limits the person does not see: three
- *                   per answer of their allowance (at least 20), and
- *                   ASSISTANT_COMPANY_DAILY_MAX for the whole company. Without
+ *                   against two limits the person does not see: three per
+ *                   answer of their allowance (at least 20), and the
+ *                   company's questions a day (50 until S&T sets it). Without
  *                   them, questions that end in a refusal would run the
  *                   platform's AI (and its bill) without end (22 Oct 2026).
+ *   the month       what the company's questions may cost in a calendar month
+ *                   (US$5 until S&T sets it; assistant.budget).
  *   the bill        the tokens each person's questions read and wrote.
  *
- * A day is the company's: it resets at midnight in the company's timezone.
+ * No figure passes the server's ASSISTANT_* ceilings (assistant.config). A
+ * day is the company's: it resets at midnight in the company's timezone.
  */
 const db = require('../db');
 const readConfig = require('./assistant.config');
+const { costOf, DEFAULT_MONTHLY_USD } = require('./assistant.budget');
 
+/** Each company's figures until S&T sets its own. */
 const DEFAULT_LIMIT = 50;
+const DEFAULT_COMPANY_LIMIT = 50;
 const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
+
+/** A stored figure (null: the default), never above the server's ceiling. */
+const figure = (stored, fallback, ceiling) => Math.min(stored === null || stored === undefined ? fallback : Number(stored), ceiling);
+/** Any of the three at 0: S&T has switched the AI off for the company. */
+const switchedOff = a => a.limit === 0 || a.company_limit === 0 || a.monthly_usd === 0;
 
 /** Questions a person may put to the model in a day: three per answer of the allowance, at least 20. */
 const questionCap = limit => Math.max(20, limit * 3);
@@ -42,6 +55,7 @@ function resetsText(resetsAt, timezone) {
 async function allowanceOf(user) {
   const { rows: [r] } = await db.query(`
     SELECT COALESCE(s.daily_limit, $3)                     AS daily_limit,
+           s.company_daily_limit, s.monthly_budget_usd,
            c.timezone, c.company_name,
            ((NOW() AT TIME ZONE c.timezone)::date)::text   AS day,
            (date_trunc('day', NOW() AT TIME ZONE c.timezone) + INTERVAL '1 day') AT TIME ZONE c.timezone AS resets_at,
@@ -54,10 +68,13 @@ async function allowanceOf(user) {
      WHERE c.id = $1`,
     [user.company_id, user.id, DEFAULT_LIMIT]);
   if (!r) throw fail(403, 'NO_COMPANY', 'No company assigned');
-  const limit = Math.min(Number(r.daily_limit), readConfig().dailyLimitMax);     // a ceiling no company setting passes
+  const cfg = readConfig();
+  const limit = figure(r.daily_limit, DEFAULT_LIMIT, cfg.dailyLimitMax);
   const used = Number(r.used);
   return {
     limit, used, remaining: Math.max(0, limit - used), questions: Number(r.questions) || 0,
+    company_limit: figure(r.company_daily_limit, DEFAULT_COMPANY_LIMIT, cfg.companyDailyMax),
+    monthly_usd: figure(r.monthly_budget_usd, DEFAULT_MONTHLY_USD, cfg.monthlyBudgetUsd),
     day: r.day, timezone: r.timezone, company_name: r.company_name,
     resets_at: new Date(r.resets_at).toISOString(),
     resets_text: resetsText(r.resets_at, r.timezone)
@@ -72,7 +89,7 @@ async function allowanceOf(user) {
  * 'COMPANY'.
  */
 async function reserveQuestion(user, allowance) {
-  const companyMax = readConfig().companyDailyMax;
+  const companyMax = allowance.company_limit ?? figure(null, DEFAULT_COMPANY_LIMIT, readConfig().companyDailyMax);
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -139,32 +156,87 @@ async function record(user, allowance, { answered = false, inputTokens = 0, cach
 /** What the browser is told: no internal day key, no ceilings. */
 const present = a => a && ({ limit: a.limit, used: a.used, remaining: a.remaining, resets_at: a.resets_at, resets_text: a.resets_text, timezone: a.timezone });
 
-async function settingsOf(user) {
-  const a = await allowanceOf(user);
-  return { daily_limit: a.limit, timezone: a.timezone, default_limit: DEFAULT_LIMIT, max_limit: readConfig().dailyLimitMax };
+/**
+ * What S&T sees for one company: its three figures (with the defaults and
+ * the server's ceilings), its timezone, whether S&T gave it the AI, and its
+ * use today and this month — questions, answers, and what they cost.
+ */
+async function companySettings(companyId) {
+  const cfg = readConfig();
+  const { rows: [c] } = await db.query(`
+    SELECT c.id, c.company_name, c.timezone,
+           s.daily_limit, s.company_daily_limit, s.monthly_budget_usd, s.updated_at,
+           ((NOW() AT TIME ZONE c.timezone)::date)::text AS day,
+           EXISTS (SELECT 1 FROM company_permissions cp JOIN permissions p ON p.id = cp.permission_id
+                    WHERE cp.company_id = c.id AND p.permission_key LIKE 'page:assistant%') AS granted
+      FROM companies c
+      LEFT JOIN assistant_settings s ON s.company_id = c.id
+     WHERE c.id = $1`, [companyId]);
+  if (!c) throw fail(404, 'COMPANY_NOT_FOUND', 'Company not found.');
+  const { rows: [u = {}] } = await db.query(`
+    SELECT COALESCE(SUM(questions) FILTER (WHERE day = $2::date), 0)::int AS today_questions,
+           COALESCE(SUM(answers) FILTER (WHERE day = $2::date), 0)::int   AS today_answers,
+           (COUNT(DISTINCT user_id) FILTER (WHERE day = $2::date AND questions > 0))::int AS today_people,
+           COALESCE(SUM(questions), 0)::int AS month_questions,
+           COALESCE(SUM(answers), 0)::int   AS month_answers,
+           COALESCE(SUM(input_tokens), 0)::bigint AS input,
+           COALESCE(SUM(cached_tokens), 0)::bigint AS cached,
+           COALESCE(SUM(output_tokens), 0)::bigint AS output
+      FROM assistant_usage
+     WHERE company_id = $1 AND day >= date_trunc('month', $2::date)::date`, [companyId, c.day]);
+  return {
+    company_id: c.id, company_name: c.company_name, timezone: c.timezone, granted: !!c.granted,
+    person_daily: figure(c.daily_limit, DEFAULT_LIMIT, cfg.dailyLimitMax),
+    company_daily: figure(c.company_daily_limit, DEFAULT_COMPANY_LIMIT, cfg.companyDailyMax),
+    monthly_usd: figure(c.monthly_budget_usd, DEFAULT_MONTHLY_USD, cfg.monthlyBudgetUsd),
+    defaults: { person_daily: DEFAULT_LIMIT, company_daily: DEFAULT_COMPANY_LIMIT, monthly_usd: DEFAULT_MONTHLY_USD },
+    max: { person_daily: cfg.dailyLimitMax, company_daily: cfg.companyDailyMax, monthly_usd: cfg.monthlyBudgetUsd },
+    usage: {
+      today: { questions: count(u.today_questions), answers: count(u.today_answers), people: count(u.today_people) },
+      month: { questions: count(u.month_questions), answers: count(u.month_answers),
+               spent_usd: Math.round(costOf(u, cfg) * 10000) / 10000 }
+    },
+    updated_at: c.updated_at || null
+  };
 }
 
-/** The company admin sets the allowance (up to the platform's ceiling) and the company's timezone. */
-async function updateSettings(user, body = {}) {
-  const max = readConfig().dailyLimitMax;
-  const limit = body.daily_limit;
-  if (!Number.isInteger(limit) || limit < 0 || limit > max) {
-    throw fail(400, 'BAD_LIMIT', `The daily allowance must be a whole number from 0 to ${max}.`);
+/**
+ * S&T sets one company's figures — each from 0 (the AI off for the company)
+ * up to the server's ceiling, raised or lowered as S&T decides — and the
+ * company's timezone, whose midnight brings the day's allowance back.
+ */
+async function updateCompanySettings(companyId, body = {}, actor = {}) {
+  const cfg = readConfig();
+  const { person_daily: person, company_daily: company, monthly_usd: monthly } = body;
+  if (!Number.isInteger(person) || person < 0 || person > cfg.dailyLimitMax) {
+    throw fail(400, 'BAD_LIMIT', `Answers a day for each person must be a whole number from 0 to ${cfg.dailyLimitMax}.`);
+  }
+  if (!Number.isInteger(company) || company < 0 || company > cfg.companyDailyMax) {
+    throw fail(400, 'BAD_LIMIT', `Questions a day for the whole company must be a whole number from 0 to ${cfg.companyDailyMax}.`);
+  }
+  if (typeof monthly !== 'number' || !Number.isFinite(monthly) || monthly < 0 || monthly > cfg.monthlyBudgetUsd
+      || Math.abs(Math.round(monthly * 100) - monthly * 100) > 1e-6) {
+    throw fail(400, 'BAD_BUDGET', `The monthly limit must be an amount in US$ from 0 to ${cfg.monthlyBudgetUsd}, to the cent.`);
   }
   if (body.timezone !== undefined && !validTimezone(body.timezone)) {
     throw fail(400, 'BAD_TIMEZONE', 'Choose a timezone from the list, such as Asia/Kolkata.');
   }
+  const { rows: [found] } = await db.query('SELECT id FROM companies WHERE id = $1', [companyId]);
+  if (!found) throw fail(404, 'COMPANY_NOT_FOUND', 'Company not found.');
   await db.query(`
-    INSERT INTO assistant_settings (company_id, daily_limit, updated_by, updated_at) VALUES ($1, $2, $3, NOW())
-    ON CONFLICT (company_id) DO UPDATE SET daily_limit = EXCLUDED.daily_limit, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
-    [user.company_id, limit, user.id]);
+    INSERT INTO assistant_settings (company_id, daily_limit, company_daily_limit, monthly_budget_usd, updated_by, updated_at)
+    VALUES ($1, $2, $3, $4, $5, NOW())
+    ON CONFLICT (company_id) DO UPDATE
+       SET daily_limit = EXCLUDED.daily_limit, company_daily_limit = EXCLUDED.company_daily_limit,
+           monthly_budget_usd = EXCLUDED.monthly_budget_usd, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+    [companyId, person, company, Math.round(monthly * 100) / 100, actor.id ?? null]);
   if (body.timezone !== undefined) {
-    await db.query('UPDATE companies SET timezone = $2, updated_at = NOW() WHERE id = $1', [user.company_id, body.timezone]);
+    await db.query('UPDATE companies SET timezone = $2, updated_at = NOW() WHERE id = $1', [companyId, body.timezone]);
   }
-  return settingsOf(user);
+  return companySettings(companyId);
 }
 
 module.exports = {
-  allowanceOf, reserveQuestion, refundQuestion, record, present, settingsOf, updateSettings,
-  validTimezone, resetsText, questionCap, DEFAULT_LIMIT
+  allowanceOf, reserveQuestion, refundQuestion, record, present, switchedOff, companySettings, updateCompanySettings,
+  validTimezone, resetsText, questionCap, DEFAULT_LIMIT, DEFAULT_COMPANY_LIMIT
 };
