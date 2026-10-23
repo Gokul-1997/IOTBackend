@@ -13,6 +13,10 @@ module.exports = name => ({
   notFound: 'I couldn’t find matching information in your company’s records. Please try another period or filter.',
   limit: resetsAt => `You’ve reached today’s ${name} allowance. Your allowance resets at ${resetsAt}. You can still access your reports.`,
   companyLimit: resetsAt => `${name} has reached your company’s allowance for today. It resets at ${resetsAt}. You can still access your reports.`,
+  monthLimit: resetsOn => `${name} has reached your company’s allowance for this month. It comes back on ${resetsOn}. You can still access your reports.`,
+  // a greeting or a thank-you: answered by the app, without the AI and without using the allowance
+  hello: `Hello! Ask me about your company in MEXA — machines, production, OEE, alarms, downtime, maintenance or energy — or how to do something in MEXA.`,
+  thanks: 'You’re welcome. Ask me anything about your company in MEXA.',
   switchedOff: `${name} is switched off for your company.`,
   unavailable: `${name} is not available right now. Please try again in a few minutes.`,
   busy: `${name} is busy right now. Please try again in a moment.`,

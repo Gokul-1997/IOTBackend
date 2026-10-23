@@ -86,11 +86,12 @@ describe('the company admin sets the allowance', () => {
     expect((await request(app).put('/api/assistant/settings').send({ daily_limit: 10 })).status).toBe(403);
   });
 
-  test('a whole number up to the platform\'s ceiling (100 unless the server says), and a real timezone', async () => {
+  // 23 Oct 2026, the user: "50 a day — the client may lower it, never raise it"
+  test('a whole number up to the platform\'s ceiling (50 unless the server says) — lower, never higher — and a real timezone', async () => {
     mockUser = { id: 1, company_id: 5, roles: ['COMPANY_ADMIN'], permissions: [] };
     for (const [body, message] of [
-      [{ daily_limit: -1 }, /from 0 to 100\./], [{ daily_limit: 101 }, /from 0 to 100\./], [{ daily_limit: 1000 }, /from 0 to 100\./],
-      [{ daily_limit: '50' }, /from 0 to 100\./], [{ daily_limit: 20, timezone: 'Mars/Olympus' }, /timezone/]
+      [{ daily_limit: -1 }, /from 0 to 50\./], [{ daily_limit: 51 }, /from 0 to 50\./], [{ daily_limit: 100 }, /from 0 to 50\./],
+      [{ daily_limit: '50' }, /from 0 to 50\./], [{ daily_limit: 20, timezone: 'Mars/Olympus' }, /timezone/]
     ]) {
       const res = await request(app).put('/api/assistant/settings').send(body);
       expect(res.status).toBe(400);
@@ -101,7 +102,8 @@ describe('the company admin sets the allowance', () => {
     mockDb.queueResponse({ rows: [], rowCount: 1 }, { rows: [], rowCount: 1 }, allowanceRow({ daily_limit: 20, timezone: 'Asia/Dubai' }));
     const res = await request(app).put('/api/assistant/settings').send({ daily_limit: 20, timezone: 'Asia/Dubai' });
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ daily_limit: 20, timezone: 'Asia/Dubai', default_limit: 50, max_limit: 100 });
+    // the company's own total for the day comes with it: the admin sees it, and cannot change it
+    expect(res.body.data).toEqual({ daily_limit: 20, timezone: 'Asia/Dubai', default_limit: 50, max_limit: 50, company_daily_max: 50 });
     const [upsert, tz] = mockDb.calls();
     expect(upsert.params).toEqual([5, 20, 1]);
     expect(tz.params).toEqual([5, 'Asia/Dubai']);
@@ -118,7 +120,7 @@ describe('the company admin sets the allowance', () => {
     delete process.env.ASSISTANT_DAILY_LIMIT_MAX;
     resetDb();
     mockDb.queueResponse(allowanceRow({ daily_limit: 1000 }));
-    expect((await request(app).get('/api/assistant/settings')).body.data).toMatchObject({ daily_limit: 100, max_limit: 100 });
+    expect((await request(app).get('/api/assistant/settings')).body.data).toMatchObject({ daily_limit: 50, max_limit: 50 });
   });
 });
 

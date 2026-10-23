@@ -9,8 +9,9 @@
  * services), for the signed-in person's company and plant (the request's
  * read scope), and only when that person may open the matching page — the
  * same role-and-company check the API uses. A tool the person may not use is
- * not offered at all. Nothing here writes to the database, and no person's
- * name leaves it.
+ * not offered at all. Nothing here writes to the database — and since 23 Oct
+ * 2026 the database itself refuses if anything tried (runTool, db.readOnly) —
+ * and no person's name leaves it.
  */
 const db = require('../db');
 const reports = require('../reports/report.service');
@@ -556,7 +557,10 @@ function toolsFor(can) {
  * Run one tool call. Never throws for a person's mistake: the model is told,
  * so it can ask. Run inside this person's read scope (their company and
  * plant) again, so the plant filter never rests on the request's context
- * surviving the wait for the model.
+ * surviving the wait for the model — and read-only (db.readOnly): every
+ * query it makes, however deep in the services it calls, goes to connections
+ * on which PostgreSQL refuses any write (23 Oct 2026, the user: "the AI only
+ * reads; nothing written, not one line").
  */
 async function runTool(user, name, input, ctx) {
   if (!ctx.offered.includes(name) || !Object.hasOwn(TOOLS, name)) {
@@ -564,7 +568,7 @@ async function runTool(user, name, input, ctx) {
   }
   try {
     const args = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-    const r = await readScope.run(user, () => TOOLS[name].run(user, args, ctx));
+    const r = await db.readOnly(() => readScope.run(user, () => TOOLS[name].run(user, args, ctx)));
     return { error: false, out: r.data, source: r.source };
   } catch (err) {
     if (err instanceof ToolProblem) {

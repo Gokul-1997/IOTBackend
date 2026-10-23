@@ -72,6 +72,10 @@ const mockDb = {
     release: jest.fn()
   })),
 
+  // src/db's read-only route (the AI assistant's tools): the work runs as given;
+  // the real routing is tested on its own (__tests__/ops/database-readonly.test.js)
+  readOnly: jest.fn(work => work()),
+
   // Helpers used by tests
   queueResponse: (...responses) => {
     responses.forEach(r => responseQueue.push(r));
@@ -93,6 +97,7 @@ const mockDb = {
     ownershipCalls.length = 0;
     mockDb.query.mockClear();
     mockDb.connect.mockClear();
+    mockDb.readOnly.mockClear();
   },
   /*
    * The queries under test, with the advisory-lock bookkeeping filtered

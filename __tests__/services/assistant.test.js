@@ -9,13 +9,16 @@
  * completed answer uses up the daily allowance, and the limit is checked
  * before the model is asked anything. And what it may cost (22 Oct 2026
  * security review): every question is taken from hard daily ceilings, a
- * question reads at most six reports, assistant turns the server did not
- * sign are not believed, and every token is kept for the bill.
+ * question reads at most four reports (23 Oct 2026), assistant turns the
+ * server did not sign are not believed, and every token is kept for the bill.
+ * And since 23 Oct 2026: the tools only read (the database refuses writes),
+ * a company has 50 questions a day and a monthly money ceiling, and an
+ * answer must rest on what the tools read for the question.
  */
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 
 const { mockDb, resetDb } = require('../helpers/mockDb');
-const { createAssistant, cleanHistory, trustedHistory, cleanContext, HISTORY_CHARS } = require('../../src/assistant/assistant.service');
+const { createAssistant, cleanHistory, trustedHistory, cleanContext, smallTalk, HISTORY_CHARS } = require('../../src/assistant/assistant.service');
 const signed = require('../../src/assistant/assistant.history');
 
 const one = row => ({ rows: [row], rowCount: 1 });
@@ -24,7 +27,8 @@ const ALL = ['page:reports:view', 'page:reports:export', 'page:oee-reports:view'
 const person = (permissions = ALL, extra = {}) => ({ id: 2, company_id: 5, roles: ['SUPERVISOR'], permissions, ...extra });
 
 let db;
-function database({ used = 0, limit = null, rows = productionRows(), machines = MACHINES, questions = 0, companyQuestions = 0 } = {}) {
+function database({ used = 0, limit = null, rows = productionRows(), machines = MACHINES, questions = 0, companyQuestions = 0,
+                   month = { input: 0, cached: 0, output: 0 } } = {}) {
   db = { usage: used, inserts: 0, questions, companyQuestions, tokens: { input: 0, cached: 0, output: 0 }, queries: [] };
   mockDb.query.mockImplementation(async (sql, params = []) => {
     const text = typeof sql === 'string' ? sql : sql.text;
@@ -40,6 +44,8 @@ function database({ used = 0, limit = null, rows = productionRows(), machines = 
       return one({ questions: db.questions });
     }
     if (/SUM\(questions\), 0\)::int AS company/.test(text)) return one({ company: db.companyQuestions });
+    // the company's month so far (assistant.budget)
+    if (/FROM companies c\s+LEFT JOIN assistant_usage u/.test(text)) return one({ ...month, resets_on: '01 Nov 2026' });
     if (/UPDATE assistant_usage SET questions = GREATEST/.test(text)) { db.questions -= 1; db.companyQuestions -= 1; return none; }
     if (/INSERT INTO assistant_usage AS u \(user_id, company_id, day, answers, input_tokens/.test(text)) {
       db.inserts += params[3]; db.usage += params[3];
@@ -251,7 +257,7 @@ describe('what it will not do', () => {
   test('the model failing: a plain sentence, nothing counted, and the person can ask again', async () => {
     database();
     const busy = Object.assign(new Error('ASSISTANT_BUSY'), { status: 503, code: 'ASSISTANT_BUSY' });
-    const { callModel } = scripted(busy, reply('answer', 'ok'));
+    const { callModel } = scripted(busy, [use('company_details', {})], reply('answer', 'ok'));
     const a = createAssistant({ callModel, config: config() });
     await expect(a.chat(person(), ask('Production today'))).rejects.toMatchObject({ status: 503, message: 'STM Mexa AI is busy right now. Please try again in a moment.' });
     expect(db.inserts).toBe(0);
@@ -263,8 +269,10 @@ describe('what it will not do', () => {
 
   test('one question at a time per person', async () => {
     database();
-    let release;
-    const callModel = jest.fn(() => new Promise(resolve => { release = () => resolve({ content: reply('answer', 'ok') }); }));
+    let release, calls = 0;
+    const callModel = jest.fn(() => (calls++ === 0
+      ? new Promise(resolve => { release = () => resolve({ content: [use('company_details', {})] }); })
+      : Promise.resolve({ content: reply('answer', 'ok') })));
     const a = createAssistant({ callModel, config: config() });
     const first = a.chat(person(), ask('one'));
     await new Promise(r => setImmediate(r));
@@ -273,15 +281,79 @@ describe('what it will not do', () => {
     await expect(first).resolves.toMatchObject({ kind: 'answer' });
   });
 
-  test('a model that never finishes is stopped after five rounds; no answer counted, its tokens kept', async () => {
+  test('a model that never finishes is stopped after four rounds; no answer counted, its tokens kept', async () => {
     database();
     const loop = Array.from({ length: 6 }, (_, i) => [use('machines_and_shifts', {}, `m${i}`)]);
     const { callModel } = scripted(...loop);
     await expect(createAssistant({ callModel, config: config() }).chat(person(), ask('?'))).rejects.toMatchObject({ status: 502 });
-    expect(callModel).toHaveBeenCalledTimes(5);
+    expect(callModel).toHaveBeenCalledTimes(4);
     expect(db.inserts).toBe(0);
     expect(db.questions).toBe(1);
-    expect(db.tokens).toEqual({ input: 4500, cached: 0, output: 400 });
+    expect(db.tokens).toEqual({ input: 3600, cached: 0, output: 320 });
+  });
+});
+
+/*
+ * 23 Oct 2026, the user: "outside questions not answered — only our company";
+ * "the AI only reads, nothing written". Held to by the server, not left to
+ * the model.
+ */
+describe('only the company, and only reading', () => {
+  test('an answer that no tool read anything for is not given — whatever the model wrote', async () => {
+    database();
+    const { callModel } = scripted(reply('answer', 'The capital of France is Paris.'));
+    const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('What is the capital of France?'));
+    expect(r).toMatchObject({ kind: 'out_of_scope', text: 'I can help with your company’s information in MEXA and with using MEXA. Please ask a related question.', sources: [] });
+    expect(db.inserts).toBe(0);                                   // not an answer: the allowance is not used
+  });
+
+  test('a help lookup that matched nothing does not make an answer either; one that matched does', async () => {
+    database();
+    const offTopic = scripted([use('mexa_help', { topic: 'cricket score today' })], reply('answer', 'India won by 5 wickets.'));
+    expect(await createAssistant({ callModel: offTopic.callModel, config: config() }).chat(person(), ask('Cricket score?')))
+      .toMatchObject({ kind: 'out_of_scope' });
+
+    database();
+    const howTo = scripted([use('mexa_help', { topic: 'download report excel' })], reply('answer', 'Open Analytics → Reports and press Excel.'));
+    expect(await createAssistant({ callModel: howTo.callModel, config: config() }).chat(person(), ask('How do I download a report?')))
+      .toMatchObject({ kind: 'answer', text: 'Open Analytics → Reports and press Excel.' });
+  });
+
+  test('a question back must be one short question — not a way to say anything else', async () => {
+    database();
+    const { callModel } = scripted(reply('clarify', 'Here is a long story about something else entirely. '.repeat(10)));
+    expect(await createAssistant({ callModel, config: config() }).chat(person(), ask('Tell me a story')))
+      .toMatchObject({ kind: 'out_of_scope' });
+  });
+
+  test('hello and thanks are answered by the app: no model, nothing used', async () => {
+    database();
+    const { callModel } = scripted();
+    const a = createAssistant({ callModel, config: config() });
+    expect(await a.chat(person(), ask('Hi!'))).toMatchObject({ kind: 'note',
+      text: 'Hello! Ask me about your company in MEXA — machines, production, OEE, alarms, downtime, maintenance or energy — or how to do something in MEXA.' });
+    expect(await a.chat(person(), ask('ok thanks 🙏'))).toMatchObject({ kind: 'note', text: 'You’re welcome. Ask me anything about your company in MEXA.' });
+    expect(callModel).not.toHaveBeenCalled();
+    expect(db.questions).toBe(0);
+    expect([smallTalk('good morning'), smallTalk('Thank you so much'), smallTalk('hi, production today?'), smallTalk('how are you')])
+      .toEqual(['hello', 'thanks', null, null]);
+  });
+
+  test('every tool runs read-only: through the database route that refuses writes', async () => {
+    database();
+    const { mockDb: dbDouble } = require('../helpers/mockDb');
+    const { callModel } = scripted([use('company_details', {}), use('machines_and_shifts', {}, 't2')], reply('answer', 'S AND T.'));
+    await createAssistant({ callModel, config: config() }).chat(person(), ask('Our details?'));
+    expect(dbDouble.readOnly).toHaveBeenCalledTimes(2);
+  });
+
+  test('the rules name what is outside: general knowledge, chit-chat, other companies — and when unsure, outside', () => {
+    const { RULES } = require('../../src/assistant/assistant.service');
+    const rules = RULES('STM Mexa AI');
+    expect(rules).toMatch(/only two kinds of question are answered/);
+    expect(rules).toMatch(/general knowledge, news, weather, sports/);
+    expect(rules).toMatch(/When unsure, it is out_of_scope\./);
+    expect(rules).toMatch(/your earlier replies are not a source/);
   });
 });
 
@@ -328,7 +400,7 @@ describe('what it may cost', () => {
       text: 'You’ve reached today’s STM Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports.' });
     expect(callModel).not.toHaveBeenCalled();
     const reserve = db.queries.find(q => /INSERT INTO assistant_usage AS u \(user_id, company_id, day, questions\)/.test(q.text));
-    expect(reserve.params).toEqual([2, 5, '2026-10-22', 150, 500]);   // the person's ceiling, the company's
+    expect(reserve.params).toEqual([2, 5, '2026-10-22', 150, 50]);    // the person's ceiling, the company's (50 a day)
   });
 
   test('the whole company has a ceiling too, whoever asks', async () => {
@@ -355,15 +427,48 @@ describe('what it may cost', () => {
     expect(db.inserts).toBe(1);
   });
 
-  test('one question reads at most six reports, however many the model asks for', async () => {
+  test('one question reads at most four reports, however many the model asks for', async () => {
     database();
     const many = Array.from({ length: 9 }, (_, i) => use('production_report', { date_from: '2026-10-22', date_to: '2026-10-22' }, `p${i}`));
     const { callModel, sent } = scripted(many, reply('answer', 'Today: 65 parts.'));
     await createAssistant({ callModel, config: config(), now: () => new Date('2026-10-22T06:00:00Z') }).chat(person(), ask('Production today'));
-    expect(db.queries.filter(q => /FROM production_hourly p/.test(q.text))).toHaveLength(6);
+    expect(db.queries.filter(q => /FROM production_hourly p/.test(q.text))).toHaveLength(4);
     const results = toolResults(sent);
     expect(results).toHaveLength(9);
-    expect(results.slice(6).every(r => r.is_error && JSON.parse(r.content).problem.startsWith('Too many report reads'))).toBe(true);
+    expect(results.slice(4).every(r => r.is_error && JSON.parse(r.content).problem.startsWith('Too many report reads'))).toBe(true);
+  });
+
+  test('50 questions a day for the whole company, 50 answers a person at most, US$5 a month, and short replies — by default', () => {
+    const cfg = require('../../src/assistant/assistant.config')();
+    expect(cfg).toMatchObject({ companyDailyMax: 50, dailyLimitMax: 50, monthlyBudgetUsd: 5, maxTokens: 800,
+                                priceInputPerM: 0.1, priceCachedPerM: 0.01, priceOutputPerM: 0.5, model: 'claude-haiku-5-5' });
+  });
+
+  test('the company\'s month at its money ceiling: told when it comes back, and the model is not asked', async () => {
+    // 40 million input tokens at US$0.10 × 1.25 a million = US$5
+    database({ month: { input: 40_000_000, cached: 0, output: 0 } });
+    const { callModel } = scripted();
+    const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Production today'));
+    expect(r).toMatchObject({ kind: 'limit',
+      text: 'STM Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports.' });
+    expect(callModel).not.toHaveBeenCalled();
+    expect(db.questions).toBe(0);
+  });
+
+  test('a month\'s tokens priced at the model\'s rates, input as a cache write so it is never below the bill', () => {
+    const { costOf } = require('../../src/assistant/assistant.budget');
+    const cfg = { priceInputPerM: 0.1, priceCachedPerM: 0.01, priceOutputPerM: 0.5 };
+    expect(costOf({ input: 1_000_000, cached: 1_000_000, output: 1_000_000 }, cfg)).toBeCloseTo(0.125 + 0.01 + 0.5, 10);
+  });
+
+  test('a report read too big for one answer is not handed to the model: it is told to narrow the question', async () => {
+    // the reports trim themselves (25 machines at most); the list of every machine's name does not
+    database({ machines: Array.from({ length: 800 }, (_, i) => ({ id: i + 1, machine_serial_no: `Machine number ${i} with a long name` })) });
+    const { callModel, sent } = scripted([use('machines_and_shifts', {})], reply('clarify', 'Which machine?'));
+    await createAssistant({ callModel, config: config() }).chat(person(), ask('List every machine'));
+    const [result] = toolResults(sent);
+    expect(result.is_error).toBe(true);
+    expect(JSON.parse(result.content).problem).toMatch(/more than one answer can read/);
   });
 });
 
@@ -401,8 +506,8 @@ describe('what the model may believe', () => {
     await createAssistant({ callModel, config: config() }).chat(person(), history(
       q('one'), said(big('a1')), q('two'), said(big('a2')), q('three'), said(big('a3')), q('four'), said(big('a4')),
       q('five'), said(big('a5')), q('six')));
-    const kept = sent[0].messages;                                   // five replies of ~2,000 characters do not fit in 8,000
-    expect(kept.map(m => m.content.slice(0, 5))).toEqual(['two', 'a2 xx', 'three', 'a3 xx', 'four', 'a4 xx', 'five', 'a5 xx', 'six']);
+    const kept = sent[0].messages;                                   // four replies of ~2,000 characters do not fit in 6,000
+    expect(kept.map(m => m.content.slice(0, 5))).toEqual(['three', 'a3 xx', 'four', 'a4 xx', 'five', 'a5 xx', 'six']);
     expect(kept.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(HISTORY_CHARS);
   });
 

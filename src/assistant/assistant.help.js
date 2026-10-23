@@ -101,8 +101,9 @@ The bell (top right) holds notifications; your name opens Profile, Settings and 
   {
     id: 'assistant', title: 'About STM Mexa AI',
     keywords: 'assistant ai chatbot stm mexa allowance limit answers left reset switch off',
-    text: `- STM Mexa AI answers from your company's own MEXA data and only what your role may see.
-- Each person has a daily allowance of answers, set by the company admin in Settings → STM Mexa AI (0 switches it off). It resets at midnight, company time.
+    text: `- STM Mexa AI answers from your company's own MEXA data and only what your role may see. It only reads: it cannot change anything in MEXA.
+- It answers questions about your company in MEXA and about using MEXA — nothing else (no general questions).
+- The whole company has up to 50 questions a day. Each person has a daily allowance of answers, set by the company admin in Settings → STM Mexa AI (lower it, or 0 to switch it off). It resets at midnight, company time.
 - Answers can be wrong: check important figures on the report itself (View report under an answer).`
   },
   {
