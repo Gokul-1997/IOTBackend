@@ -43,7 +43,8 @@ test('machines: the list, and beside it the company\'s one gateway — never a t
   expect(res.headers['cache-control']).toBe('no-store');
   expect(res.body).toEqual({
     status: 'success',
-    data: [{ id: 7, machine_serial_no: 'VMC-1', next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }],
+    data: [{ id: 7, machine_serial_no: 'VMC-1', program_path: null, machine_ip: null, controller_type: null,
+             next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }],
     gateway: { token_prefix: 'mxg_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true }
   });
 });

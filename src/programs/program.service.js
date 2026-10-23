@@ -161,16 +161,18 @@ function backupFailure(r) {
 }
 
 /**
- * The company's gateway, and its machines: each with the program in front
- * of its line, how many wait and whether the gateway has taken it, the last
- * program the gateway reported on (on the machine, or refused), its last
- * backup, and what became of the last backup asked for.
+ * The company's gateway, and its machines: each with where its programs go
+ * (the program path, IP and controller type the gateway is given — shown so
+ * a wrong one is seen; 23 Oct 2026), the program in front of its line, how
+ * many wait and whether the gateway has taken it, the last program the
+ * gateway reported on (on the machine, or refused), its last backup, and
+ * what became of the last backup asked for.
  */
 exports.listMachines = async (req) => {
   const { companyId, plantId } = scope(req);
   const [{ rows }, gateway] = await Promise.all([
     pool.query(
-      `SELECT m.id, m.machine_serial_no,
+      `SELECT m.id, m.machine_serial_no, m.program_path, m.controller_type, ${MACHINE_IP} AS machine_ip,
               q.id AS next_id, q.program_name AS next_name, q.size_bytes AS next_size, q.created_at AS next_at, q.waiting,
               q.sent_to_gateway_at AS next_sent_at,
               COALESCE(q.sent_to_gateway_at <= NOW() - make_interval(mins => $3), false) AS next_report_late,
@@ -206,6 +208,10 @@ exports.listMachines = async (req) => {
   const machines = rows.map(r => ({
     id: r.id,
     machine_serial_no: r.machine_serial_no,
+    // what the gateway is told about this machine (GET /status), as set on the Machines page
+    program_path: given(r.program_path),
+    machine_ip: r.machine_ip || null,
+    controller_type: r.controller_type || null,
     // sent_to_gateway_at: the gateway has it and has not reported yet (report_late: for REPORT_WAIT_MIN or more)
     next: r.next_id ? { id: r.next_id, program_name: r.next_name, size_bytes: r.next_size, created_at: r.next_at,
                         sent_to_gateway_at: r.next_sent_at || null, report_late: !!r.next_report_late } : null,

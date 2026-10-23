@@ -42,7 +42,8 @@ const sql = pattern => mockDb.calls().find(c => pattern.test(c.text));
 describe('machines and files', () => {
   test("machines: the company's gateway, and each machine with the program in front of its line, how many wait, the last report, backup and open request", async () => {
     mockDb.queueResponse({ rows: [
-      { id: 7, machine_serial_no: 'VMC-1', next_id: '44', next_name: 'O2002.nc', next_size: 30, next_at: 'T5', waiting: '2',
+      { id: 7, machine_serial_no: 'VMC-1', program_path: ' //CNC_MEM/USER/PATH1/ ', controller_type: 'FANUC', machine_ip: '192.168.1.10',
+        next_id: '44', next_name: 'O2002.nc', next_size: 30, next_at: 'T5', waiting: '2',
         next_sent_at: null, next_report_late: false,
         report_id: '40', report_name: 'O1001.nc', delivery_status: 'DONE', delivery_message: null, delivered_at: 'T2b',
         backup_id: '41', backup_name: 'O1001.nc', backup_at: 'T3', request_id: '9', requested_at: 'T4',
@@ -57,6 +58,7 @@ describe('machines and files', () => {
     expect(machines.text).toMatch(/WHERE m\.company_id = \$1 AND m\.is_active = true/);
     expect(machines.text).toMatch(/f\.delivery_status IS NULL AND f\.deleted_at IS NULL\s+ORDER BY f\.created_at, f\.id LIMIT 1/);
     expect(machines.text).toMatch(/ORDER BY f\.delivered_at DESC NULLS LAST, f\.id DESC LIMIT 1/);
+    expect(machines.text).toMatch(/SELECT m\.id, m\.machine_serial_no, m\.program_path, m\.controller_type, COALESCE\(NULLIF\(btrim\(m\.controller_ip\)/);
     expect(machines.text).toMatch(/ORDER BY id DESC LIMIT 1\) lr/);     // the last backup asked for, in the order they were made
     expect(machines.params).toEqual([5, 30, 10]);                   // 30 min a backup request is offered; 10 min to report
     expect(gateway.text).toMatch(/FROM program_gateway_tokens\s+WHERE company_id = \$1 AND revoked_at IS NULL/);
@@ -66,16 +68,19 @@ describe('machines and files', () => {
       gateway: { token_prefix: 'mxg_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true },
       machines: [
         { id: 7, machine_serial_no: 'VMC-1',
+          // where its programs go, as the gateway is told — shown on the page so a wrong one is seen
+          program_path: '//CNC_MEM/USER/PATH1/', machine_ip: '192.168.1.10', controller_type: 'FANUC',
           next: { id: '44', program_name: 'O2002.nc', size_bytes: 30, created_at: 'T5', sent_to_gateway_at: null, report_late: false },
           waiting: 2,
           last_report: { id: '40', program_name: 'O1001.nc', delivery_status: 'DONE', delivery_message: null, delivered_at: 'T2b' },
           last_backup: { id: '41', program_name: 'O1001.nc', created_at: 'T3' },
           backup_request: { id: '9', requested_at: 'T4' },
           backup_failure: null },
-        { id: 8, machine_serial_no: 'VMC-2', next: null, waiting: 0,
+        { id: 8, machine_serial_no: 'VMC-2', program_path: null, machine_ip: null, controller_type: null, next: null, waiting: 0,
           last_report: { id: '50', program_name: 'O5000.nc', delivery_status: 'FAILED', delivery_message: 'CNC memory full', delivered_at: 'T7' },
           last_backup: null, backup_request: null, backup_failure: null },
-        { id: 9, machine_serial_no: 'VMC-3', next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }
+        { id: 9, machine_serial_no: 'VMC-3', program_path: null, machine_ip: null, controller_type: null,
+          next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }
       ]
     });
   });
