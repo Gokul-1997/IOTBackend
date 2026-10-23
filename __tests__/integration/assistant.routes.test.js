@@ -39,8 +39,10 @@ describe('who may use it', () => {
     expect(res.body.data).toEqual({ name: 'STM Mexa AI', enabled: false, reason: 'NOT_CONFIGURED' });
   });
 
-  test('a role without Reports or OEE Records: not even the status', async () => {
+  test('everyone in a company may open it, whatever their role; S&T, with no company, may not', async () => {
     mockUser.permissions = ['page:dashboard:view'];
+    expect((await request(app).get('/api/assistant/status')).status).toBe(200);
+    mockUser = { id: 1, company_id: null, is_snt_super: true, roles: ['SNT_SUPER'], permissions: [] };
     expect((await request(app).get('/api/assistant/status')).status).toBe(403);
     expect((await request(app).post('/api/assistant/chat').send({ messages: [{ role: 'user', content: 'hi' }] })).status).toBe(403);
   });

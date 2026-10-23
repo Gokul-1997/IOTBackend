@@ -104,13 +104,20 @@ describe('status', () => {
     const s = await createAssistant({ config: config() }).status(person());
     expect(s).toMatchObject({ enabled: true, name: 'STM Mexa AI',
       allowance: { limit: 50, used: 12, remaining: 38, timezone: 'Asia/Kolkata', resets_text: '12:00 am (Asia/Kolkata)' } });
-    expect(s.welcome).toBe('Hi, I’m STM Mexa AI, your company’s report assistant. I can help you understand your reports, compare results, and find company details available to your account. What would you like to know?');
-    expect(s.suggestions).toEqual(['Summarize today’s production report.', 'Compare this week’s OEE with last week.',
-      'Show production by shift.', 'Show my company’s registered details.']);
+    expect(s.welcome).toBe('Hi, I’m STM Mexa AI, your company assistant. Ask me about production, OEE, machines, alarms, downtime, maintenance or energy — or how to do something in MEXA.');
+    expect(s.suggestions).toEqual(['Summarize today’s production.', 'Compare this week’s OEE with last week.',
+      'How do I download a report?', 'Show my company’s registered details.']);
 
     database();
     const oeeOnly = await createAssistant({ config: config() }).status(person(['page:oee-reports:view']));
-    expect(oeeOnly.suggestions).toEqual(['Compare this week’s OEE with last week.', 'Show my company’s registered details.']);
+    expect(oeeOnly.suggestions).toEqual(['Compare this week’s OEE with last week.', 'How do I download a report?', 'Show my company’s registered details.']);
+
+    // the whole company's assistant: a role that sees machines, alarms and maintenance is offered those
+    database();
+    const shopFloor = await createAssistant({ config: config() })
+      .status(person(['page:dashboard:view', 'page:alarms:view', 'page:maintenance:view', 'page:downtime:view', 'page:programs:view']));
+    expect(shopFloor.suggestions).toEqual(['Which machines are running right now?', 'Show today’s open alarms.', 'Which maintenance tickets are open?',
+      'What were the top downtime reasons this week?', 'Is any program waiting to go to a machine?', 'How do I download a report?']);
   });
 });
 
@@ -138,7 +145,7 @@ describe('a question answered from the reports', () => {
     expect(db.inserts).toBe(1);
 
     // what the model saw: the rules, who is asking and when, and the figures
-    expect(sent[0].system[0].text).toMatch(/^You are STM Mexa AI, the report assistant/);
+    expect(sent[0].system[0].text).toMatch(/^You are STM Mexa AI, the company assistant/);
     expect(sent[0].system[1].text).toContain('Company: S AND T. Today is Thursday, 2026-10-22 (Asia/Kolkata).');
     expect(sent[0].toolChoice).toEqual({ type: 'any' });
     const figures = JSON.parse(toolResults(sent)[0].content);
@@ -201,7 +208,7 @@ describe('what it will not do', () => {
     database();
     const { callModel } = scripted(reply('out_of_scope', 'Here is a poem…'));
     const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Write me a poem'));
-    expect(r).toEqual({ kind: 'out_of_scope', text: 'I can help with your company’s reports and approved company details. Please ask a related question.',
+    expect(r).toEqual({ kind: 'out_of_scope', text: 'I can help with your company’s information in MEXA and with using MEXA. Please ask a related question.',
                         sources: [], allowance: expect.objectContaining({ used: 0, remaining: 50 }), sig: expect.any(String) });
     expect(db.inserts).toBe(0);
     // not an answer — but the model read it: it counts against the day's ceiling, and its tokens are kept
@@ -217,7 +224,7 @@ describe('what it will not do', () => {
     );
     const r = await createAssistant({ callModel, config: config(), now: () => new Date('2026-10-22T06:00:00Z') })
       .chat(person(['page:oee-reports:view']), ask('Production today'));
-    expect(sent[0].tools.map(t => t.name)).toEqual(['machines_and_shifts', 'company_details', 'oee_report', 'reply']);
+    expect(sent[0].tools.map(t => t.name)).toEqual(['mexa_help', 'machines_and_shifts', 'company_details', 'oee_report', 'reply']);
     expect(JSON.parse(toolResults(sent)[0].content)).toMatchObject({ restricted: true });
     expect(db.queries.some(q => /FROM production_hourly/.test(q.text))).toBe(false);
     expect(r).toMatchObject({ kind: 'restricted', text: 'I can only provide information available to your account.' });
@@ -227,7 +234,7 @@ describe('what it will not do', () => {
     database({ rows: [] });
     const { callModel } = scripted([use('production_report', { date_from: '2026-10-22', date_to: '2026-10-22' })], reply('not_found'));
     const r = await createAssistant({ callModel, config: config(), now: () => new Date('2026-10-22T06:00:00Z') }).chat(person(), ask('Production today'));
-    expect(r.text).toBe('I couldn’t find matching information in your company’s connected records. Please try another period or filter.');
+    expect(r.text).toBe('I couldn’t find matching information in your company’s records. Please try another period or filter.');
     expect(db.inserts).toBe(0);
   });
 
@@ -427,5 +434,159 @@ describe('only the person\'s own data', () => {
       await expect(tools.runTool(person(), name, {}, ctx)).resolves.toMatchObject({ error: true, out: { restricted: true } });
     }
     expect(db.queries).toHaveLength(0);
+  });
+});
+
+/*
+ * The whole company's assistant (22 Oct 2026, the user: "not only reports —
+ * all company support"): machines right now, alarms, downtime, maintenance,
+ * energy, Program Transfer and how to use MEXA — each only for a person who
+ * may open the matching page, for their own company and plant.
+ */
+describe('the rest of the company', () => {
+  const tools = require('../../src/assistant/assistant.tools');
+  const ctx = (offered, can = {}) => ({ today: '2026-10-22', can, offered, timezone: 'Asia/Kolkata' });
+  const run = (name, input = {}, user = person(), can = {}) => tools.runTool(user, name, input, ctx([name], can));
+
+  test('machines right now: the last hour of data only, each machine\'s state and the counts', async () => {
+    database();
+    const fresh = new Date().toISOString();
+    mockDb.query.mockImplementation(async (sql, params) => {
+      db.queries.push({ text: sql, params });
+      return /FROM telemetry_raw t/.test(sql) ? { rows: [
+        { machine_serial_no: 'VMC - 12 - F', state: 'running', received_at: fresh },
+        { machine_serial_no: 'VMC - 13 - M', state: 'alarm', received_at: fresh },
+        { machine_serial_no: 'HMC - 7 - F', state: 'offline', received_at: null }
+      ] } : none;
+    });
+    const r = await run('machine_status', {}, person(), { liveDashboard: true });
+    const q = db.queries.find(x => /FROM telemetry_raw t/.test(x.text));
+    expect(q.text).toMatch(/t\.received_at > NOW\(\) - INTERVAL '1 hour'/);         // never the whole telemetry table
+    expect(q.params).toEqual([5]);
+    expect(r.out).toMatchObject({ machines_total: 3, running: 1, alarm: 1, offline: 1, idle: 0 });
+    expect(r.out.machines[2]).toEqual({ name: 'HMC - 7 - F', state: 'offline', last_data: 'none in the last hour' });
+    expect(r.source.view).toBe('/dashboard');
+  });
+
+  test('alarms: the Alarm Dashboard\'s figures for the sign-in\'s company, open ones listed, no ids', async () => {
+    database();
+    const spy = jest.spyOn(require('../../src/dashboard/alarm.service'), 'getAlarms').mockResolvedValue({
+      kpis: { total: 12, critical: 3, normal: 9, open: 2, max_duration_seconds: 5400, avg_duration_seconds: 600,
+              longest: { machine_serial_no: 'VMC - 13 - M', alarm_code: 'SV0401', message: 'Servo alarm (overload)' } },
+      by_machine: [{ machine_serial_no: 'VMC - 13 - M', machine_id: 2, total: 8, critical: 3 }],
+      by_shift: [{ shift_name: 'Morning', shift_id: 10, total: 12, critical: 3 }],
+      alarms: { data: [{ id: 99, machine_serial_no: 'VMC - 13 - M', alarm_code: 'SV0401', severity: 'CRITICAL', message: 'Servo alarm',
+                         started_at: '2026-10-22T04:00:00Z', duration_seconds: 1800 }], total: 2 }
+    });
+    const r = await run('alarm_summary', { date_from: '2026-10-22', date_to: '2026-10-22', company_id: 9 });
+    expect(spy.mock.calls[0][0]).toMatchObject({ company_id: 5, from: '2026-10-22', to: '2026-10-22', part: 'kpis,charts,table', show: 'open', limit: 10 });
+    expect(r.out.totals).toEqual({ alarms: 12, critical: 3, other: 9, still_open: 2, longest_minutes: 90, average_minutes: 10 });
+    expect(r.out.open_now[0]).toEqual({ machine: 'VMC - 13 - M', code: 'SV0401', severity: 'CRITICAL', message: 'Servo alarm',
+                                        since: '22 Oct 2026, 9:30 am', minutes: 30 });
+    expect(JSON.stringify(r.out)).not.toMatch(/"(machine_id|shift_id|id)"/);
+    spy.mockRestore();
+  });
+
+  test('downtime: reasons, availability and the idle time nobody gave a reason for', async () => {
+    database();
+    const spy = jest.spyOn(require('../../src/dashboard/downtime.service'), 'getDowntime').mockResolvedValue({
+      kpis: { total_downtime_seconds: 7200, downtime_events: 4, open_events: 1, run_seconds: 36000, idle_seconds: 10800, alarm_seconds: 1800,
+              availability_pct: 76.9, unaccounted_seconds: 3600, reason_coverage_pct: 66.7, idle_cost: 1500, alarm_cost: 250 },
+      by_reason: [{ reason: 'No material', reason_id: 3, category: 'MATERIAL', events: 3, seconds: 5400, share_pct: 75 }],
+      by_category: [{ category: 'MATERIAL', events: 3, seconds: 5400 }]
+    });
+    const r = await run('downtime_summary', { date_from: '2026-10-20', date_to: '2026-10-22' });
+    expect(spy.mock.calls[0][0]).toMatchObject({ company_id: 5, from: '2026-10-20', to: '2026-10-22', part: 'kpis,charts' });
+    expect(r.out.totals).toMatchObject({ recorded_downtime_hours: 2, availability_pct: 76.9, idle_with_no_reason_hours: 1 });
+    expect(r.out.by_reason).toEqual([{ reason: 'No material', category: 'MATERIAL', events: 3, hours: 1.5, share_pct: 75 }]);
+    spy.mockRestore();
+  });
+
+  test('maintenance: open tickets and due schedules of the person\'s plant only — and never a person\'s name', async () => {
+    database();
+    mockDb.query.mockImplementation(async (sql, params) => {
+      db.queries.push({ text: sql, params });
+      if (/GROUP BY t\.status, t\.priority/.test(sql)) return { rows: [{ status: 'OPEN', priority: 'HIGH', n: 2 }, { status: 'IN_PROGRESS', priority: 'LOW', n: 1 }] };
+      if (/FROM maintenance_tickets t JOIN machines m/.test(sql)) {
+        return { rows: [{ title: 'Spindle noise', status: 'OPEN', priority: 'HIGH', issue_type: 'BREAKDOWN', created_at: '2026-10-22T03:30:00Z',
+                          due_date: null, assigned: true, machine_serial_no: 'VMC - 12 - F' }] };
+      }
+      if (/FROM maintenance_schedules ms/.test(sql)) {
+        return { rows: [{ title: 'Coolant change', maintenance_type: 'PREVENTIVE', scheduled_at: '2026-10-20T04:30:00Z', status: 'OVERDUE', machine_serial_no: 'VMC - 12 - F', overdue: true },
+                        { title: 'Way lube', maintenance_type: 'PREVENTIVE', scheduled_at: '2026-10-25T04:30:00Z', status: 'SCHEDULED', machine_serial_no: 'HMC - 7 - F', overdue: false }] };
+      }
+      return none;
+    });
+    const r = await run('maintenance_status', {}, person(ALL, { plant_id: 3 }));
+    for (const q of db.queries.filter(x => /maintenance_/.test(x.text))) expect(q.text).toMatch(/plant_id = 3/);
+    expect(r.out).toMatchObject({ open_tickets: 3, by_status: { OPEN: 2, IN_PROGRESS: 1 }, by_priority: { HIGH: 2, LOW: 1 } });
+    expect(r.out.most_urgent[0]).toMatchObject({ machine: 'VMC - 12 - F', title: 'Spindle noise', assigned: true, raised: '22 Oct 2026, 9:00 am' });
+    expect(r.out.schedules_overdue.map(s => s.title)).toEqual(['Coolant change']);
+    expect(r.out.schedules_next_14_days.map(s => s.title)).toEqual(['Way lube']);
+    expect(db.queries.some(q => /username|assigned_to_name/.test(q.text))).toBe(false);
+  });
+
+  test('energy: at most 31 days — a longer period goes back to the model as a problem, not a heavy query', async () => {
+    database();
+    const spy = jest.spyOn(require('../../src/dashboard/energy.service'), 'getEnergy').mockResolvedValue({
+      currency: 'INR', kpis: { total_kwh: 1234.5, total_cost: 13518, kwh_per_part: 0.8, total_produced: 1500, total_operating_seconds: 72000,
+                               kwh_vs_yesterday_pct: -4.2, overload_alerts: 0, overload_limit_set: true },
+      coverage: { machines: 3, reporting: 2, tariff_configured: true },
+      top_consumers: [{ machine_serial_no: 'VMC - 12 - F', machine_id: 1, kwh: 800, cost: 8760, kwh_per_part: 0.9 }],
+      by_shift: [{ shift_name: 'Morning', shift_id: 10, kwh: 700, run_seconds: 36000, produced: 900 }]
+    });
+    const long = await run('energy_summary', { date_from: '2026-08-01', date_to: '2026-10-22' });
+    expect(long).toMatchObject({ error: true, out: { problem: 'A period can be at most 31 days; this one is 83.' } });
+    expect(spy).not.toHaveBeenCalled();
+    const r = await run('energy_summary', { date_from: '2026-10-01', date_to: '2026-10-22' });
+    expect(r.out.totals).toMatchObject({ kwh: 1234.5, cost: 13518, kwh_per_part: 0.8 });
+    expect(r.out.by_shift).toEqual([{ shift: 'Morning', kwh: 700, run_hours: 10, parts: 900 }]);
+    spy.mockRestore();
+  });
+
+  test('Program Transfer: the gateway and each machine\'s line, as the page shows them', async () => {
+    database();
+    const spy = jest.spyOn(require('../../src/programs/program.service'), 'listMachines').mockResolvedValue({
+      gateway: { token_prefix: 'mxg_x', online: false, last_seen_at: '2026-10-22T05:00:00Z' },
+      machines: [{ id: 1, machine_serial_no: 'VMC - 12 - F', next: { program_name: 'O2002.nc' }, waiting: 2,
+                   last_report: { program_name: 'O2001.nc', delivery_status: 'FAILED', delivery_message: 'CNC memory full', delivered_at: '2026-10-22T04:00:00Z' },
+                   backup_request: null, backup_failure: null }]
+    });
+    const r = await run('program_transfer_status');
+    expect(spy.mock.calls[0][0].user).toMatchObject({ id: 2, company_id: 5 });
+    expect(r.out).toEqual({ gateway: 'offline since 22 Oct 2026, 10:30 am', machines: [{
+      machine: 'VMC - 12 - F', next_to_send: 'O2002.nc', waiting: 2,
+      last: { program: 'O2001.nc', result: 'refused', reason: 'CNC memory full', at: '22 Oct 2026, 9:30 am' }, backup_asked: false, backup_failed: null }] });
+    expect(JSON.stringify(r.out)).not.toContain('mxg_');                  // nothing of the token
+    spy.mockRestore();
+  });
+
+  test('how to use MEXA: the matching help, nothing from the database', async () => {
+    database();
+    const r = await run('mexa_help', { topic: 'how do I upload an NC program to a machine' });
+    expect(r.out.sections[0].title).toBe('Program Transfer: sending NC programs to machines');
+    expect(r.out.sections[0].text).toMatch(/Upload to library/);
+    const lost = await run('mexa_help', { topic: 'qwerty zxcv' });
+    expect(lost.out.topics).toContain('Where things are in MEXA');
+    expect(db.queries).toHaveLength(0);
+  });
+
+  test('a person without Maintenance is not offered it, and is refused if the model asks anyway', async () => {
+    database();
+    const { callModel, sent } = scripted([use('maintenance_status', {})], reply('restricted'));
+    const r = await createAssistant({ callModel, config: config() }).chat(person(['page:dashboard:view']), ask('Open tickets?'));
+    expect(sent[0].tools.map(t => t.name)).toEqual(['mexa_help', 'machines_and_shifts', 'company_details', 'machine_status', 'reply']);
+    expect(JSON.parse(toolResults(sent)[0].content)).toMatchObject({ restricted: true });
+    expect(db.queries.some(q => /maintenance_tickets/.test(q.text))).toBe(false);
+    expect(r.kind).toBe('restricted');
+  });
+
+  test('someone with no report pages at all still gets help with MEXA', async () => {
+    database();
+    const { callModel, sent } = scripted([use('mexa_help', { topic: 'change password' })], reply('answer', 'Open Profile → Change password.'));
+    const r = await createAssistant({ callModel, config: config() }).chat(person([]), ask('How do I change my password?'));
+    expect(sent[0].tools.map(t => t.name)).toEqual(['mexa_help', 'machines_and_shifts', 'company_details', 'reply']);
+    expect(JSON.parse(toolResults(sent)[0].content).sections[0].title).toBe('Users, roles, access and passwords');
+    expect(r).toMatchObject({ kind: 'answer', text: 'Open Profile → Change password.' });
   });
 });

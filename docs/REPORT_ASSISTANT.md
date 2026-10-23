@@ -1,9 +1,12 @@
-# Report assistant — "STM Mexa AI"
+# Company assistant — "STM Mexa AI"
 
-A chat in the bottom-right corner of every signed-in page, for people who
-can open Reports or OEE Records. It answers questions about the company's
-own reports — production, OEE, machines, shifts — and its registered
-details, with the figures from the same server code as the screens.
+A chat in the bottom-right corner of every signed-in page, for everyone in a
+company (since 22 Oct 2026: "not only reports — all company support"). It
+answers about the company's own MEXA data — production, OEE, machines right
+now, alarms, downtime, maintenance, energy, Program Transfer, its registered
+details — and how to use MEXA, with the figures from the same server code as
+the screens. What a person can ask about follows their role: a page they may
+not open is never read for them.
 
 ## Switching it on
 
@@ -36,8 +39,15 @@ assistant.tools.js`):
 | --- | --- | --- |
 | `production_report` | parts, run/idle hours, energy, efficiency; by machine, shift, day | Reports |
 | `oee_report` | overall and per-machine OEE, availability, performance, quality (the OEE Dashboard's figures) | Reports, OEE Records or OEE Dashboard |
-| `company_details` | name, code, address, contact email/phone, timezone, plan, plants, active machines | report access |
-| `machines_and_shifts` | the company's machine and shift names | report access |
+| `machine_status` | each machine right now: running, idle, alarm, offline, last data (last hour of telemetry only) | Live Dashboard or Factory Overall |
+| `alarm_summary` | alarms for a period: totals, critical, still open, longest, top machines, open ones (10) | Alarms or Alarm Dashboard |
+| `downtime_summary` | downtime by reason and category, availability, idle time with no reason, its cost | Downtime or Downtime Dashboard |
+| `maintenance_status` | open tickets by status/priority, most urgent (10, no names), schedules overdue / next 14 days | Maintenance |
+| `energy_summary` | kWh, cost, kWh per part, top consumers, by shift, overloads (at most 31 days) | Energy Dashboard |
+| `program_transfer_status` | gateway online or not; per machine next program, how many wait, last result, backup asked | Program Transfer |
+| `mexa_help` | how to do something in MEXA and where (static guide, `src/assistant/assistant.help.js`) | everyone |
+| `company_details` | name, code, address, contact email/phone, timezone, plan, plants (a plant user: theirs), active machines | everyone |
+| `machines_and_shifts` | the company's machine and shift names | everyone |
 
 - The company and plant always come from the person's sign-in; no tool
   takes a company. A tool the person may not use is not offered at all.

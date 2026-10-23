@@ -43,11 +43,12 @@ const REPORT_TITLES = {
 
 const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 
-const RULES = name => `You are ${name}, the report assistant inside STM MEXA, a machine-monitoring platform for CNC factories. You help one signed-in person understand their own company's reports.
+const RULES = name => `You are ${name}, the company assistant inside STM MEXA, a machine-monitoring platform for CNC factories. You help one signed-in person with their own company: its production and OEE, its machines right now, alarms, downtime, maintenance, energy, Program Transfer, its registered details — and how to use MEXA itself.
 
 Scope
-- Answer only questions about this company's reports (production, OEE, machines, shifts) and its approved company details. Anything else: reply with kind "out_of_scope".
-- Use only the tools. Every number you give must come from a tool result in this conversation. Never estimate, never fill a gap, never use outside knowledge about this company or its machines.
+- Answer only questions about this company's information in MEXA and about using MEXA. Anything else: reply with kind "out_of_scope".
+- Use only the tools. Every number and every fact about this company must come from a tool result in this conversation. Never estimate, never fill a gap, never use outside knowledge about this company or its machines.
+- For "how do I…", "where is…" or "why can't I…" questions, use mexa_help and answer from what it returns; say where to click, in a few short steps. If it does not cover the question, say so and suggest asking the company admin.
 - If a tool says something is restricted, or the question needs a report this person cannot see, reply with kind "restricted".
 - If the tools find no records for the period or filter, reply with kind "not_found".
 - Do not give reasons for a change unless the records themselves show the cause. You may say what changed and by how much.
@@ -59,16 +60,18 @@ Understanding the question
 - Work out the report, the period, the machine and the shift. Dates are in the company's timezone; today's date is given below. Weeks run Monday to Sunday: "this week" is Monday to today, "last week" is the whole previous Monday to Sunday. A period may be at most 92 days.
 - If the person is looking at a report page, its filters are given below: use them when the question does not say otherwise, and say that you did.
 - Prefer a sensible default (today, all machines, all shifts) to asking. Ask one short question (kind "clarify") only when you cannot answer without it, for example a machine name that matches two machines.
-- To compare two periods, call the report tool once for each period.
+- To compare two periods, call the tool once for each period. "Right now" questions about machines use machine_status; open tickets and due maintenance use maintenance_status.
 
 Replying
 - End every turn by calling the reply tool exactly once.
-- kind "answer": lead with the result in one sentence, then up to five short lines with the key figures and their units (pcs, h, kWh, %). At most about 120 words. Plain text; lines may start with "- ". No tables, no markdown headings, no links.
+- kind "answer": lead with the result in one sentence, then up to six short lines with the key figures and their units (pcs, h, kWh, %, min) or the steps. At most about 140 words. Plain text; lines may start with "- ". No tables, no bold, no markdown headings, no links.
 - Name machines and shifts as the tools name them. Round percentages to one decimal place.`;
 
 /** Who is asking and what they are looking at, for this question only. */
 function situation({ company, today, weekday, timezone, can, context }) {
-  const sees = [can.reports && 'production reports', can.oee && 'OEE', can.company && 'company details'].filter(Boolean).join(', ') || 'nothing';
+  const sees = [can.reports && 'production reports', can.oee && 'OEE', can.status && 'machines right now', can.alarms && 'alarms',
+    can.downtime && 'downtime', can.maintenance && 'maintenance', can.energy && 'energy', can.programs && 'Program Transfer',
+    'company details', 'help with MEXA'].filter(Boolean).join(', ');
   const lines = [
     `Company: ${company}. Today is ${weekday}, ${today} (${timezone}).`,
     `This person can see: ${sees}.`
@@ -158,12 +161,18 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
     const allowance = await allowanceStore.allowanceOf(user);
     if (allowance.limit === 0) return { ...base, enabled: false, reason: 'SWITCHED_OFF' };
     const can = await tools.accessFor(user);
+    // what this person can ask about, most useful first; six at most
     const suggestions = [
-      can.reports && 'Summarize today’s production report.',
+      can.reports && 'Summarize today’s production.',
+      can.status && 'Which machines are running right now?',
       can.oee && 'Compare this week’s OEE with last week.',
-      can.reports && 'Show production by shift.',
-      can.company && 'Show my company’s registered details.'
-    ].filter(Boolean);
+      can.alarms && 'Show today’s open alarms.',
+      can.maintenance && 'Which maintenance tickets are open?',
+      can.downtime && 'What were the top downtime reasons this week?',
+      can.programs && 'Is any program waiting to go to a machine?',
+      'How do I download a report?',
+      'Show my company’s registered details.'
+    ].filter(Boolean).slice(0, 6);
     return { ...base, enabled: true, welcome: sentencesFor(cfg.name).welcome, suggestions, allowance: allowanceStore.present(allowance) };
   }
 
@@ -199,7 +208,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
       const offered = tools.toolsFor(can);
       const { today, weekday } = todayIn(allowance.timezone);
       const company = String(allowance.company_name || '').trim() || 'this company';
-      const ctx = { today, can, offered };
+      const ctx = { today, can, offered, timezone: allowance.timezone };
       const definitions = [...offered.map(n => tools.TOOLS[n].definition), REPLY_TOOL];
       const system = [
         { type: 'text', text: RULES(cfg.name), cache_control: { type: 'ephemeral' } },
