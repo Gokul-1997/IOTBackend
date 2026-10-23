@@ -38,7 +38,7 @@ describe('who may use it', () => {
   test('people with report access: told it is off until the server has a key', async () => {
     const res = await request(app).get('/api/assistant/status');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ name: 'STM Mexa AI', enabled: false, reason: 'NOT_CONFIGURED' });
+    expect(res.body.data).toEqual({ name: 'Mexa AI', enabled: false, reason: 'NOT_CONFIGURED' });
   });
 
   test('any role the company admin gave it — reports or not; S&T, with no company, may not', async () => {

@@ -1,5 +1,5 @@
 /*
- * /api/assistant — the report assistant ("STM Mexa AI") — and, for S&T,
+ * /api/assistant — the report assistant ("Mexa AI") — and, for S&T,
  * /api/companies/:id/assistant: how much one company may use it.
  * Errors go to the error middleware: a refusal keeps its sentence, a server
  * fault is logged under a reference.

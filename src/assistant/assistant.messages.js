@@ -1,6 +1,6 @@
 /*
  * The assistant's fixed sentences — the product spec's own wording
- * (22 Oct 2026), with the assistant's name (ASSISTANT_NAME, "STM Mexa AI")
+ * (22 Oct 2026), with the assistant's name (ASSISTANT_NAME, "Mexa AI")
  * put in, and since the same day for the whole company, not reports alone
  * (the user: "all company support"). The app shows these itself rather than
  * letting the model phrase them, so a refusal or a limit reads the same

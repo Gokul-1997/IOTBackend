@@ -32,7 +32,7 @@ router.get('/:id/program-gateway',          auth, isSNT,  ctrl.getProgramGateway
 router.post('/:id/program-gateway/token',   auth, isSNT,  ctrl.createProgramGatewayToken);
 router.delete('/:id/program-gateway/token', auth, isSNT,  ctrl.revokeProgramGatewayToken);
 
-/* ── STM Mexa AI: how much the company may use it (SNT_SUPER only) ──
+/* ── Mexa AI: how much the company may use it (SNT_SUPER only) ──
    23 Oct 2026, the user: "only the super admin decides how much — up or
    down — not the company side". Answers a day for each person, questions a
    day for the whole company, a monthly cost limit, and the company's

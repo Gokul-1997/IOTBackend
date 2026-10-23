@@ -1,4 +1,4 @@
-# Company assistant — "STM Mexa AI"
+# Company assistant — "Mexa AI"
 
 A chat in the bottom-right corner of every signed-in page, for everyone in a
 company (since 22 Oct 2026: "not only reports — all company support"). It
@@ -14,7 +14,7 @@ not open is never read for them.
    `companies.timezone`; 054 the question counts and token figures; 058 each
    company's own daily total and monthly limit, set by S&T).
 2. Put an Anthropic API key in the server's `.env`: `ANTHROPIC_API_KEY=…`
-   (and optionally `ASSISTANT_NAME`, default `STM Mexa AI`). Keep
+   (and optionally `ASSISTANT_NAME`, default `Mexa AI`). Keep
    `ASSISTANT_MODEL` at its default, `claude-haiku-5-5`: the lowest cost, and
    the assistant forces a tool call each turn, which Sonnet 5.5 and Opus 5.5
    refuse. Restart the API.
@@ -137,9 +137,9 @@ cost, every limit reached, is about US$0.008.
 | outside its scope | I can help with your company’s information in MEXA and with using MEXA. Please ask a related question. |
 | restricted | I can only provide information available to your account. |
 | no records | I couldn’t find matching information in your company’s connected records. Please try another period or filter. |
-| allowance used | You’ve reached today’s STM Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports. |
-| company ceiling reached | STM Mexa AI has reached your company’s allowance for today. It resets at 12:00 am (Asia/Kolkata). You can still access your reports. |
-| company's month reached | STM Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports. |
+| allowance used | You’ve reached today’s Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports. |
+| company ceiling reached | Mexa AI has reached your company’s allowance for today. It resets at 12:00 am (Asia/Kolkata). You can still access your reports. |
+| company's month reached | Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports. |
 | hello / thanks | Hello! Ask me about your company in MEXA — machines, production, OEE, alarms, downtime, maintenance or energy — or how to do something in MEXA. / You’re welcome. Ask me anything about your company in MEXA. |
 
 ## Security and cost (reviewed 22 Oct 2026)

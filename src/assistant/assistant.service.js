@@ -1,5 +1,5 @@
 /*
- * The report assistant ("STM Mexa AI" — ASSISTANT_NAME): one person's
+ * The report assistant ("Mexa AI" — ASSISTANT_NAME): one person's
  * questions about their own company's reports.
  *
  *   status   is it on for this person, what it may suggest, what is left today

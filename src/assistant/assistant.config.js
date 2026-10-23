@@ -5,7 +5,7 @@
  *   ANTHROPIC_API_KEY         required; without it the assistant says it is not on yet
  *   ANTHROPIC_WORKSPACE_ID    only for a key not scoped to a workspace (Anthropic
  *                             then asks which workspace to bill: wrkspc_…)
- *   ASSISTANT_NAME            what people see it called (default "STM Mexa AI")
+ *   ASSISTANT_NAME            what people see it called (default "Mexa AI")
  *   ASSISTANT_MODEL           default claude-haiku-5-5 — the lowest cost (22 Oct 2026,
  *                             the user: "Haiku, very low cost"). Keep it: the assistant
  *                             forces a tool call each turn, which Sonnet 5.5 and Opus 5.5
@@ -52,7 +52,7 @@ const amount = (raw, fallback, max) => {
 };
 
 module.exports = () => ({
-  name: String(process.env.ASSISTANT_NAME || '').trim().slice(0, 40) || 'STM Mexa AI',
+  name: String(process.env.ASSISTANT_NAME || '').trim().slice(0, 40) || 'Mexa AI',
   apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(),
   // a workspace id looks like wrkspc_…; anything else (a key pasted there by mistake) is not sent
   workspaceId: /^wrkspc_[A-Za-z0-9]+$/.test(String(process.env.ANTHROPIC_WORKSPACE_ID || '').trim())

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Can this server's report assistant ("STM Mexa AI") reach its AI model?
+ * Can this server's report assistant ("Mexa AI") reach its AI model?
  *
  *   cd <the API folder> && node scripts/assistant-check.js
  *

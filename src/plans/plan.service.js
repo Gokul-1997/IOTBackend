@@ -86,7 +86,7 @@ const APP_MODULES = [
      unrestricted"); this one never is — each answer is a paid AI call. Inside
      the company, the company admin chooses which roles may use it, as with
      any page (the company admin has it as soon as the company does). */
-  { key: 'assistant',      label: 'STM Mexa AI',      group: 'AI',     actions: ['view'], optIn: true,
+  { key: 'assistant',      label: 'Mexa AI',          group: 'AI',     actions: ['view'], optIn: true,
     actionLabels: { view: 'Use the AI assistant' } },
 ];
 

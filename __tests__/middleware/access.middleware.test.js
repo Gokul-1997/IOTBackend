@@ -246,6 +246,6 @@ describe('an opt-in page: the AI assistant', () => {
     expect(plans.isOptInKey('page:analytics-oee:view')).toBe(false);
     expect(plans.actionLabelFor('assistant', 'view', plans.ACTION_LABELS)).toBe('Use the AI assistant');
     expect(plans.actionLabelFor('machines', 'view', plans.ACTION_LABELS)).toBe('View Page');
-    expect(plans.APP_MODULES.find(m => m.key === 'assistant')).toMatchObject({ label: 'STM Mexa AI', group: 'AI', actions: ['view'] });
+    expect(plans.APP_MODULES.find(m => m.key === 'assistant')).toMatchObject({ label: 'Mexa AI', group: 'AI', actions: ['view'] });
   });
 });

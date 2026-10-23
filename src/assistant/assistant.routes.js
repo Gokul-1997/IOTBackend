@@ -1,5 +1,5 @@
 /*
- * /api/assistant — the company assistant ("STM Mexa AI").
+ * /api/assistant — the company assistant ("Mexa AI").
  *
  *   GET  /status     on for this person? suggestions, today's allowance
  *   POST /chat       { messages: [{role, content, sig?}], context? } → a signed reply
@@ -8,7 +8,7 @@
  * the super admin — up or down — not the company side"):
  * GET/PUT /api/companies/:id/assistant (company.routes).
  *
- * Only where S&T gave the company "STM Mexa AI" in Manage Access, and only
+ * Only where S&T gave the company "Mexa AI" in Manage Access, and only
  * for the roles the company admin gave it (page:assistant:view — an opt-in
  * page: a company with no grants does not have it; 23 Oct 2026, the user:
  * "super admin decides for that company, not all users"). What each person
@@ -25,7 +25,7 @@ const { assistantLimiter } = require('../middleware/rateLimit.middleware');
 
 /** A person of a company (not S&T): the assistant answers about one company, theirs. */
 const companyPerson = (req, res, next) => (req.user?.company_id
-  ? next() : res.status(403).json({ status: 'error', code: 'NO_COMPANY', message: 'STM Mexa AI answers for a company account.' }));
+  ? next() : res.status(403).json({ status: 'error', code: 'NO_COMPANY', message: 'Mexa AI answers for a company account.' }));
 
 const assistantAccess = access('page:assistant:view');
 

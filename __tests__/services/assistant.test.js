@@ -1,5 +1,5 @@
 /*
- * The report assistant ("STM Mexa AI", 22 Oct 2026): one person's questions
+ * The report assistant ("Mexa AI", 22 Oct 2026): one person's questions
  * about their own company's reports. The model is scripted here; the
  * database is a small stand-in answering by what each query asks.
  *
@@ -85,7 +85,7 @@ function scripted(...turns) {
 }
 const use = (name, input, id = `t-${name}`) => ({ type: 'tool_use', id, name, input });
 const reply = (kind, text = '') => [use('reply', { kind, text }, 'r1')];
-const config = (extra = {}) => () => ({ name: 'STM Mexa AI', apiKey: 'test-key', apiUrl: 'x', model: 'm', maxTokens: 512, timeoutMs: 1000, maxConcurrent: 8, ...extra });
+const config = (extra = {}) => () => ({ name: 'Mexa AI', apiKey: 'test-key', apiUrl: 'x', model: 'm', maxTokens: 512, timeoutMs: 1000, maxConcurrent: 8, ...extra });
 const ask = text => ({ messages: [{ role: 'user', content: text }] });
 const toolResults = sent => sent.flatMap(r => r.messages).filter(m => Array.isArray(m.content)).flatMap(m => m.content).filter(b => b.type === 'tool_result');
 
@@ -142,9 +142,9 @@ describe('status', () => {
   test('its name, the welcome, today\'s allowance, and only the suggestions this person can use', async () => {
     database({ used: 12 });
     const s = await createAssistant({ config: config() }).status(person());
-    expect(s).toMatchObject({ enabled: true, name: 'STM Mexa AI',
+    expect(s).toMatchObject({ enabled: true, name: 'Mexa AI',
       allowance: { limit: 50, used: 12, remaining: 38, timezone: 'Asia/Kolkata', resets_text: '12:00 am (Asia/Kolkata)' } });
-    expect(s.welcome).toBe('Hi, I’m STM Mexa AI, your company assistant. Ask me about production, OEE, machines, alarms, downtime, maintenance or energy — or how to do something in MEXA.');
+    expect(s.welcome).toBe('Hi, I’m Mexa AI, your company assistant. Ask me about production, OEE, machines, alarms, downtime, maintenance or energy — or how to do something in MEXA.');
     expect(s.suggestions).toEqual(['Summarize today’s production.', 'Compare this week’s OEE with last week.',
       'How do I download a report?', 'Show my company’s registered details.']);
 
@@ -185,7 +185,7 @@ describe('a question answered from the reports', () => {
     expect(db.inserts).toBe(1);
 
     // what the model saw: the rules, who is asking and when, and the figures
-    expect(sent[0].system[0].text).toMatch(/^You are STM Mexa AI, the company assistant/);
+    expect(sent[0].system[0].text).toMatch(/^You are Mexa AI, the company assistant/);
     expect(sent[0].system[1].text).toContain('Company: S AND T. Today is Thursday, 2026-10-22 (Asia/Kolkata).');
     expect(sent[0].toolChoice).toEqual({ type: 'any' });
     const figures = JSON.parse(toolResults(sent)[0].content);
@@ -283,7 +283,7 @@ describe('what it will not do', () => {
     const { callModel } = scripted();
     const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Production today'));
     expect(r).toMatchObject({ kind: 'limit',
-      text: 'You’ve reached today’s STM Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports.',
+      text: 'You’ve reached today’s Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports.',
       allowance: { remaining: 0 } });
     expect(callModel).not.toHaveBeenCalled();
   });
@@ -293,7 +293,7 @@ describe('what it will not do', () => {
     const busy = Object.assign(new Error('ASSISTANT_BUSY'), { status: 503, code: 'ASSISTANT_BUSY' });
     const { callModel } = scripted(busy, [use('company_details', {})], reply('answer', 'ok'));
     const a = createAssistant({ callModel, config: config() });
-    await expect(a.chat(person(), ask('Production today'))).rejects.toMatchObject({ status: 503, message: 'STM Mexa AI is busy right now. Please try again in a moment.' });
+    await expect(a.chat(person(), ask('Production today'))).rejects.toMatchObject({ status: 503, message: 'Mexa AI is busy right now. Please try again in a moment.' });
     expect(db.inserts).toBe(0);
     expect(db.questions).toBe(0);                    // never read by the model: given back
     expect(a._answering.size).toBe(0);
@@ -310,7 +310,7 @@ describe('what it will not do', () => {
     const a = createAssistant({ callModel, config: config() });
     const first = a.chat(person(), ask('one'));
     await new Promise(r => setImmediate(r));
-    await expect(a.chat(person(), ask('two'))).rejects.toMatchObject({ status: 429, message: 'STM Mexa AI is still answering your last question.' });
+    await expect(a.chat(person(), ask('two'))).rejects.toMatchObject({ status: 429, message: 'Mexa AI is still answering your last question.' });
     release();
     await expect(first).resolves.toMatchObject({ kind: 'answer' });
   });
@@ -383,7 +383,7 @@ describe('only the company, and only reading', () => {
 
   test('the rules name what is outside: general knowledge, chit-chat, other companies — and when unsure, outside', () => {
     const { RULES } = require('../../src/assistant/assistant.service');
-    const rules = RULES('STM Mexa AI');
+    const rules = RULES('Mexa AI');
     expect(rules).toMatch(/only two kinds of question are answered/);
     expect(rules).toMatch(/general knowledge, news, weather, sports/);
     expect(rules).toMatch(/When unsure, it is out_of_scope\./);
@@ -431,7 +431,7 @@ describe('what it may cost', () => {
     const { callModel } = scripted();
     const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Write me a poem'));
     expect(r).toMatchObject({ kind: 'limit',
-      text: 'You’ve reached today’s STM Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports.' });
+      text: 'You’ve reached today’s Mexa AI allowance. Your allowance resets at 12:00 am (Asia/Kolkata). You can still access your reports.' });
     expect(callModel).not.toHaveBeenCalled();
     const reserve = db.queries.find(q => /INSERT INTO assistant_usage AS u \(user_id, company_id, day, questions\)/.test(q.text));
     expect(reserve.params).toEqual([2, 5, '2026-10-22', 150, 50]);    // the person's ceiling, the company's (50 a day)
@@ -442,7 +442,7 @@ describe('what it may cost', () => {
     const { callModel } = scripted();
     const r = await createAssistant({ callModel, config: config({ companyDailyMax: 500 }) }).chat(person(), ask('Production today'));
     expect(r).toMatchObject({ kind: 'limit',
-      text: 'STM Mexa AI has reached your company’s allowance for today. It resets at 12:00 am (Asia/Kolkata). You can still access your reports.' });
+      text: 'Mexa AI has reached your company’s allowance for today. It resets at 12:00 am (Asia/Kolkata). You can still access your reports.' });
     expect(callModel).not.toHaveBeenCalled();
   });
 
@@ -494,7 +494,7 @@ describe('what it may cost', () => {
     database({ monthlyUsd: '2.00', month: { input: 16_000_000, cached: 0, output: 0 } });
     const { callModel } = scripted();
     const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Production today'));
-    expect(r.text).toBe('STM Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports.');
+    expect(r.text).toBe('Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports.');
     expect(callModel).not.toHaveBeenCalled();
   });
 
@@ -525,7 +525,7 @@ describe('what it may cost', () => {
     const { callModel } = scripted();
     const r = await createAssistant({ callModel, config: config() }).chat(person(), ask('Production today'));
     expect(r).toMatchObject({ kind: 'limit',
-      text: 'STM Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports.' });
+      text: 'Mexa AI has reached your company’s allowance for this month. It comes back on 01 Nov 2026. You can still access your reports.' });
     expect(callModel).not.toHaveBeenCalled();
     expect(db.questions).toBe(0);
   });
