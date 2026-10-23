@@ -157,8 +157,8 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
 
 - `machines` lists every machine of the company that is switched on in MEXA.
 - `machine_id` names the machine in calls 2, 3 and 4.
-- `machine_ip` is its IP as MEXA knows it from its telemetry (`null` until
-  then).
+- `machine_ip` is its IP: the one its own telemetry reports, else the
+  **Machine IP** typed on the Machines page (`null` when neither is known).
 - `controller_name` is the **Controller** on the Machines page (`null` when
   not filled in).
 - `controller_type` is the **Controller type** chosen there: `"FANUC"` or

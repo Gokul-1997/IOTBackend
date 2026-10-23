@@ -9,6 +9,8 @@
  * empty box means "not set" (null), a number field holds a whole number,
  * and anything else is a 400 the form can show.
  */
+const net = require('net');
+
 const INT_MAX = 2147483647;   // the largest Postgres integer
 
 const WHOLE_NUMBERS = {
@@ -27,6 +29,10 @@ const PATH_CHARS = /^[A-Za-z0-9 _\-.:/\\]+$/;
 // gateway to know how to talk to the CNC; in GET /status (23 Oct 2026)
 const CHOICES = { controller_type: 'Controller type' };
 const CONTROLLER_TYPES = ['FANUC', 'MITSUBISHI'];
+// Where the gateway reaches the machine on the factory network, typed on the
+// Machines page — used while the machine's own telemetry reports none
+// (controller_ip, the collector's); in GET /status as machine_ip (23 Oct 2026)
+const ADDRESSES = { ip_address: 'Machine IP' };
 
 const fail = (message) => Object.assign(new Error(message), { code: 'BAD_MACHINE_SPEC', status: 400 });
 const blank = (value) => value === null || value === undefined || (typeof value === 'string' && !value.trim());
@@ -58,6 +64,14 @@ function folder(value, label) {
   return t;
 }
 
+/** An IPv4 address such as 192.168.1.101; empty: not set. */
+function ipv4(value, label) {
+  if (blank(value)) return null;
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (!net.isIPv4(v)) throw fail(`${label} must be an IP address such as 192.168.1.101.`);
+  return v;
+}
+
 /** Fanuc or Mitsubishi (any case), stored as FANUC / MITSUBISHI; empty: not set. */
 function controllerType(value, label) {
   if (blank(value)) return null;
@@ -77,7 +91,7 @@ function onOff(value, label) {
  *  out, so an edit changes only what it sends. */
 function cleanSpecs(body = {}) {
   const specs = {};
-  for (const [rules, clean] of [[WHOLE_NUMBERS, wholeNumber], [TEXT, text], [SWITCHES, onOff], [PATHS, folder], [CHOICES, controllerType]]) {
+  for (const [rules, clean] of [[WHOLE_NUMBERS, wholeNumber], [TEXT, text], [SWITCHES, onOff], [PATHS, folder], [CHOICES, controllerType], [ADDRESSES, ipv4]]) {
     for (const [key, label] of Object.entries(rules)) {
       if (body[key] !== undefined) specs[key] = clean(body[key], label);
     }

@@ -8,13 +8,13 @@ function begin() { mockDb.queueResponse(response(), response([{ id: 4 }]), respo
 test('quota, owned placement and shift links commit together under the company lock', async () => {
   begin();
   mockDb.queueResponse(response([{ id: 8, plant_id: 5 }]), response([{ id: 5 }]), response([{ id: 7, plant_id: 5 }]), response(), response());
-  await svc.createMachine(req({ line_id: 8, ip_address: 'ignored', program_path: '//CNC_MEM/USER/PATH1/', controller_type: 'Fanuc' }));
+  await svc.createMachine(req({ line_id: 8, ip_address: ' 192.168.1.101 ', program_path: '//CNC_MEM/USER/PATH1/', controller_type: 'Fanuc' }));
   const calls = mockDb.calls();
   expect(calls[1].text).toMatch(/companies.*FOR UPDATE/);
   const insert = calls.find(call => /INSERT INTO machines/.test(call.text));
   expect(insert.params.slice(0, 4)).toEqual([5, 4, 8, 'VMC-7']);
-  expect(insert.text).not.toMatch(/ip_address/);                        // the IP comes from telemetry, never the form
-  expect(insert.params.slice(-2)).toEqual(['//CNC_MEM/USER/PATH1/', 'FANUC']);   // the program path and the controller type, for the gateway (23 Oct 2026)
+  // the program path, the controller type and the machine's IP, for the gateway (23 Oct 2026)
+  expect(insert.params.slice(-3)).toEqual(['//CNC_MEM/USER/PATH1/', 'FANUC', '192.168.1.101']);
   expect(calls.find(call => /INSERT INTO machine_shift_config/.test(call.text)).params).toEqual([5, 7, 4]);
   expect(calls.at(-1).text).toBe('COMMIT');
 });
@@ -70,9 +70,22 @@ test('the controller type: Fanuc or Mitsubishi, any case, kept as FANUC / MITSUB
   }
 });
 
-test('the edit API cannot set the IP (telemetry gives it)', async () => {
-  await expect(svc.updateMachine({ ...req(), body: { ip_address: '1.2.3.4' } })).rejects.toMatchObject({ status: 400 });
+/* 23 Oct 2026, the user: "machine page — where is the machine IP?" Typed there, it is the gateway's
+   address for the machine while the machine's own telemetry reports none (controller_ip wins). */
+test('the machine IP: an IPv4 address such as 192.168.1.101, or nothing; anything else refused before anything is written', async () => {
+  for (const bad of ['192.168.1', '192.168.1.256', 'cnc01.local', '192.168.1.10; rm -rf /', '::1', 1921681101]) {
+    await expect(svc.updateMachine({ ...req(), body: { ip_address: bad } }))
+      .rejects.toMatchObject({ status: 400, message: 'Machine IP must be an IP address such as 192.168.1.101.' });
+  }
   expect(mockDb.calls()).toHaveLength(0);
+  mockDb.queueResponse(response([{ id: 7, ip_address: '10.0.0.9', ftp_pass: 'secret' }]));
+  const saved = await svc.updateMachine({ ...req(), body: { ip_address: ' 10.0.0.9 ' } });
+  expect(mockDb.calls()[0].params[0]).toBe('10.0.0.9');
+  expect(saved).toEqual({ id: 7, ip_address: '10.0.0.9' });                       // never an FTP password
+  resetDb();
+  mockDb.queueResponse(response([{ id: 7, ip_address: null }]));
+  await svc.updateMachine({ ...req(), body: { ip_address: '' } });                  // emptied: not set
+  expect(mockDb.calls()[0].params[0]).toBeNull();
 });
 
 /* 23 Oct 2026, the user: "the machine's program path, from the Machines page, in the gateway's status".
@@ -90,8 +103,7 @@ test('the program path: a plain path is saved; anything a path does not need is 
   mockDb.queueResponse(response([{ id: 7, machine_serial_no: 'VMC-7', program_path: '//CNC_MEM/USER/PATH1/', ip_address: '10.0.0.9' }]));
   const saved = await svc.updateMachine({ ...req(), body: { program_path: '  //CNC_MEM/USER/PATH1/  ' } });
   expect(mockDb.calls()[0].params[0]).toBe('//CNC_MEM/USER/PATH1/');
-  expect(saved).toMatchObject({ program_path: '//CNC_MEM/USER/PATH1/' });
-  expect(saved).not.toHaveProperty('ip_address');
+  expect(saved).toMatchObject({ program_path: '//CNC_MEM/USER/PATH1/', ip_address: '10.0.0.9' });
   resetDb();
   mockDb.queueResponse(response([{ id: 7, program_path: null }]));
   await svc.updateMachine({ ...req(), body: { program_path: '' } });          // emptied: not set
