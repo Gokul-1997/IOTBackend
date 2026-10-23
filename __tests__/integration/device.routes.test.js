@@ -110,10 +110,13 @@ test('program: the machine named gets the file in front of its line, with its id
     expect(res.headers['x-machine']).toBe('VMC-1');
     expect(res.headers['x-sha256']).toBe(file.sha256);
     expect(res.headers['content-length']).toBe(String(body.length));
-    const line = mockDb.calls().at(-1);
+    const [line, taken] = mockDb.calls().slice(-2);
     expect(line.params).toEqual([7]);
     expect(line.text).toMatch(/delivery_status IS NULL/);
     expect(line.text).toMatch(/ORDER BY f\.created_at, f\.id/);         // oldest first
+    // handed out: the page shows it with the gateway until the gateway reports (059)
+    expect(taken.text).toMatch(/SET sent_to_gateway_at = NOW\(\) WHERE f\.id = \$1 AND f\.kind = 'NEW' AND f\.delivery_status IS NULL/);
+    expect(taken.params).toEqual(['81']);
   }
 });
 

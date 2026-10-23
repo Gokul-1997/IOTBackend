@@ -43,8 +43,10 @@ describe('machines and files', () => {
   test("machines: the company's gateway, and each machine with the program in front of its line, how many wait, the last report, backup and open request", async () => {
     mockDb.queueResponse({ rows: [
       { id: 7, machine_serial_no: 'VMC-1', next_id: '44', next_name: 'O2002.nc', next_size: 30, next_at: 'T5', waiting: '2',
+        next_sent_at: null, next_report_late: false,
         report_id: '40', report_name: 'O1001.nc', delivery_status: 'DONE', delivery_message: null, delivered_at: 'T2b',
-        backup_id: '41', backup_name: 'O1001.nc', backup_at: 'T3', request_id: '9', requested_at: 'T4' },
+        backup_id: '41', backup_name: 'O1001.nc', backup_at: 'T3', request_id: '9', requested_at: 'T4',
+        request_closed_at: null, request_error: null, request_waiting: true },
       { id: 8, machine_serial_no: 'VMC-2', next_id: null, waiting: null, report_id: '50', report_name: 'O5000.nc',
         delivery_status: 'FAILED', delivery_message: 'CNC memory full', delivered_at: 'T7', backup_id: null, request_id: null },
       { id: 9, machine_serial_no: 'VMC-3', next_id: null, report_id: null, backup_id: null, request_id: null }
@@ -55,7 +57,8 @@ describe('machines and files', () => {
     expect(machines.text).toMatch(/WHERE m\.company_id = \$1 AND m\.is_active = true/);
     expect(machines.text).toMatch(/f\.delivery_status IS NULL AND f\.deleted_at IS NULL\s+ORDER BY f\.created_at, f\.id LIMIT 1/);
     expect(machines.text).toMatch(/ORDER BY f\.delivered_at DESC NULLS LAST, f\.id DESC LIMIT 1/);
-    expect(machines.params).toEqual([5, 30]);
+    expect(machines.text).toMatch(/ORDER BY id DESC LIMIT 1\) lr/);     // the last backup asked for, in the order they were made
+    expect(machines.params).toEqual([5, 30, 10]);                   // 30 min a backup request is offered; 10 min to report
     expect(gateway.text).toMatch(/FROM program_gateway_tokens\s+WHERE company_id = \$1 AND revoked_at IS NULL/);
     expect(gateway.params).toEqual([5, 60]);
     expect(r).toEqual({
@@ -63,7 +66,7 @@ describe('machines and files', () => {
       gateway: { token_prefix: 'mxg_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true },
       machines: [
         { id: 7, machine_serial_no: 'VMC-1',
-          next: { id: '44', program_name: 'O2002.nc', size_bytes: 30, created_at: 'T5' },
+          next: { id: '44', program_name: 'O2002.nc', size_bytes: 30, created_at: 'T5', sent_to_gateway_at: null, report_late: false },
           waiting: 2,
           last_report: { id: '40', program_name: 'O1001.nc', delivery_status: 'DONE', delivery_message: null, delivered_at: 'T2b' },
           last_backup: { id: '41', program_name: 'O1001.nc', created_at: 'T3' },
@@ -82,17 +85,55 @@ describe('machines and files', () => {
     await expect(svc.listMachines(req())).resolves.toEqual({ gateway: null, machines: [] });
   });
 
+  /** A machine whose last backup request is in this state. */
+  const asked = (id, o) => ({ id, machine_serial_no: `VMC-${id}`, next_id: null, report_id: null, backup_id: null,
+    request_id: '9', requested_at: '2026-10-21T05:00:00Z', request_closed_at: null, request_error: null, request_waiting: false, ...o });
+
   test("a backup the gateway could not read shows — until a backup arrives after it", async () => {
     mockDb.queueResponse({ rows: [
-      { id: 7, machine_serial_no: 'VMC-1', next_id: null, report_id: null,
-        backup_id: '41', backup_name: 'O1001.nc', backup_at: '2026-10-21T04:00:00Z', request_id: null,
-        backup_error: 'CNC not reachable', backup_failed_at: '2026-10-21T05:30:00Z' },
-      { id: 8, machine_serial_no: 'VMC-2', next_id: null, report_id: null, backup_id: '50', backup_at: '2026-10-21T06:00:00Z',
-        request_id: null, backup_error: 'CNC not reachable', backup_failed_at: '2026-10-21T05:30:00Z' }
+      asked(1, { backup_id: '41', backup_name: 'O1001.nc', backup_at: '2026-10-21T04:00:00Z',
+                 request_closed_at: '2026-10-21T05:30:00Z', request_error: 'CNC not reachable' }),
+      asked(2, { backup_id: '50', backup_at: '2026-10-21T06:00:00Z', request_closed_at: '2026-10-21T05:30:00Z', request_error: 'CNC not reachable' })
     ], rowCount: 2 }, none);
     const { machines: [failed, recovered] } = await svc.listMachines(req());
     expect(failed.backup_failure).toEqual({ message: 'CNC not reachable', at: '2026-10-21T05:30:00Z' });
+    expect(failed.backup_request).toBeNull();
     expect(recovered.backup_failure).toBeNull();
+  });
+
+  /* 23 Oct 2026, the user: "upload and backup — are both statuses updated correctly?" */
+  test('a backup request the gateway never answered says so once it is no longer offered — not silence', async () => {
+    mockDb.queueResponse({ rows: [
+      asked(1, {}),                                                                // open, past the 30 minutes
+      asked(2, { request_waiting: true }),                                         // open, still offered
+      asked(3, { request_closed_at: '2026-10-21T05:10:00Z', backup_id: '60', backup_at: '2026-10-21T05:10:00Z' }) // answered
+    ], rowCount: 3 }, none);
+    const { machines: [unanswered, waiting, answered] } = await svc.listMachines(req());
+    expect(unanswered).toMatchObject({ backup_request: null, backup_failure: { unanswered: true, at: '2026-10-21T05:00:00Z',
+      message: 'No answer from the gateway within 30 minutes. Check that it is running, then ask again.' } });
+    expect(waiting).toMatchObject({ backup_request: { id: '9', requested_at: '2026-10-21T05:00:00Z' }, backup_failure: null });
+    expect(answered).toMatchObject({ backup_request: null, backup_failure: null });
+  });
+
+  test('an older failure is not shown for a newer request: only the last request asked for counts', async () => {
+    // the old query took the last request WITH an error; a newer one still waiting must win
+    mockDb.queueResponse({ rows: [asked(1, { request_waiting: true, requested_at: '2026-10-21T07:00:00Z' })], rowCount: 1 }, none);
+    const { machines: [m] } = await svc.listMachines(req());
+    expect(m.backup_failure).toBeNull();
+    expect(m.backup_request).toEqual({ id: '9', requested_at: '2026-10-21T07:00:00Z' });
+  });
+
+  test('the program in front of the line, once the gateway has taken it: when — and late after 10 minutes without a report', async () => {
+    mockDb.queueResponse({ rows: [
+      { id: 7, machine_serial_no: 'VMC-1', next_id: '44', next_name: 'O2002.nc', next_size: 30, next_at: 'T5', waiting: '1',
+        next_sent_at: 'T6', next_report_late: false, report_id: null, backup_id: null, request_id: null },
+      { id: 8, machine_serial_no: 'VMC-2', next_id: '45', next_name: 'O3003.nc', next_size: 30, next_at: 'T5', waiting: '3',
+        next_sent_at: 'T1', next_report_late: true, report_id: null, backup_id: null, request_id: null }
+    ], rowCount: 2 }, none);
+    const { machines: [onTime, late] } = await svc.listMachines(req());
+    expect(onTime.next).toMatchObject({ id: '44', sent_to_gateway_at: 'T6', report_late: false });
+    expect(late.next).toMatchObject({ id: '45', sent_to_gateway_at: 'T1', report_late: true });
+    expect(late.waiting).toBe(3);
   });
 
   test("a plant user sees only their plant's machines", async () => {
@@ -296,9 +337,12 @@ describe('the gateway side: one token, every machine', () => {
   test('program: the oldest upload still in line; none waiting is a 404 the gateway can read', async () => {
     mockDb.queueResponse(one(vmc1()), one({ id: '42', program_name: 'O1001.nc' }));
     await expect(svc.gatewayProgram(gateway, { machine: 'VMC-1' })).resolves.toMatchObject({ machine: { id: 7 }, program: { id: '42' } });
-    const line = mockDb.calls()[1];
+    const [, line, taken] = mockDb.calls();
     expect(line.params).toEqual([7]);
     expect(line.text).toMatch(/f\.kind = 'NEW' AND f\.delivery_status IS NULL AND f\.deleted_at IS NULL\s+ORDER BY f\.created_at, f\.id\s+LIMIT 1/);
+    // handed out, it is with the gateway until the gateway reports — only while it is still in line
+    expect(taken.text).toMatch(/UPDATE program_files f SET sent_to_gateway_at = NOW\(\) WHERE f\.id = \$1 AND f\.kind = 'NEW' AND f\.delivery_status IS NULL AND f\.deleted_at IS NULL/);
+    expect(taken.params).toEqual(['42']);
 
     mockDb.queueResponse(one(vmc1()), none);
     await expect(svc.gatewayProgram(gateway, { machine: 'VMC-1' })).rejects.toMatchObject({ status: 404, code: 'NO_PROGRAM',

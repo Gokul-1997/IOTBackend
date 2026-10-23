@@ -48,6 +48,11 @@ so it can follow at once. A program you do not report stays in front: if the
 CNC cannot be reached now, do not report anything; it is offered again on
 the next `/status`.
 
+Once you download a program, the page shows it as **sent to the gateway**
+(with the time) until you report it. Ten minutes without a report and the
+page flags it — the programs behind it are waiting — so always end with
+call 4.
+
 Different machines do not wait for each other.
 
 ## A ready-made gateway
@@ -145,7 +150,8 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
 - `programs_waiting` counts it and the ones behind it.
 - `backup_request` is not `null` when someone pressed **Backup now**. Read the
   program from the CNC and upload it (call 3). A request nobody answers within
-  30 minutes lapses.
+  30 minutes lapses: it is no longer listed, and the page tells the person
+  the gateway did not answer.
 
 ## 2. GET /program?machine=NAME — download the program
 
@@ -166,7 +172,8 @@ curl -H "Authorization: Bearer $TOKEN" -o program.nc "https://SERVER/api/device/
 
 `404 NO_PROGRAM` means nothing is waiting for that machine (someone deleted
 it on the page after your `/status`). The same program can be downloaded as
-often as needed until it is reported.
+often as needed until it is reported; each download shows it on the page as
+sent to the gateway, at that time.
 
 ## 3. POST /backup — upload a backup
 
@@ -227,7 +234,9 @@ The answer to a program report names the machine's next program:
 | --- | --- | --- |
 | program `DONE` | ✅ On the machine since 10:42 | the person who uploaded it |
 | program `FAILED` | ❌ Refused by machine: *message* | the person who uploaded it |
+| *(downloaded, no report yet)* | ⏳ Sent to the gateway at 10:42 — waiting for its report; flagged after 10 minutes | — |
 | backup `FAILED` | ❌ Backup failed: *message*, and Backup now works again | the person who asked |
+| *(backup asked for, no answer in 30 minutes)* | ❌ No answer from the gateway, and Backup now works again | — |
 
 - `message` is required with `FAILED` (up to 500 characters) — write it for
   the person at the page: "Program O1001 is running", "CNC memory full".

@@ -25,8 +25,12 @@
  * Files are rows in program_files (030), kind NEW (an upload) or BACKUP. An
  * upload's place in line is its delivery_status (051, 053): NULL waiting,
  * then DONE or FAILED as reported, or SKIPPED (made before the line existed;
- * never sent). Backup requests are program_backup_requests (050), one open
- * per machine. The token is program_gateway_tokens (053), one live per company.
+ * never sent); sent_to_gateway_at (059) is when GET /program last handed it
+ * out, so the page can tell "waiting for the gateway" from "the gateway has
+ * it, no report yet". Backup requests are program_backup_requests (050), one
+ * open per machine; one the gateway leaves unanswered for BACKUP_WAIT_MIN is
+ * no longer offered, and the page says so. The token is
+ * program_gateway_tokens (053), one live per company.
  */
 const pool = require('../db');
 const storage = require('./storage');
@@ -39,8 +43,10 @@ const { effectivePlantId } = require('../lib/plant-scope');
 
 /** A gateway is "online" when it called within this long. */
 const ONLINE_WINDOW_SEC = 60;
-/** A backup request the gateway has not answered by then can be asked again. */
+/** A backup request the gateway has not answered by then is no longer offered to it, and can be asked again. */
 const BACKUP_WAIT_MIN = 30;
+/** A program with the gateway this long without a report is flagged on the page: the ones after it wait. */
+const REPORT_WAIT_MIN = 10;
 /** How often a gateway is asked to call /status. */
 const POLL_SECONDS = 15;
 
@@ -74,7 +80,7 @@ async function getMachine(req, machineId) {
 }
 
 const FILE_COLUMNS = `f.id, f.machine_id, f.program_name, f.kind, f.size_bytes, f.sha256, f.created_at,
-  f.delivery_status, f.delivery_message, f.delivered_at`;
+  f.delivery_status, f.delivery_message, f.delivered_at, f.sent_to_gateway_at`;
 
 /** An upload still in line for its machine: not reported on, not deleted. */
 const WAITING = `f.kind = 'NEW' AND f.delivery_status IS NULL AND f.deleted_at IS NULL`;
@@ -136,9 +142,28 @@ async function liveGateway(companyId, { full = false } = {}) {
 /* ───────────────────────── people ───────────────────────── */
 
 /**
+ * The last backup asked for came to nothing — the gateway could not read it,
+ * or did not answer while it was offered — and no backup has arrived since.
+ */
+function backupFailure(r) {
+  if (!r.request_id || r.request_waiting) return null;
+  if (r.request_error) {
+    // a backup sent after it (unasked) makes it old news
+    return r.backup_at && new Date(r.backup_at) > new Date(r.request_closed_at) ? null : { message: r.request_error, at: r.request_closed_at };
+  }
+  // still open but no longer offered; any backup would have closed it, so none came
+  if (!r.request_closed_at) {
+    return { message: `No answer from the gateway within ${BACKUP_WAIT_MIN} minutes. Check that it is running, then ask again.`,
+             at: r.requested_at, unanswered: true };
+  }
+  return null;
+}
+
+/**
  * The company's gateway, and its machines: each with the program in front
- * of its line and how many wait, the last program the gateway reported on
- * (on the machine, or refused), its last backup and an open backup request.
+ * of its line, how many wait and whether the gateway has taken it, the last
+ * program the gateway reported on (on the machine, or refused), its last
+ * backup, and what became of the last backup asked for.
  */
 exports.listMachines = async (req) => {
   const { companyId, plantId } = scope(req);
@@ -146,13 +171,15 @@ exports.listMachines = async (req) => {
     pool.query(
       `SELECT m.id, m.machine_serial_no,
               q.id AS next_id, q.program_name AS next_name, q.size_bytes AS next_size, q.created_at AS next_at, q.waiting,
+              q.sent_to_gateway_at AS next_sent_at,
+              COALESCE(q.sent_to_gateway_at <= NOW() - make_interval(mins => $3), false) AS next_report_late,
               p.id AS report_id, p.program_name AS report_name, p.delivery_status, p.delivery_message, p.delivered_at,
               b.id AS backup_id, b.program_name AS backup_name, b.created_at AS backup_at,
-              r.id AS request_id, r.requested_at,
-              bf.error_message AS backup_error, bf.closed_at AS backup_failed_at
+              lr.id AS request_id, lr.requested_at, lr.closed_at AS request_closed_at, lr.error_message AS request_error,
+              COALESCE(lr.closed_at IS NULL AND lr.requested_at > NOW() - make_interval(mins => $2), false) AS request_waiting
          FROM machines m
          LEFT JOIN LATERAL (
-                SELECT f.id, f.program_name, f.size_bytes, f.created_at, COUNT(*) OVER () AS waiting
+                SELECT f.id, f.program_name, f.size_bytes, f.created_at, f.sent_to_gateway_at, COUNT(*) OVER () AS waiting
                   FROM program_files f
                  WHERE f.machine_id = m.id AND ${WAITING}
                  ORDER BY f.created_at, f.id LIMIT 1) q ON true
@@ -165,32 +192,31 @@ exports.listMachines = async (req) => {
                 SELECT id, program_name, created_at FROM program_files
                  WHERE machine_id = m.id AND kind IN ('BACKUP', 'FETCHED') AND deleted_at IS NULL
                  ORDER BY created_at DESC, id DESC LIMIT 1) b ON true
-         LEFT JOIN program_backup_requests r
-                ON r.machine_id = m.id AND r.closed_at IS NULL AND r.requested_at > NOW() - make_interval(mins => $2)
          LEFT JOIN LATERAL (
-                SELECT error_message, closed_at FROM program_backup_requests
-                 WHERE machine_id = m.id AND error_message IS NOT NULL
-                 ORDER BY closed_at DESC LIMIT 1) bf ON true
+                SELECT id, requested_at, closed_at, error_message FROM program_backup_requests
+                 WHERE machine_id = m.id
+                 ORDER BY id DESC LIMIT 1) lr ON true
         WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}
         ORDER BY m.machine_serial_no`,
-      [companyId, BACKUP_WAIT_MIN]
+      [companyId, BACKUP_WAIT_MIN, REPORT_WAIT_MIN]
     ),
     liveGateway(companyId)
   ]);
   const machines = rows.map(r => ({
     id: r.id,
     machine_serial_no: r.machine_serial_no,
-    next: r.next_id ? { id: r.next_id, program_name: r.next_name, size_bytes: r.next_size, created_at: r.next_at } : null,
+    // sent_to_gateway_at: the gateway has it and has not reported yet (report_late: for REPORT_WAIT_MIN or more)
+    next: r.next_id ? { id: r.next_id, program_name: r.next_name, size_bytes: r.next_size, created_at: r.next_at,
+                        sent_to_gateway_at: r.next_sent_at || null, report_late: !!r.next_report_late } : null,
     waiting: Number(r.waiting || 0),
     last_report: r.report_id
       ? { id: r.report_id, program_name: r.report_name, delivery_status: r.delivery_status,
           delivery_message: r.delivery_message || null, delivered_at: r.delivered_at || null }
       : null,
     last_backup: r.backup_id ? { id: r.backup_id, program_name: r.backup_name, created_at: r.backup_at } : null,
-    backup_request: r.request_id ? { id: r.request_id, requested_at: r.requested_at } : null,
-    // the last backup the gateway could not read — only while no backup has arrived since
-    backup_failure: r.backup_error && !r.request_id && !(r.backup_at && new Date(r.backup_at) > new Date(r.backup_failed_at))
-      ? { message: r.backup_error, at: r.backup_failed_at } : null
+    // the last backup asked for, while the gateway is still offered it
+    backup_request: r.request_id && r.request_waiting ? { id: r.request_id, requested_at: r.requested_at } : null,
+    backup_failure: backupFailure(r)
   }));
   return { gateway, machines };
 };
@@ -441,11 +467,14 @@ exports.gatewayStatus = async (gateway) => {
   };
 };
 
-/** The program in front of a machine's line, to download. */
+/** The program in front of a machine's line, to download — marked as with the gateway until it reports. */
 exports.gatewayProgram = async (gateway, query = {}) => {
   const machine = await machineOf(gateway, query);
   const program = await nextProgram(machine.id);
   if (!program) throw fail(`Nothing is waiting for ${machine.machine_serial_no}.`, 'NO_PROGRAM', 404);
+  await pool.query(
+    `UPDATE program_files f SET sent_to_gateway_at = NOW() WHERE f.id = $1 AND ${WAITING}`, [program.id]
+  );
   return { machine, program };
 };
 
@@ -580,4 +609,4 @@ async function tellUser(machine, userId, type, title, message, fileId = null) {
   }
 }
 
-exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, POLL_SECONDS, nextProgram, machineOf };
+exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, REPORT_WAIT_MIN, POLL_SECONDS, nextProgram, machineOf, backupFailure };
