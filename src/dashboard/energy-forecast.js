@@ -4,29 +4,37 @@
  *
  * ── The bill period ─────────────────────────────────────────────────────
  *
- * The company enters one bill's dates, as on the EB bill (reading date to
- * reading date). The periods after (and before) it follow on by themselves:
+ * An EB bill prints two reading dates: From (the reading the last bill ended
+ * on) and To (this bill's reading). The next bill starts on this one's To, so
+ * a period is [From, To): From counted, To not — 26 Jul – 26 Aug is 31 days.
+ * After the latest bill entered, bills follow every month (two or three for
+ * bills that long) on the day of the month of its To date. Reading dates move
+ * a day either way (26 Jul – 27 Aug), so one bill's exact length is never
+ * repeated.
  *
- *   - dates a whole number of months apart (12 Oct – 11 Nov, 1 Oct – 31 Oct,
- *     12 Oct – 11 Dec) repeat on the same day of the month — the 12th, or the
- *     month's last day when it is shorter (31 Jan → 28 Feb → 31 Mar);
- *   - any other length (12 Oct – 10 Nov, 30 days) repeats every that many days.
+ * ── The bill ────────────────────────────────────────────────────────────
  *
- * ── The forecast ────────────────────────────────────────────────────────
+ * Worked out the way the bill itself is (a Tamil Nadu EB bill adds up as):
  *
- *   bill = what the meters counted from the bill's first day until now
- *        + the rest of the bill, hour by hour, at this factory's usual use
+ *   electricity charges = units × the rate the last bill really charged
+ *                         (its electricity charges ÷ its units: the printed
+ *                         rate is rounded — 8.13 billed 8.13363 on SC 1212)
+ *   peak hour, ED/LPF penalty, welding surcharge, E tax & TCS
+ *                       = the same share of the electricity charges as on
+ *                         the last bill (welding was exactly 15 %)
+ *   fixed charges       = as on the last bill
+ *   net                 = all of them added
  *
- * "Usual" is per machine and per hour of the week (Monday 09:00 is not
- * Sunday 09:00): the median of the same hour over the last four weeks. A
- * median, so one odd week — a holiday, a breakdown, a meter offline and then
- * catching up — does not move it. The likely range repeats each of those
- * weeks as it really was for the rest of the bill: if the coming days look
- * like the slowest or the busiest of them, the bill lands at its ends.
+ * ── The units ───────────────────────────────────────────────────────────
  *
- * The method is checked on this factory's own readings: the last 7 days are
- * forecast from the weeks before them and compared with what the meters
- * counted (`accuracy`).
+ * Best first: EB meter readings entered (exact so far, the rest at the last
+ * week's rate); a meter on the supply (hour by hour, below); else the last
+ * bills' units per day — an estimate, and said to be one.
+ *
+ * A meter's coming use is per hour of the week (Monday 09:00 is not Sunday
+ * 09:00): the median of the same hour over the last four weeks, so one odd
+ * week — a holiday, a breakdown, a meter offline and then catching up — does
+ * not move it. Its likely range repeats each of those weeks as it really was.
  *
  * Every time here is epoch ms; hours start on IST hours; days are IST dates.
  */
@@ -77,48 +85,136 @@ function monthDay(year, month, dom) {
   return ymd(new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), Math.min(dom, lastDom))));
 }
 
-/** How a bill repeats: { months: n } when its dates are whole months apart, else { days: length }. */
-function patternOf(start, end) {
-  const s = utc(start);
-  const after = addDays(end, 1);
-  for (const months of [1, 2, 3]) {
-    if (monthDay(s.getUTCFullYear(), s.getUTCMonth() + months, s.getUTCDate()) === after) return { months };
-  }
-  return { days: daysBetween(start, end) + 1 };
+/** Every how many months a bill comes, from one bill's reading dates: 1, 2 or 3. */
+function monthsOf(from, to) {
+  return Math.min(3, Math.max(1, Math.round(daysBetween(from, to) / 30.44)));
 }
 
-/** The first day of the k-th bill after (k < 0: before) the one entered. */
-function periodStart(entered, pattern, k) {
-  if (pattern.months) {
-    const s = utc(entered.start);
-    return monthDay(s.getUTCFullYear(), s.getUTCMonth() + k * pattern.months, s.getUTCDate());
-  }
-  return addDays(entered.start, k * pattern.days);
+/** The k-th reading date after `to` (k months × n), on its day of the month or that month's last day. */
+function readingDate(to, months, k) {
+  const t = utc(to);
+  return monthDay(t.getUTCFullYear(), t.getUTCMonth() + k * months, t.getUTCDate());
 }
 
 /**
- * The bill `day` falls in, from the one entered: { start, end, days, pattern }.
- * `offset` = 1 for the bill after it, −1 for the one before.
+ * The bill `day` falls in, after the latest bill entered (`{ from, to }`):
+ * { start, end, days, months } — end is its reading date, not counted. A day
+ * before that bill's To falls in that bill itself.
  */
-function billPeriod(entered, day, offset = 0) {
-  const pattern = patternOf(entered.start, entered.end);
-  let k = pattern.months
-    ? Math.floor(((utc(day).getUTCFullYear() - utc(entered.start).getUTCFullYear()) * 12
-        + utc(day).getUTCMonth() - utc(entered.start).getUTCMonth()) / pattern.months)
-    : Math.floor(daysBetween(entered.start, day) / pattern.days);
-  for (let i = 0; i < 6 && periodStart(entered, pattern, k) > day; i++) k--;
-  for (let i = 0; i < 6 && periodStart(entered, pattern, k + 1) <= day; i++) k++;
-  k += offset;
-  const start = periodStart(entered, pattern, k);
-  const next = periodStart(entered, pattern, k + 1);
-  return { start, end: addDays(next, -1), days: daysBetween(start, next), pattern };
+function currentPeriod(latest, day) {
+  if (day < latest.to) return { start: latest.from, end: latest.to, days: daysBetween(latest.from, latest.to), months: monthsOf(latest.from, latest.to), billed: true };
+  const months = monthsOf(latest.from, latest.to);
+  const t = utc(latest.to), d = utc(day);
+  let k = Math.max(0, Math.floor(((d.getUTCFullYear() - t.getUTCFullYear()) * 12 + d.getUTCMonth() - t.getUTCMonth()) / months));
+  for (let i = 0; i < 4 && k > 0 && readingDate(latest.to, months, k) > day; i++) k--;
+  for (let i = 0; i < 4 && readingDate(latest.to, months, k + 1) <= day; i++) k++;
+  const start = readingDate(latest.to, months, k);
+  const end = readingDate(latest.to, months, k + 1);
+  return { start, end, days: daysBetween(start, end), months, billed: false };
 }
 
-/** "Every month", "Every 2 months", "Every 30 days". */
-function repeatsText(pattern) {
-  if (pattern.months === 1) return 'Every month';
-  if (pattern.months) return `Every ${pattern.months} months`;
-  return `Every ${pattern.days} days`;
+/** "Every month", "Every 2 months". */
+const cycleText = months => (months === 1 ? 'Every month' : `Every ${months} months`);
+
+/* ── the bill, as the EB works it out ── */
+
+const num = v => (v === null || v === undefined || v === '' ? 0 : Number(v));
+
+/**
+ * What a bill charges, taken from the bill itself: the rate it really
+ * charged, each charge that grows with the units as a share of the
+ * electricity charges, and its fixed charges. Other charges (arrears, a
+ * one-off adjustment) are not carried forward.
+ */
+function tariffOf(bill) {
+  const units = num(bill.units), ec = num(bill.electricity_charges);
+  const share = v => (ec > 0 ? num(v) / ec : 0);
+  return {
+    rate: units > 0 && ec > 0 ? ec / units : num(bill.rate),
+    printed_rate: bill.rate === null || bill.rate === undefined || bill.rate === '' ? null : Number(bill.rate),
+    peak_share: share(bill.peak_charges),
+    penalty_share: share(bill.penalty_charges),
+    welding_share: share(bill.welding_charges),
+    tax_share: share(bill.tax_charges),
+    fixed: num(bill.fixed_charges)
+  };
+}
+
+/** The bill for `units` at `tariff`, every line rounded to the rupee as the EB prints it. */
+function chargesFor(units, tariff) {
+  const rupees = v => Math.round(v);
+  const electricity = units * tariff.rate;
+  const lines = {
+    units: Math.round(units),
+    electricity_charges: rupees(electricity),
+    peak_charges: rupees(electricity * tariff.peak_share),
+    fixed_charges: rupees(tariff.fixed),
+    penalty_charges: rupees(electricity * tariff.penalty_share),
+    welding_charges: rupees(electricity * tariff.welding_share),
+    tax_charges: rupees(electricity * tariff.tax_share)
+  };
+  lines.net_amount = lines.electricity_charges + lines.peak_charges + lines.fixed_charges
+    + lines.penalty_charges + lines.welding_charges + lines.tax_charges;
+  return lines;
+}
+
+/* ── the units ── */
+
+/**
+ * The register at the start of the period: the reading on that day, or
+ * between the readings either side of it (each within a week).
+ */
+function registerAt(readings, day) {
+  const exact = readings.find(r => r.read_on === day);
+  if (exact) return Number(exact.kwh);
+  const before = [...readings].reverse().find(r => r.read_on < day && daysBetween(r.read_on, day) <= 7);
+  const after = readings.find(r => r.read_on > day && daysBetween(day, r.read_on) <= 7);
+  if (!before || !after) return null;
+  const span = daysBetween(before.read_on, after.read_on);
+  return Number(before.kwh) + (Number(after.kwh) - Number(before.kwh)) * daysBetween(before.read_on, day) / span;
+}
+
+/**
+ * Units from EB meter readings (date, kWh register — taken at about the time
+ * the EB reads it): so far = the latest reading in the period − the register
+ * at its start; the rest at the rate of the last week of readings (or of the
+ * period so far). Null when the readings cannot say.
+ */
+function unitsFromReadings(readings, period, today) {
+  const list = [...readings].map(r => ({ read_on: r.read_on, kwh: Number(r.kwh) }))
+    .sort((a, b) => (a.read_on < b.read_on ? -1 : 1));
+  const start = registerAt(list, period.start);
+  if (start === null) return null;
+  const inside = list.filter(r => r.read_on > period.start && r.read_on <= period.end && r.read_on <= today);
+  const last = inside.at(-1);
+  if (!last || last.kwh < start) return null;
+  const soFar = last.kwh - start;
+  const done = daysBetween(period.start, last.read_on);
+  const weekBack = [...list].reverse().find(r => r.read_on <= addDays(last.read_on, -7) && r.read_on >= addDays(last.read_on, -21));
+  const perDay = weekBack && last.kwh >= weekBack.kwh
+    ? (last.kwh - weekBack.kwh) / daysBetween(weekBack.read_on, last.read_on)
+    : soFar / done;
+  const left = Math.max(0, daysBetween(last.read_on, period.end));
+  return { so_far: soFar, as_of: last.read_on, rest: perDay * left, per_day: perDay, measured: true };
+}
+
+/**
+ * Units from the last bills (up to three): their units per day, for the days
+ * of this period gone and to come. An estimate; its range is the lowest and
+ * highest units per day among those bills.
+ */
+function unitsFromBills(bills, period, now) {
+  const recent = bills.filter(b => num(b.units) > 0 && daysBetween(b.from, b.to) > 0).slice(0, 3);
+  if (!recent.length) return null;
+  const perBill = recent.map(b => num(b.units) / daysBetween(b.from, b.to));
+  const perDay = recent.reduce((n, b) => n + num(b.units), 0) / recent.reduce((n, b) => n + daysBetween(b.from, b.to), 0);
+  const gone = Math.min(period.days, Math.max(0, (now - istMidnight(period.start)) / DAY_MS));
+  return {
+    so_far: perDay * gone, as_of: null, rest: perDay * (period.days - gone), per_day: perDay, measured: false,
+    low_per_day: recent.length > 1 ? Math.min(...perBill) : null,
+    high_per_day: recent.length > 1 ? Math.max(...perBill) : null,
+    bills: recent.length
+  };
 }
 
 /* ── usual use ── */
@@ -186,9 +282,9 @@ function forecastBill(p) {
   const h0 = istHour(now);
   const left = 1 - (now - h0) / HOUR_MS;                 // what remains of the current hour
   const startMs = istMidnight(p.period.start);
-  const endMs = istMidnight(addDays(p.period.end, 1));
+  const endMs = istMidnight(p.period.end);                // the reading date: not counted
   const days = [];
-  for (let d = p.period.start; d <= p.period.end; d = addDays(d, 1)) days.push(d);
+  for (let d = p.period.start; d < p.period.end; d = addDays(d, 1)) days.push(d);
   const dayIndex = new Map(days.map((d, i) => [d, i]));
 
   const rateOf = m => (p.rates.has(m) ? p.rates.get(m) : null);
@@ -337,7 +433,7 @@ function accuracyOf(seriesByMachine, machines, historyFrom, h0) {
 /** The bill before this one, when the history covers all of it. */
 function previousBill(p, rateOf, priced) {
   if (!p.previous) return null;
-  const from = istMidnight(p.previous.start), to = istMidnight(addDays(p.previous.end, 1));
+  const from = istMidnight(p.previous.start), to = istMidnight(p.previous.end);
   if (p.historyFrom > from) return null;
   let kwh = 0, cost = 0, first = Infinity;
   for (const m of p.machines) {
@@ -357,7 +453,8 @@ function previousBill(p, rateOf, priced) {
 }
 
 module.exports = {
-  parseDay, addDays, daysBetween, patternOf, billPeriod, repeatsText,
+  parseDay, addDays, daysBetween, monthsOf, currentPeriod, cycleText,
+  tariffOf, chargesFor, registerAt, unitsFromReadings, unitsFromBills,
   median, usualUse, pastWeeks, forecastBill, accuracyOf,
   istHour, istDay, istMidnight, hourOfWeek,
   HOUR_MS, DAY_MS, WEEK_MS, PROFILE_WEEKS

@@ -1,7 +1,8 @@
 /*
- * /api/dashboard/energy/bill and /bill-period over HTTP: who may read and
- * change what, that a change is audited and shows at once, that everyone in
- * the company shares one forecast, and that a fault answers in plain words.
+ * /api/dashboard/energy/bill and /connections over HTTP: who may read and
+ * change what, that every change is audited and shows in the forecast at
+ * once, that the company shares one forecast, and that a fault answers in
+ * plain words.
  */
 const request = require('supertest');
 const express = require('express');
@@ -43,9 +44,9 @@ function app() {
   return a;
 }
 
-const today = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
-const plus = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
-const reads = () => mockDb.calls().filter(c => /FROM energy_billing/.test(c.text)).length;
+const VIEW = 'page:analytics-energy:view', SETTINGS = 'page:analytics-energy:settings';
+const reads = () => mockDb.calls().filter(c => /FROM energy_connections c/.test(c.text)).length;
+const owned = { rows: [{ id: 1 }] };
 
 beforeEach(async () => {
   resetDb();
@@ -54,58 +55,70 @@ beforeEach(async () => {
   await redis.flushall();
 });
 
-test('the forecast is for whoever sees the Energy screen, and shared by the company', async () => {
+test('the forecast and the bills are for whoever sees the Energy screen; the forecast is shared by the company', async () => {
   const a = app();
   const first = await request(a).get('/api/dashboard/energy/bill');
   expect(first.status).toBe(200);
-  expect(first.body).toMatchObject({ status: 'success', data: { configured: false } });
-  expect(mockChecked).toContain('page:analytics-energy:view');
+  expect(first.body).toMatchObject({ status: 'success', data: { configured: false, connections: [] } });
+  expect(mockChecked).toContain(VIEW);
 
   const worked = reads();
-  const second = await request(a).get('/api/dashboard/energy/bill');
-  expect(second.text).toBe(first.text);
+  expect((await request(a).get('/api/dashboard/energy/bill')).text).toBe(first.text);
   expect(reads()).toBe(worked);
 
-  expect((await request(a).get('/api/dashboard/energy/bill').set('x-deny', 'page:analytics-energy:view')).status).toBe(403);
+  expect((await request(a).get('/api/dashboard/energy/connections')).status).toBe(200);
+  expect((await request(a).get('/api/dashboard/energy/bill').set('x-deny', VIEW)).status).toBe(403);
+  expect((await request(a).get('/api/dashboard/energy/connections').set('x-deny', VIEW)).status).toBe(403);
 });
 
-test('the dates are changed by whoever may set the tariff — audited, and the forecast follows at once', async () => {
+test('connections, bills and readings are changed by whoever may set the tariff — each audited, the forecast following at once', async () => {
   const a = app();
   await request(a).get('/api/dashboard/energy/bill');
   const before = reads();
 
-  const body = { period_start: today, period_end: plus(today, 29) };
-  mockDb.queueResponse({ rows: [] }, { rows: [{ start: body.period_start, end: body.period_end, updated_at: null }] });
-  const saved = await request(a).put('/api/dashboard/energy/bill-period').send(body);
-  expect(saved.status).toBe(200);
-  expect(saved.body.data).toMatchObject({ configured: true, current: { start: today } });
-  expect(mockChecked).toContain('page:analytics-energy:settings');
-  expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'UPDATE_ENERGY_BILL_PERIOD', company_id: 4, user_id: 9 }));
+  mockDb.queueResponse({ rows: [{ id: 1 }] });
+  const added = await request(a).post('/api/dashboard/energy/connections').send({ sc_number: '1212' });
+  expect(added.status).toBe(200);
+  expect(audit.log).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'CREATE_ENERGY_CONNECTION', company_id: 4, user_id: 9 }));
 
   await request(a).get('/api/dashboard/energy/bill');
-  expect(reads()).toBeGreaterThan(before + 1);                // worked out again, not the cached answer
+  expect(reads()).toBe(before + 1);                         // worked out again, not the cached answer
 
-  const denied = await request(a).put('/api/dashboard/energy/bill-period')
-    .set('x-deny', 'page:analytics-energy:settings').send(body);
-  expect(denied.status).toBe(403);
-  expect((await request(a).delete('/api/dashboard/energy/bill-period').set('x-deny', 'page:analytics-energy:settings')).status).toBe(403);
+  mockDb.queueResponse(owned, { rows: [] }, { rows: [{ id: 11, connection_id: 1, from: '2026-07-26', to: '2026-08-26', units: '55952',
+    rate: '8.13', electricity_charges: '455093', peak_charges: '0', fixed_charges: '91200', penalty_charges: '16372',
+    welding_charges: '68264', tax_charges: '29512', other_charges: '0', net_amount: '660441' }] });
+  const bill = await request(a).post('/api/dashboard/energy/connections/1/bills').send({
+    from: '2026-07-26', to: '2026-08-26', units: 55952, rate: 8.13, electricity_charges: 455093, fixed_charges: 91200,
+    penalty_charges: 16372, welding_charges: 68264, tax_charges: 29512, net_amount: 660441 });
+  expect(bill.status).toBe(200);
+  expect(bill.body.data.checks).toEqual({ rate_difference: 203.24, net_difference: 0 });
+  expect(audit.log).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'CREATE_ENERGY_BILL' }));
 
-  const removed = await request(a).delete('/api/dashboard/energy/bill-period');
-  expect(removed.status).toBe(200);
-  expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'DELETE_ENERGY_BILL_PERIOD' }));
+  mockDb.queueResponse(owned, { rows: [] }, { rows: [{ id: 5, read_on: '2026-10-21', kwh: '144600' }] });
+  const reading = await request(a).post('/api/dashboard/energy/connections/1/readings').send({ read_on: '2026-10-21', kwh: 144600 });
+  expect(reading.status).toBe(200);
+  expect(audit.log).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'CREATE_ENERGY_READING' }));
+
+  for (const [method, path] of [['post', '/connections'], ['put', '/connections/1'], ['delete', '/connections/1'],
+                                ['post', '/connections/1/bills'], ['put', '/connections/1/bills/11'], ['delete', '/connections/1/bills/11'],
+                                ['post', '/connections/1/readings'], ['delete', '/connections/1/readings/5']]) {
+    const r = await request(a)[method](`/api/dashboard/energy${path}`).set('x-deny', SETTINGS).send({});
+    expect([method, path, r.status]).toEqual([method, path, 403]);
+  }
 });
 
-test('a mistake is said plainly (400); a fault says nothing of the inside (500)', async () => {
+test('a mistake is said plainly (400) and not audited; a fault says nothing of the inside (500)', async () => {
   const a = app();
-  const bad = await request(a).put('/api/dashboard/energy/bill-period').send({ period_start: today, period_end: today });
+  mockDb.queueResponse(owned);
+  const bad = await request(a).post('/api/dashboard/energy/connections/1/bills').send({ from: '2026-08-26', to: '2026-08-26', units: 1 });
   expect(bad.status).toBe(400);
-  expect(bad.body.message).toMatch(/at least 7 days/);
+  expect(bad.body.message).toBe('The To date must be after the From date');
   expect(audit.log).not.toHaveBeenCalled();
 
-  mockDb.queueError(new Error('relation "energy_billing" does not exist'));
+  mockDb.queueError(new Error('relation "energy_connections" does not exist'));
   const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
-  const fault = await request(a).get('/api/dashboard/energy/bill-period');
+  const fault = await request(a).get('/api/dashboard/energy/connections');
   spy.mockRestore();
   expect(fault.status).toBe(500);
-  expect(fault.body.message).toBe('Could not load the bill dates just now. Try again in a moment.');
+  expect(fault.body.message).toBe('Could not load the electricity bills just now. Try again in a moment.');
 });

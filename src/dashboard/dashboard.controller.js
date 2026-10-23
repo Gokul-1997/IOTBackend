@@ -239,28 +239,61 @@ const billFault = (res, err, what) => {
 exports.energyBill = async (req, res) => {
   try {
     return await sendShared(res, 'energy-bill', req,
-      () => billSvc.getBill({ machine_id: req.query.machine_id, company_id: req.user.company_id }), { live: true });
+      () => billSvc.getBill({ company_id: req.user.company_id }), { live: true });
   } catch (err) { return billFault(res, err, 'work out the bill forecast'); }
 };
 
-exports.getBillPeriod = async (req, res) => {
-  try { return res.json({ status: 'success', data: await billSvc.getBillPeriod(req.user.company_id) }); }
-  catch (err) { return billFault(res, err, 'load the bill dates'); }
+exports.listEnergyConnections = async (req, res) => {
+  try { return res.json({ status: 'success', data: await billSvc.listConnections(req.user.company_id) }); }
+  catch (err) { return billFault(res, err, 'load the electricity bills'); }
 };
 
-exports.saveBillPeriod = async (req, res) => {
+exports.saveEnergyConnection = async (req, res) => {
   try {
-    const data = await billSvc.saveBillPeriod({
-      company_id: req.user.company_id, user_id: req.user.id,
-      period_start: req.body?.period_start, period_end: req.body?.period_end
+    const data = await billSvc.saveConnection({
+      company_id: req.user.company_id, user_id: req.user.id, id: req.params.id ?? null,
+      sc_number: req.body?.sc_number, name: req.body?.name, meter_machine_id: req.body?.meter_machine_id
     });
     return res.json({ status: 'success', data });
-  } catch (err) { return billFault(res, err, 'save the bill dates'); }
+  } catch (err) { return billFault(res, err, 'save the service connection'); }
 };
 
-exports.clearBillPeriod = async (req, res) => {
-  try { return res.json({ status: 'success', data: await billSvc.clearBillPeriod({ company_id: req.user.company_id }) }); }
-  catch (err) { return billFault(res, err, 'remove the bill dates'); }
+exports.deleteEnergyConnection = async (req, res) => {
+  try { return res.json({ status: 'success', data: await billSvc.deleteConnection({ company_id: req.user.company_id, id: req.params.id }) }); }
+  catch (err) { return billFault(res, err, 'remove the service connection'); }
+};
+
+exports.saveEnergyBill = async (req, res) => {
+  try {
+    const data = await billSvc.saveBill({
+      company_id: req.user.company_id, user_id: req.user.id,
+      connection_id: req.params.id, id: req.params.billId ?? null, body: req.body || {}
+    });
+    return res.json({ status: 'success', data });
+  } catch (err) { return billFault(res, err, 'save the bill'); }
+};
+
+exports.deleteEnergyBill = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await billSvc.deleteBill({
+      company_id: req.user.company_id, connection_id: req.params.id, id: req.params.billId }) });
+  } catch (err) { return billFault(res, err, 'remove the bill'); }
+};
+
+exports.saveEnergyReading = async (req, res) => {
+  try {
+    const data = await billSvc.saveReading({
+      company_id: req.user.company_id, user_id: req.user.id, connection_id: req.params.id, body: req.body || {}
+    });
+    return res.json({ status: 'success', data });
+  } catch (err) { return billFault(res, err, 'save the meter reading'); }
+};
+
+exports.deleteEnergyReading = async (req, res) => {
+  try {
+    return res.json({ status: 'success', data: await billSvc.deleteReading({
+      company_id: req.user.company_id, connection_id: req.params.id, id: req.params.readingId }) });
+  } catch (err) { return billFault(res, err, 'remove the meter reading'); }
 };
 
 /* ─────────────────────────────────────────────────────────────

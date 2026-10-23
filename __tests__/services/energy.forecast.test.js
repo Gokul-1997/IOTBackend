@@ -1,11 +1,13 @@
 /*
  * The electricity bill forecast's arithmetic (dashboard/energy-forecast.js).
  *
- * The fixtures are a factory whose machines run a day shift, 08:00–20:00
- * IST, Monday to Saturday, and stand on Sunday and at night. Where every
- * week is alike the forecast must be exact — the bill is what the meters
- * counted plus that same pattern for the hours left — so the expected
- * figures are worked out here hour by hour, not copied from the code.
+ * The bills are S AND T's own (July–August 2026, SC 1212 and SC 2309): the
+ * forecast must work a bill out exactly as the EB did — to the rupee.
+ *
+ * The meter fixtures are a factory whose machines run a day shift, 08:00–20:00
+ * IST, Monday to Saturday, and stand on Sunday and at night. Where every week
+ * is alike the meter forecast must be exact, so the expected figures are
+ * worked out here hour by hour, not copied from the code.
  */
 const fc = require('../../src/dashboard/energy-forecast');
 
@@ -34,47 +36,106 @@ function seriesOf(from, to, use, { partial = 0.5, skip = () => false } = {}) {
 const sumHours = (from, to, use) => { let n = 0; for (let h = from; h < to; h += H) n += use(h); return n; };
 
 const NOW = at('2026-10-23', 10, 30);                       // a Friday, half way through the 10:00 hour
-const PERIOD = { start: '2026-10-12', end: '2026-11-11' };
-const PREVIOUS = { start: '2026-09-12', end: '2026-10-11' };
+// reading dates: the bill runs from 12 Oct up to (not counting) 12 Nov
+const PERIOD = { start: '2026-10-12', end: '2026-11-12' };
+const PREVIOUS = { start: '2026-09-12', end: '2026-10-12' };
+
+/* S AND T's bills for July–August 2026, as printed. */
+const SC1212 = { from: '2026-07-26', to: '2026-08-26', units: 55952, rate: 8.13, peak_charges: 0, electricity_charges: 455093,
+  fixed_charges: 91200, penalty_charges: 16372, welding_charges: 68264, tax_charges: 29512, net_amount: 660441 };
+const SC2309 = { from: '2026-07-26', to: '2026-08-27', units: 68988, rate: 8.25, peak_charges: 0, electricity_charges: 569151,
+  fixed_charges: 89984, penalty_charges: 15593, welding_charges: 0, tax_charges: 32622, net_amount: 707350 };
 const HISTORY = at('2026-09-01');
 
-describe('the bill period follows on from the one entered', () => {
-  const entered = { start: '2026-10-12', end: '2026-11-11' };
-
-  test('a bill from the 12th to the 11th repeats every month, both ways', () => {
-    expect(fc.billPeriod(entered, '2026-10-23')).toMatchObject({ start: '2026-10-12', end: '2026-11-11', days: 31 });
-    expect(fc.billPeriod(entered, '2026-11-12')).toMatchObject({ start: '2026-11-12', end: '2026-12-11', days: 30 });
-    expect(fc.billPeriod(entered, '2026-10-11')).toMatchObject({ start: '2026-09-12', end: '2026-10-11' });
-    expect(fc.billPeriod(entered, '2026-10-23', -1)).toMatchObject({ start: '2026-09-12', end: '2026-10-11' });
-    expect(fc.billPeriod(entered, '2026-10-23', 1)).toMatchObject({ start: '2026-11-12', end: '2026-12-11' });
-    expect(fc.repeatsText(fc.billPeriod(entered, '2026-10-23').pattern)).toBe('Every month');
+describe('the bill period: reading date to reading date, then every month on the same day', () => {
+  test('From is counted, To starts the next bill: 26 Jul – 26 Aug is 31 days, 26 Jul – 27 Aug 32', () => {
+    expect(fc.daysBetween(SC1212.from, SC1212.to)).toBe(31);
+    expect(fc.daysBetween(SC2309.from, SC2309.to)).toBe(32);
+    expect(fc.monthsOf(SC1212.from, SC1212.to)).toBe(1);
+    expect(fc.monthsOf('2026-06-26', '2026-08-26')).toBe(2);
   });
 
-  test('entered long ago, it still finds this month\'s bill', () => {
-    expect(fc.billPeriod({ start: '2025-01-12', end: '2025-02-11' }, '2026-10-23'))
-      .toMatchObject({ start: '2026-10-12', end: '2026-11-11' });
+  test('after the latest bill, the bills follow on its reading day — this one, on 23 Oct', () => {
+    expect(fc.currentPeriod(SC1212, '2026-10-23')).toMatchObject({ start: '2026-09-26', end: '2026-10-26', days: 30, billed: false });
+    // a reading a day late once (27 Aug) is not repeated as a 32-day cycle
+    expect(fc.currentPeriod(SC2309, '2026-10-23')).toMatchObject({ start: '2026-09-27', end: '2026-10-27', days: 30 });
+    // on the reading day itself the new bill has begun
+    expect(fc.currentPeriod(SC1212, '2026-08-26')).toMatchObject({ start: '2026-08-26', end: '2026-09-26' });
+    expect(fc.currentPeriod(SC1212, '2026-10-26')).toMatchObject({ start: '2026-10-26', end: '2026-11-26' });
+    expect(fc.cycleText(1)).toBe('Every month');
+    expect(fc.cycleText(2)).toBe('Every 2 months');
   });
 
   test('a reading on the 31st falls on the last day of shorter months', () => {
-    const e = { start: '2026-01-31', end: '2026-02-27' };
-    expect(fc.patternOf(e.start, e.end)).toEqual({ months: 1 });
-    expect(fc.billPeriod(e, '2026-03-15')).toMatchObject({ start: '2026-02-28', end: '2026-03-30' });
-    expect(fc.billPeriod(e, '2026-04-10')).toMatchObject({ start: '2026-03-31', end: '2026-04-29' });
-  });
-
-  test('calendar months, two-monthly bills, and a fixed number of days', () => {
-    expect(fc.billPeriod({ start: '2026-10-01', end: '2026-10-31' }, '2026-12-25')).toMatchObject({ start: '2026-12-01', end: '2026-12-31' });
-    const twoMonthly = { start: '2026-10-12', end: '2026-12-11' };
-    expect(fc.billPeriod(twoMonthly, '2027-01-05')).toMatchObject({ start: '2026-12-12', end: '2027-02-11' });
-    expect(fc.repeatsText(fc.patternOf(twoMonthly.start, twoMonthly.end))).toBe('Every 2 months');
-    const thirty = { start: '2026-10-12', end: '2026-11-10' };
-    expect(fc.patternOf(thirty.start, thirty.end)).toEqual({ days: 30 });
-    expect(fc.billPeriod(thirty, '2026-11-11')).toMatchObject({ start: '2026-11-11', end: '2026-12-10', days: 30 });
+    const jan = { from: '2026-12-31', to: '2027-01-31' };
+    expect(fc.currentPeriod(jan, '2027-02-15')).toMatchObject({ start: '2027-01-31', end: '2027-02-28' });
+    expect(fc.currentPeriod(jan, '2027-03-05')).toMatchObject({ start: '2027-02-28', end: '2027-03-31' });
   });
 
   test('only real calendar dates are dates', () => {
     expect(fc.parseDay('2026-10-12')).toBe('2026-10-12');
     for (const bad of ['2026-02-31', '2026-13-01', '12-10-2026', '', null, 'x']) expect(fc.parseDay(bad)).toBeNull();
+  });
+});
+
+describe('the bill, worked out as the EB does', () => {
+  test.each([['SC 1212', SC1212], ['SC 2309', SC2309]])('%s: its own units give back its own bill, to the rupee', (_name, bill) => {
+    expect(fc.chargesFor(bill.units, fc.tariffOf(bill))).toEqual({
+      units: bill.units, electricity_charges: bill.electricity_charges, peak_charges: 0, fixed_charges: bill.fixed_charges,
+      penalty_charges: bill.penalty_charges, welding_charges: bill.welding_charges, tax_charges: bill.tax_charges,
+      net_amount: bill.net_amount
+    });
+  });
+
+  test('the rate is what the bill really charged (8.13 printed, 8.13363 billed); welding 15 %', () => {
+    const t = fc.tariffOf(SC1212);
+    expect(t.printed_rate).toBe(8.13);
+    expect(t.rate).toBeCloseTo(455093 / 55952, 10);
+    expect(t.welding_share).toBeCloseTo(0.15, 6);
+    expect(t.fixed).toBe(91200);
+  });
+
+  test('fewer units: the charges that follow the units fall, the fixed charges stay', () => {
+    const t = fc.tariffOf(SC1212);
+    const half = fc.chargesFor(55952 / 2, t);
+    expect(half.electricity_charges).toBe(Math.round(455093 / 2));
+    expect(half.welding_charges).toBe(Math.round(68264 / 2));
+    expect(half.fixed_charges).toBe(91200);
+    expect(half.net_amount).toBe(half.electricity_charges + half.fixed_charges + half.penalty_charges + half.welding_charges + half.tax_charges);
+  });
+});
+
+describe('this bill\'s units', () => {
+  const period = { start: '2026-09-26', end: '2026-10-26', days: 30 };
+
+  test('EB meter readings: exact so far; the rest at the last week\'s rate', () => {
+    const readings = [
+      { read_on: '2026-09-26', kwh: 100000 }, { read_on: '2026-10-14', kwh: 132000 }, { read_on: '2026-10-21', kwh: 144600 }
+    ];
+    const u = fc.unitsFromReadings(readings, period, '2026-10-23');
+    expect(u).toMatchObject({ so_far: 44600, as_of: '2026-10-21', measured: true });
+    expect(u.per_day).toBeCloseTo(12600 / 7, 6);              // 14 → 21 Oct
+    expect(u.rest).toBeCloseTo(12600 / 7 * 5, 6);             // 21 → 26 Oct
+  });
+
+  test('no reading on the bill\'s first day: the register is taken between the readings either side', () => {
+    const readings = [{ read_on: '2026-09-24', kwh: 96000 }, { read_on: '2026-09-28', kwh: 104000 }, { read_on: '2026-10-21', kwh: 144600 }];
+    expect(fc.unitsFromReadings(readings, period, '2026-10-23').so_far).toBeCloseTo(144600 - 100000, 6);
+    // nothing near the start, or nothing since: the readings cannot say
+    expect(fc.unitsFromReadings([{ read_on: '2026-10-21', kwh: 144600 }], period, '2026-10-23')).toBeNull();
+    expect(fc.unitsFromReadings([{ read_on: '2026-09-26', kwh: 100000 }], period, '2026-10-23')).toBeNull();
+  });
+
+  test('no readings: the last bills\' units per day, an estimate — its range from bill to bill', () => {
+    const u = fc.unitsFromBills([SC1212], period, at('2026-10-23', 12));
+    expect(u.measured).toBe(false);
+    expect(u.per_day).toBeCloseTo(55952 / 31, 6);
+    expect(u.so_far + u.rest).toBeCloseTo(55952 / 31 * 30, 6);
+    expect(u.low_per_day).toBeNull();
+    const two = fc.unitsFromBills([{ ...SC1212, from: '2026-08-26', to: '2026-09-26', units: 50000 }, SC1212], period, at('2026-10-23', 12));
+    expect(two.per_day).toBeCloseTo((50000 + 55952) / 62, 6);
+    expect(two.low_per_day).toBeCloseTo(50000 / 31, 6);
+    expect(two.high_per_day).toBeCloseTo(55952 / 31, 6);
   });
 });
 
