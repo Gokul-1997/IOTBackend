@@ -23,7 +23,7 @@ CREATE TABLE line(id SERIAL PRIMARY KEY, plant_id INT, company_id INT, name TEXT
 CREATE TABLE machines(id SERIAL PRIMARY KEY, plant_id INT, company_id INT, line_id INT, machine_serial_no TEXT,
   x_axis TEXT, y_axis TEXT, z_axis TEXT, fourth_axis TEXT, fifth_axis TEXT, twin_spindle TEXT, twin_table TEXT,
   atc_tool_capacity TEXT, model TEXT, mmc_no TEXT, controller TEXT, spindle_rpm TEXT, image_url TEXT,
-  hour_rate NUMERIC, api_key TEXT, is_active BOOLEAN DEFAULT TRUE);
+  hour_rate NUMERIC, api_key TEXT, program_path TEXT, controller_type TEXT, ip_address TEXT, is_active BOOLEAN DEFAULT TRUE);
 CREATE TABLE shifts(id INT PRIMARY KEY, plant_id INT, company_id INT, is_active BOOLEAN DEFAULT TRUE);
 CREATE TABLE machine_shift_config(plant_id INT, machine_id INT, shift_id INT);
 CREATE TABLE components(id SERIAL PRIMARY KEY, plant_id INT, company_id INT, machine_id INT,

@@ -1,0 +1,37 @@
+
+> frontend-iot@1.0.0 e2e
+> playwright test e2e/program-transfer.spec.ts e2e/fleet-pagination.spec.ts e2e/dashboard-first-paint.spec.ts --workers=2 --retries=0 --reporter=list
+
+[WebServer] (node:66852) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] Prebundling has been configured but will not be used because caching has been disabled.
+[WebServer] (node:66852) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 15 tests using 2 workers
+
+(node:66858) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66857) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66858) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66857) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   2 [chromium] › e2e/fleet-pagination.spec.ts:3:5 › a large fleet uses bounded pages, server totals and recovers a failed page request (1.5s)
+  ✓   1 [chromium] › e2e/dashboard-first-paint.spec.ts:95:7 › Alarms paints its data when the response lands after first render — with no click (2.0s)
+  ✓   3 [chromium] › e2e/program-transfer.spec.ts:91:5 › only a machine to choose: no company, no plant, no FTP or FANUC settings; the company's one gateway is online (604ms)
+  ✓   5 [chromium] › e2e/program-transfer.spec.ts:111:5 › two uploads for one machine wait in line: the first is next to send, the second waits behind it (1.3s)
+  ✓   4 [chromium] › e2e/dashboard-first-paint.spec.ts:95:7 › Downtime paints its data when the response lands after first render — with no click (1.6s)
+  ✓   6 [chromium] › e2e/program-transfer.spec.ts:140:5 › what the gateway reported: on the machine, refused with its reason, a backup that failed (535ms)
+  ✓   7 [chromium] › e2e/program-transfer.spec.ts:160:5 › a program the gateway took says so, flagged when no report comes; a backup nobody answered says so too (726ms)
+  ✓   8 [chromium] › e2e/program-transfer.spec.ts:186:5 › where the gateway sends a machine's programs is shown — program path, IP, controller — with the way to put it right (474ms)
+  ✓   9 [chromium] › e2e/program-transfer.spec.ts:204:5 › Backup now asks the gateway, and says it is waiting (488ms)
+  ✓  10 [chromium] › e2e/program-transfer.spec.ts:215:5 › a file is downloaded; deleting asks in the app first — a waiting upload leaves the line (1.9s)
+  ✓  11 [chromium] › e2e/program-transfer.spec.ts:238:5 › the company makes no gateway token here: with none yet, the page says S&T sets it up (482ms)
+  ✓  12 [chromium] › e2e/program-transfer.spec.ts:254:5 › a view-only role can look and download, nothing more (473ms)
+  ✓  13 [chromium] › e2e/program-transfer.spec.ts:267:5 › no Upload button for a company admin whose company was not given it: the page says who can switch it on (426ms)
+  ✓  14 [chromium] › e2e/program-transfer.spec.ts:277:5 › a notification about a file opens that machine with the file marked (490ms)
+  ✓  15 [chromium] › e2e/program-transfer.spec.ts:290:5 › fits a phone without sideways scrolling (386ms)
+
+  15 passed (20.5s)

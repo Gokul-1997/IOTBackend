@@ -1,0 +1,1 @@
+PASS disposable PostgreSQL: raw + hourly + alarm open/close + durable priority event + meter commit exactly once through Redis outage, DB outage and lost COMMIT reply; 043/048 tenant integrity and collector grants; short critical outbox survives clear; real VARCHAR(50) alarm fields preserve Unicode and full text, distinguish long labels, close, reopen and reconcile.

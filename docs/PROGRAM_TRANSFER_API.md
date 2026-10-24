@@ -276,6 +276,9 @@ The answer to a program report names the machine's next program:
   a report with the backup's own `file_id` (`BACKUP_NEEDS_NO_REPORT`).
 - The same report sent again (a retry after a lost answer) changes nothing
   and notifies no one twice: the answer then has `"unchanged": true`.
+- A final result cannot be replaced by a different status or message
+  (`409 REPORT_CONFLICT`). Reports for a removed program return
+  `409 FILE_REMOVED`; upload a new program to request a new transfer.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -305,6 +308,7 @@ Every error is JSON: `{"status":"error","code":"…","message":"…"}`.
 | 409 | `MACHINE_AMBIGUOUS` | (by name, from an older gateway) two machines share that name: send `machine_id` |
 | 404 | `NO_PROGRAM` | Nothing is waiting for that machine |
 | 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report: no such program / backup request in the company |
+| 409 | `REPORT_CONFLICT` / `FILE_REMOVED` | A final result conflicts with the report, or the program was removed |
 | 400 | `MACHINE_MISMATCH` | The `machine_id` sent with a report is not the program's (or request's) machine; or a name or IP sent with `machine_id` is not that machine's |
 | 400 | `BAD_STATUS` / `NO_MESSAGE` / `NOTHING_TO_REPORT` | Report: status must be DONE or FAILED; FAILED needs a message; send file_id or backup_request_id |
 | 400 | `BACKUP_NEEDS_NO_REPORT` | Report: that file_id is a backup the gateway sent — a backup needs no report |

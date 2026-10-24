@@ -1,3 +1,4 @@
+const sendError = require('../utils/controller-error');
 const service = require('./audit.service');
 
 exports.getLogs = async (req, res) => {
@@ -10,6 +11,6 @@ exports.getLogs = async (req, res) => {
     });
     res.json({ success: true, ...result });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    return sendError(e, req, res, { success: false });
   }
 };

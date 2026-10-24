@@ -1,0 +1,28 @@
+{
+  "fixture": "offline processor + per-message durable fsync, Redis down, DB writes waiting",
+  "machines": 1000,
+  "messages": 10000,
+  "duration_ms": 30963,
+  "messages_per_second": 323,
+  "admission_p50_ms": 3.005,
+  "admission_p95_ms": 3.97,
+  "rss_growth_mb": 29.4,
+  "event_loop_p99_ms": 11.24,
+  "journal": {
+    "segments": 1,
+    "bytes": 16520257,
+    "last_seq": 1792831298373000,
+    "appended": 10000,
+    "acked": 0,
+    "recovered": 0,
+    "refused": 0,
+    "corrupt": 0,
+    "durable_seq": 1792831298373000,
+    "failed": false,
+    "pending": 10000
+  },
+  "state": {
+    "machines": 1000,
+    "dedup_entries": 10000
+  }
+}

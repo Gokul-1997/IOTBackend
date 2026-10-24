@@ -1,0 +1,17 @@
+Live routing excluded machines with invalid placement; review their company, plant and active status. {
+  excluded: 2,
+  sample: [
+    { id: 888, reason: 'missing or invalid company_id' },
+    { id: 889, reason: 'is_active must be a boolean' }
+  ],
+  sample_limit: 25
+}
+Factory dashboard error: Error: Shift not found or access denied
+    at httpError (/Users/dharstecsolutions/Documents/Gokul/IOT/Backend/src/dashboard/window.js:16:13)
+    at resolveWindow (/Users/dharstecsolutions/Documents/Gokul/IOT/Backend/src/dashboard/window.js:88:29)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async exports.getFactoryDashboard (/Users/dharstecsolutions/Documents/Gokul/IOT/Backend/src/dashboard/factory.service.js:33:22)
+    at async exports.factory (/Users/dharstecsolutions/Documents/Gokul/IOT/Backend/src/dashboard/dashboard.controller.js:586:18) {
+  status: 404
+}
+Plant isolation passed: actual PostgreSQL, JWT HTTP routes, legacy/paged fleet, detail, all 9 analytics dashboards, charts, OEE and production reports, CSV/XLSX exports, shared-shift dropdowns, periodic assignees, legacy program guards, concurrent quality saves/partial shift bounds/duplicate preservation, Redis cache separation and Socket.IO subscriptions. Server-derived company/plant defeats forged claims; company admins remain company-wide.

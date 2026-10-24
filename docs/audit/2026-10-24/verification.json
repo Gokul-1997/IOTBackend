@@ -1,0 +1,250 @@
+{
+  "date": "2026-10-24",
+  "status": "Verified local fixes; production readiness blocked by documented deployment and capacity risks",
+  "checks": {
+    "backend": {
+      "suites": 119,
+      "passed": 2280
+    },
+    "collector": {
+      "suites": 22,
+      "passed": 399
+    },
+    "web_unit": {
+      "files": 46,
+      "passed": 350
+    },
+    "mobile": {
+      "passed": 57,
+      "typescript": "passed"
+    },
+    "desktop": {
+      "passed": 4
+    },
+    "browser_core": {
+      "passed": 68
+    },
+    "browser_program_transfer": {
+      "passed": 12
+    },
+    "browser_dashboard_slow_and_pagination": {
+      "passed": 3
+    }
+  },
+  "inventory_snapshot_counts": {
+    "backups": 9,
+    "root": 12,
+    "scripts": 2,
+    "FrontendIOT": 395,
+    "pms-backend": 66,
+    ".claude": 1,
+    "Backend": 432,
+    "MobileApp": 91
+  },
+  "evidence": [
+    {
+      "check": "backend",
+      "full_log_sha256": "44b5c7e588b1cb36f3dfa6dfaf51160c21612d71bc1b357611d272b9dfb3a923",
+      "full_log_bytes": 136
+    },
+    {
+      "check": "collector",
+      "full_log_sha256": "ec66393fd6d61f5c103bca0c62ead4b1be3ee82e862ea381e14d4c6a9b748bd0",
+      "full_log_bytes": 1144
+    },
+    {
+      "check": "web-unit",
+      "full_log_sha256": "1876b26e0ee873dd2ccd64dff3b9e78ab74c08c3aa0a3fe6d17e2dc0f56e7c48",
+      "full_log_bytes": 11793
+    },
+    {
+      "check": "mobile",
+      "full_log_sha256": "1f19f491adbdaf29dea8529797f473e1a69c968a1eafd4d7f04cc72faedaf2b9",
+      "full_log_bytes": 5243
+    },
+    {
+      "check": "web-build",
+      "full_log_sha256": "e38ed0aa14188b5d1a82c1cadbb4e131f12ecc789b0ec84a4f0983b8ab058927",
+      "full_log_bytes": 2993
+    },
+    {
+      "check": "desktop",
+      "full_log_sha256": "e151a92cf8d6ed0aa7ae548e57a255ee14dc9e0caf4add3f80c0685e1029a6db",
+      "full_log_bytes": 521
+    },
+    {
+      "check": "browser",
+      "full_log_sha256": "ac8d263b9a79466920d4b75a465933d2b47a11c767a135a03c8e93b15fd869bd",
+      "full_log_bytes": 13162
+    },
+    {
+      "check": "program-browser",
+      "full_log_sha256": "2d6b108eefb66dbb3da336c816f42dc9f9a6e20c292a10c3983f22b9c1370997",
+      "full_log_bytes": 2667
+    },
+    {
+      "check": "mobile-export",
+      "full_log_sha256": "9ea0c5fb6b2eaff428ab2767c8785b9179be81376d6b78d3bb22cec89f5db5a6",
+      "full_log_bytes": 1415
+    },
+    {
+      "check": "pms-database",
+      "full_log_sha256": "5afee29313c77b6ef853655087e5afefb5553f2582696fcccb5e4d018a5fe60e",
+      "full_log_bytes": 306
+    },
+    {
+      "check": "collector-postgres",
+      "full_log_sha256": "754a64eca5698bd0a20f04f6297f81789809abcbc03708b7d6128259502f4183",
+      "full_log_bytes": 369
+    },
+    {
+      "check": "plant-isolation",
+      "full_log_sha256": "4529b6bfec893701070b5d96fd13350c50ba622878e327f40c1b929bf95a3896",
+      "full_log_bytes": 1355
+    },
+    {
+      "check": "auth-revocation",
+      "full_log_sha256": "85e8a04b2e34bb4abd1df3f08df66c90c74c5472d3d88e9a13557594027174a3",
+      "full_log_bytes": 305
+    },
+    {
+      "check": "media",
+      "full_log_sha256": "85dd1d3fc9223396304413d7d3bbe77343983cfa6eb807e7bdf00ad6f6fe246d",
+      "full_log_bytes": 370
+    },
+    {
+      "check": "legacy-media",
+      "full_log_sha256": "e08a171c3d0f2a9cb09293f5ad3116f0934136c95fdc3d70585ee86b9134451e",
+      "full_log_bytes": 418
+    },
+    {
+      "check": "alarms",
+      "full_log_sha256": "5bae1cf0ddd09e788d86036d68e9e6195f585a5203b11fdd49a7106c69bded90",
+      "full_log_bytes": 584
+    },
+    {
+      "check": "shutdown",
+      "full_log_sha256": "fd66d0e591a02631a1e6998fb886b4c1447248d06ad1b96a6446b43f2e6048a9",
+      "full_log_bytes": 180
+    },
+    {
+      "check": "dashboard-program-browser",
+      "full_log_sha256": "a63e7aad8d070862da3e38868f342f40f812ae2077416b3123a0558a12d65174",
+      "full_log_bytes": 3708
+    }
+  ],
+  "changes": [
+    {
+      "repository": "Backend",
+      "base_head": "cd26496d3165889670fc9c5f39ea5fdf77abd360",
+      "changes": [
+        " M __tests__/integration/auth.routes.test.js",
+        " M __tests__/integration/socket.tenant-isolation.test.js",
+        " M __tests__/services/auth.service.test.js",
+        " M __tests__/services/company.default-roles.test.js",
+        " M __tests__/services/company.disabled.test.js",
+        " M __tests__/services/role.assignment.test.js",
+        " M __tests__/services/user.snt-scope.test.js",
+        " M docs/PROGRAM_TRANSFER_API.md",
+        " M package-lock.json",
+        " M package.json",
+        " M src/app.js",
+        " M src/audit/audit.controller.js",
+        " M src/auth/auth.service.js",
+        " M src/companies/company.service.js",
+        " M src/lib/socket-server.js",
+        " M src/middleware/access.middleware.js",
+        " M src/notifications/notification.controller.js",
+        " M src/programs/program.service.js",
+        " M src/reports/operator.report.controller.js",
+        " M src/server.js",
+        " M tools/architecture/verify-plant-read-isolation.cjs",
+        " M tools/architecture/verify-pms-integrity.cjs",
+        " M tools/gateway/README.md",
+        " M tools/gateway/mexa-gateway.js",
+        " M tools/loadtest/multitenant/setup.mjs",
+        "?? __tests__/lib/readiness.test.js",
+        "?? __tests__/ops/shutdown.test.js",
+        "?? __tests__/services/program-report-finality.test.js",
+        "?? __tests__/tools/gateway-safety.test.js",
+        "?? docs/PLATFORM_AUDIT_2026-10-24.md",
+        "?? docs/audit/2026-10-24/admission-after.json",
+        "?? docs/audit/2026-10-24/admission-before.json",
+        "?? docs/audit/2026-10-24/alarms.log",
+        "?? docs/audit/2026-10-24/auth-revocation.log",
+        "?? docs/audit/2026-10-24/backend.log",
+        "?? docs/audit/2026-10-24/browser.log",
+        "?? docs/audit/2026-10-24/collector-postgres.log",
+        "?? docs/audit/2026-10-24/collector.log",
+        "?? docs/audit/2026-10-24/configured-database-summary.json",
+        "?? docs/audit/2026-10-24/dependencies-Backend.json",
+        "?? docs/audit/2026-10-24/dependencies-FrontendIOT.json",
+        "?? docs/audit/2026-10-24/dependencies-MobileApp.json",
+        "?? docs/audit/2026-10-24/dependencies-pms-backend.json",
+        "?? docs/audit/2026-10-24/desktop.log",
+        "?? docs/audit/2026-10-24/host.json",
+        "?? docs/audit/2026-10-24/legacy-media.log",
+        "?? docs/audit/2026-10-24/media.log",
+        "?? docs/audit/2026-10-24/mobile-export.log",
+        "?? docs/audit/2026-10-24/mobile.log",
+        "?? docs/audit/2026-10-24/password-hash.json",
+        "?? docs/audit/2026-10-24/plant-isolation.log",
+        "?? docs/audit/2026-10-24/platform-benchmark.json",
+        "?? docs/audit/2026-10-24/pms-database.log",
+        "?? docs/audit/2026-10-24/program-browser.log",
+        "?? docs/audit/2026-10-24/shutdown.log",
+        "?? docs/audit/2026-10-24/source-inventory.txt",
+        "?? docs/audit/2026-10-24/verification.json",
+        "?? docs/audit/2026-10-24/web-build.log",
+        "?? docs/audit/2026-10-24/web-unit.log",
+        "?? src/lib/readiness.js",
+        "?? tools/loadtest/password-hash.cjs",
+        "?? tools/loadtest/platform-local.cjs"
+      ]
+    },
+    {
+      "repository": "FrontendIOT",
+      "base_head": "d8d5b8ac7ab72d4bbbd2f1f56c348985e7a83c51",
+      "changes": [
+        " M README.md",
+        " M e2e/fixtures/auth.ts",
+        " M e2e/fleet-pagination.spec.ts",
+        " M e2e/program-transfer.spec.ts",
+        " M package-lock.json",
+        " M package.json",
+        " M proxy.conf.json",
+        " M src/app/core/services/auth.service.spec.ts",
+        " M src/app/core/services/auth.service.ts",
+        " M src/environments/environment.ts",
+        " M src/testing/fake-socket-io.ts"
+      ]
+    },
+    {
+      "repository": "MobileApp",
+      "base_head": "cf0c23aaf1541d3d37c38c386c5e540cd6906452",
+      "changes": [
+        " M App.tsx",
+        " M app.json",
+        " M package-lock.json",
+        " M package.json",
+        " D src/api/pushNotifications.ts",
+        " M src/store/authStore.ts",
+        "?? .github/workflows/ci.yml",
+        "?? .nvmrc",
+        "?? tests/bootstrap.test.cjs"
+      ]
+    },
+    {
+      "repository": "pms-backend",
+      "base_head": "190ada50c9cb271e81152be1dddd48678ad7dac9",
+      "changes": [
+        " M package-lock.json",
+        " M src/lib/message-processor.js",
+        " M src/lib/parts-delta.js",
+        "?? __tests__/counter-integrity.test.js"
+      ]
+    }
+  ],
+  "unique_test_total": 3173,
+  "log_extract_normalization": "ANSI escapes and trailing whitespace removed; hashes refer to the original full transient logs."
+}

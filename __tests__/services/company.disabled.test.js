@@ -20,7 +20,7 @@ jest.mock('../../src/redis', () => mockRedis);
 const mockRealtime = { disconnectUsers: jest.fn(), emitToUser: jest.fn(), setIo: jest.fn() };
 jest.mock('../../src/lib/realtime', () => mockRealtime);
 jest.mock('jsonwebtoken', () => ({ sign: jest.fn(() => 'signed-jwt-token'), verify: jest.fn() }));
-jest.mock('bcryptjs', () => ({ compare: jest.fn(async () => true), hash: jest.fn(async () => 'hashed') }));
+jest.mock('bcrypt', () => ({ compare: jest.fn(async () => true), hash: jest.fn(async () => 'hashed') }));
 jest.mock('../../src/utils/nodemailer', () => ({ sendBulkEmails: jest.fn(), sendEmail: jest.fn(async () => {}) }));
 jest.mock(
   '../../src/utils/nodemailer/emailTemplates/generateResetPasswordTemplate',
@@ -30,7 +30,7 @@ jest.mock(
 process.env.JWT_SECRET = 'test-secret';
 
 const jwt    = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const middleware = require('../../src/middleware/auth.middleware');
 const auth       = require('../../src/auth/auth.service');

@@ -79,7 +79,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   process.env.STORAGE_ROOT=path.join(temp,'storage');
   process.env.PROGRAM_TRANSFER_DIR=path.join(temp,'program-files');
   await pool.query(`
-   ALTER TABLE machines ADD COLUMN ip_address TEXT, ADD COLUMN controller_ip TEXT, ADD COLUMN program_path TEXT;
+   ALTER TABLE machines ADD COLUMN controller_ip TEXT;
    UPDATE machines SET ip_address='192.168.1.'||id,program_path='/programs';
    CREATE TABLE program_devices(id SERIAL PRIMARY KEY,company_id INT,machine_id INT,label TEXT,token_prefix TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),last_seen_at TIMESTAMPTZ,last_seen_ip TEXT,agent_version TEXT,revoked_at TIMESTAMPTZ);
    CREATE TABLE program_gateway_tokens(id SERIAL PRIMARY KEY,company_id INT,token_prefix TEXT,token_hash TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),last_seen_at TIMESTAMPTZ,last_seen_ip TEXT,agent_version TEXT,revoked_at TIMESTAMPTZ);
@@ -92,7 +92,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
    INSERT INTO program_jobs(company_id,machine_id,machine_serial,action,program_name,file_id,requested_by,program_path)VALUES(4,7,'VMC-7','SEND','O7.nc',1,1,'/programs'),(4,10,'Other plant','SEND','O10.nc',2,2,'/programs'),(5,9,'VMC-9','SEND','O9.nc',3,1,'/programs');
    INSERT INTO users(id,company_id,plant_id,username,is_active)VALUES(4,5,9,'Foreign technician',TRUE),(5,4,8,'Inactive technician',FALSE);
   `);
-  for(const name of ['039_program_current.sql','040_program_commands.sql'])await pool.query(fs.readFileSync(path.join(repo,'src/migrations',name),'utf8'));
+  for(const name of ['039_program_current.sql','040_program_commands.sql','059_program_sent_to_gateway.sql'])await pool.query(fs.readFileSync(path.join(repo,'src/migrations',name),'utf8'));
   await pool.query("UPDATE program_files SET folder='company-'||company_id||'/machine-'||machine_id");
   fs.mkdirSync(path.join(temp,'program-files','company-4','machine-7'),{recursive:true});
   fs.writeFileSync(path.join(temp,'program-files','company-4','machine-7','own.nc'),'M30');
@@ -122,7 +122,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   await new Promise((resolve,reject)=>{server.on('error',reject);server.listen(0,'127.0.0.1',resolve);});
   const url=`http://127.0.0.1:${server.address().port}`;
   const modules=['factory','maintenance','preventive','periodic','alarms','downtime','operators','oee','energy'];
-  const permissions=['page:dashboard:view','page:dashboard:live:view','page:charts:view','page:reports:view','page:reports:export','page:oee-reports:view','page:oee-reports:export','page:maintenance-report:view','page:maintenance-report:export','page:programs:view','page:programs:transfer','page:programs:delete','page:machines:edit','machine.update',...modules.flatMap(m=>[`page:analytics-${m}:view`,`page:analytics-${m}:export`])];
+  const permissions=['page:dashboard:view','page:dashboard:live:view','page:charts:view','page:reports:view','page:reports:export','page:oee-reports:view','page:oee-reports:export','page:maintenance-report:view','page:maintenance-report:export','page:programs:view','page:programs:transfer','page:programs:fetch','page:programs:delete','page:machines:edit','machine.update',...modules.flatMap(m=>[`page:analytics-${m}:view`,`page:analytics-${m}:export`])];
   function token(id,roles=['MAINTENANCE']){return jwt.sign({user_id:id,company_id:5,plant_id:999,roles,permissions},process.env.JWT_SECRET);}
   async function get(route,id=1,roles){const response=await fetch(url+route,{headers:{authorization:`Bearer ${token(id,roles)}`}});const raw=await response.text();let body;try{body=JSON.parse(raw);}catch{body=raw;}assert.equal(response.status,200,`${route}: ${raw}`);return body;}
   const today=(await pool.query("SELECT (NOW() AT TIME ZONE 'Asia/Kolkata')::date::text AS day")).rows[0].day;
@@ -154,7 +154,7 @@ function inject(relative, value) { const p = require.resolve(path.join(repo,rela
   assert.deepEqual((await get('/api/dashboard/energy/meter')).data.meters.map(m=>m.id),[7]);
   assert.deepEqual((await get('/api/reports/operator-performance')).data.map(r=>r.operator_id),[1]);
   assert.deepEqual((await get('/api/oee/reports')).data.map(r=>r.machine_id),[7]);
-  assert(!String(await get('/api/oee/export')).includes('Other plant'));
+  assert(!String(await get(`/api/oee/export?from_date=${today}&to_date=${today}`)).includes('Other plant'));
   for(const type of ['production','hourly-oee','shift-oee']) {
     const response=await fetch(url+`/api/reports/${type}?date=${today}`,{headers:{authorization:`Bearer ${token(1)}`}});assert.equal(response.status,200);
     const ExcelJS=require('exceljs'),workbook=new ExcelJS.Workbook();await workbook.xlsx.load(Buffer.from(await response.arrayBuffer()));

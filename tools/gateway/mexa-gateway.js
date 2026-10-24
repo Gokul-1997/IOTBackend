@@ -24,7 +24,7 @@
  * folder, from the Machines page).
  * Nothing else changes.
  *
- * Node.js 20 or newer, nothing to install:
+ * Node.js 20.10 or newer, nothing to install:
  *
  *   MEXA_URL=https://stmapi.stmcnc.com MEXA_TOKEN=mxg_… PROGRAM_DIR=./machines node mexa-gateway.js
  */
@@ -33,6 +33,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const { constants } = require('fs');
 
 const DEVICE_API = '/api/device/v1';
 const AGENT = 'mexa-gateway 3';
@@ -69,8 +70,11 @@ const folderName = name => String(name ?? '').trim().replace(/[\/\\:*?"<>|\u0000
 
 const sha256 = data => crypto.createHash('sha256').update(data).digest('hex');
 const sleep = (ms, signal) => new Promise(resolve => {
-  const timer = setTimeout(resolve, ms);
-  signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  let timer;
+  const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+  if (signal?.aborted) return done();
+  timer = setTimeout(done, ms);
+  signal?.addEventListener('abort', done, { once: true });
 });
 
 /**
@@ -78,7 +82,9 @@ const sleep = (ms, signal) => new Promise(resolve => {
  * machineDirs  { "VMC-01": "\\\\cnc01\\programs", … } — when given, only these
  *              machines are served here (another gateway may serve the rest)
  */
-function createGateway({ url, token, programDir = 'machines', machineDirs = null, log = () => {}, fetch: send = globalThis.fetch }) {
+function createGateway({ url, token, programDir = 'machines', machineDirs = null, log = () => {}, fetch: send = globalThis.fetch, requestTimeoutMs = 30000, maxProgramBytes = 20 * 1024 * 1024 }) {
+  if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 300000) throw new Error('Request timeout must be 1–300000 milliseconds');
+  if (!Number.isSafeInteger(maxProgramBytes) || maxProgramBytes < 1 || maxProgramBytes > 100 * 1024 * 1024) throw new Error('Program size limit must be 1–104857600 bytes');
   // the server's address, or the API address S&T gave with the token — either works
   const root = String(url).replace(/\/+$/, '');
   const base = root.endsWith(DEVICE_API) ? root : root + DEVICE_API;
@@ -86,12 +92,61 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
   const serves = name => !dirs || dirs.has(String(name).trim().toLowerCase());
   const folderOf = name => dirs?.get(String(name).trim().toLowerCase()) || path.resolve(programDir, folderName(name));
 
+  let runSignal;
+  let running = false;
+  let ticking;
+  const checkStopped = () => { if (runSignal?.aborted) throw Object.assign(new Error('Gateway stopped'), { name: 'AbortError' }); };
+
   async function call(method, route, { body, headers } = {}) {
-    const res = await send(base + route, { method, body, headers: { Authorization: `Bearer ${token}`, 'X-Agent-Version': AGENT, ...headers } });
-    if (res.ok) return res;
-    let detail = {};
-    try { detail = await res.json(); } catch { /* not JSON */ }
-    throw new ServerError(detail.message || `${method} ${route} answered ${res.status}`, res.status, detail.code);
+    checkStopped();
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    runSignal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, requestTimeoutMs);
+    try {
+      const res = await send(base + route, { method, body, signal: controller.signal, redirect: 'error',
+        headers: { Authorization: `Bearer ${token}`, 'X-Agent-Version': AGENT, ...headers } });
+      // Read under the same deadline as the headers, and stop before buffering
+      // an unbounded response, including one sent without Content-Length.
+      const limit = route.startsWith('/program?') && res.ok ? maxProgramBytes : 4 * 1024 * 1024;
+      if (Number(res.headers.get('content-length')) > limit) {
+        controller.abort();
+        throw new Error('Gateway response exceeds its size limit');
+      }
+      const chunks = [];
+      let bytes = 0;
+      if (res.body) {
+        const reader = res.body.getReader();
+        const cancel = () => { void reader.cancel(controller.signal.reason).catch(() => {}); };
+        controller.signal.addEventListener('abort', cancel, { once: true });
+        if (controller.signal.aborted) cancel();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            controller.signal.throwIfAborted();
+            if (done) break;
+            bytes += value.byteLength;
+            if (bytes > limit) {
+              void reader.cancel().catch(() => {});
+              throw new Error('Gateway response exceeds its size limit');
+            }
+            chunks.push(Buffer.from(value));
+          }
+        } finally {
+          controller.signal.removeEventListener('abort', cancel);
+          reader.releaseLock();
+        }
+      }
+      const answer = new Response([204, 205, 304].includes(res.status) ? null : Buffer.concat(chunks),
+        { status: res.status, statusText: res.statusText, headers: res.headers });
+      if (answer.ok) return answer;
+      let detail = {};
+      try { detail = await answer.json(); } catch { /* not JSON */ }
+      throw new ServerError(detail.message || `${method} ${route} answered ${res.status}`, res.status, detail.code);
+    } finally {
+      clearTimeout(timer);
+      runSignal?.removeEventListener('abort', abort);
+    }
   }
 
   const report = async body => (await call('POST', '/report', { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })).json();
@@ -108,27 +163,72 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
      a Fanuc), for such a version; this folder version never takes it for a
      folder on this PC — only PROGRAM_DIR and MACHINE_DIRS, set here. ── */
 
-  /** Put the program where the machine takes it from — whole, or not at all. */
-  async function writeToMachine(machine, name, data) {
-    const dir = folderOf(machine.machine);
-    await fs.mkdir(dir, { recursive: true });
-    const partial = path.join(dir, `.${name}.part`);
-    await fs.writeFile(partial, data);
-    await fs.rename(partial, path.join(dir, name));
+  async function readLocal(filename, { metadata = false } = {}) {
+    const file = await fs.open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > maxProgramBytes) throw new Error('Program is not a regular file within the configured size limit');
+      const chunks = [];
+      let size = 0;
+      while (true) {
+        checkStopped();
+        const chunk = Buffer.alloc(64 * 1024);
+        const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+        if (!bytesRead) break;
+        size += bytesRead;
+        if (size > maxProgramBytes) throw new Error('Program exceeds the configured size limit');
+        chunks.push(chunk.subarray(0, bytesRead));
+      }
+      const data = Buffer.concat(chunks);
+      return metadata ? { data, mode: stat.mode & 0o777 } : data;
+    } finally { await file.close(); }
   }
 
-  /** The program to back up: the newest program in the machine's folder. */
+  /** Keep a recoverable previous version before replacing an existing program. */
+  async function writeToMachine(machine, name, data) {
+    checkStopped();
+    const dir = folderOf(machine.machine);
+    await fs.mkdir(dir, { recursive: true });
+    const destination = path.join(dir, name);
+    let previous;
+    try { previous = await readLocal(destination, { metadata: true }); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (previous && sha256(previous.data) === sha256(data)) return; // a lost report reply must not create another overwrite
+    if (previous) {
+      const versions = path.join(dir, '.mexa-backups');
+      await fs.mkdir(versions, { recursive: true, mode: 0o700 });
+      const version = `${name}.${Date.now()}-${crypto.randomUUID()}`;
+      await fs.writeFile(path.join(versions, version), previous.data, { flag: 'wx', mode: 0o600, flush: true });
+      await fs.writeFile(path.join(versions, `${version}.json`), JSON.stringify({
+        program_name: name, machine_id: machine.machine_id ?? null, machine: machine.machine,
+        saved_at: new Date().toISOString(), size_bytes: previous.data.length, sha256: sha256(previous.data)
+      }), { flag: 'wx', mode: 0o600, flush: true });
+    }
+    const partial = path.join(dir, `.${name}.${crypto.randomUUID()}.part`);
+    try {
+      // New files keep the previous gateway's umask-based access; replacements
+      // preserve the CNC/DNC account's existing read permissions.
+      await fs.writeFile(partial, data, { flag: 'wx', signal: runSignal, mode: 0o666, flush: true });
+      if (previous) await fs.chmod(partial, previous.mode);
+      checkStopped();
+      await fs.rename(partial, destination);
+      if (sha256(await readLocal(destination)) !== sha256(data)) throw new Error('Machine program read-back did not match the downloaded file');
+    } finally { await fs.unlink(partial).catch(() => {}); }
+  }
+
+  /** The newest regular program in the machine's folder, bounded before reading. */
   async function readFromMachine(machine) {
     const dir = folderOf(machine.machine);
     let newest = null;
     for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      checkStopped();
       if (!entry.isFile() || entry.name.startsWith('.')) continue;
       const full = path.join(dir, entry.name);
-      const { mtimeMs } = await fs.stat(full);
+      const { mtimeMs } = await fs.lstat(full);
       if (!newest || mtimeMs > newest.mtimeMs) newest = { full, mtimeMs };
     }
     if (!newest) throw new Error(`No program in ${dir} to back up`);
-    return { name: path.basename(newest.full), data: await fs.readFile(newest.full) };
+    return { name: safeName(path.basename(newest.full)), data: await readLocal(newest.full) };
   }
 
   /* ── the round's two jobs ── */
@@ -143,6 +243,7 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
     const who = named(machine);
     const res = await call('GET', `/program?${new URLSearchParams(who)}`);
     const fileId = Number(res.headers.get('x-file-id'));
+    if (!Number.isSafeInteger(fileId) || fileId <= 0) throw new Error('Server returned an invalid program file ID');
     const data = Buffer.from(await res.arrayBuffer());
     let name = machine.program?.program_name || `file ${fileId}`;
     try {
@@ -206,9 +307,20 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
   }
 
   /** One round: one /status for every machine, then deliver and back up as asked. */
-  async function tick() {
+  async function round() {
     const status = await (await call('GET', '/status')).json();
+    // Sanitizing names can map distinct machines to the same folder. Refuse
+    // before writing any file; MACHINE_DIRS can assign distinct locations.
+    const destinations = new Set();
     for (const machine of status.machines || []) {
+      if (!serves(machine.machine)) continue;
+      const dir = folderOf(machine.machine);
+      const key = process.platform === 'win32' || process.platform === 'darwin' ? dir.toLowerCase() : dir;
+      if (destinations.has(key)) throw new Error('Two machines resolve to the same program folder; configure distinct MACHINE_DIRS');
+      destinations.add(key);
+    }
+    for (const machine of status.machines || []) {
+      checkStopped();
       if (!serves(machine.machine)) continue;
       if (machine.program) await deliverAll(machine);
       if (machine.backup_request) await backup(machine);
@@ -216,10 +328,22 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
     return status;
   }
 
+  function tick() {
+    if (!ticking) {
+      const work = round().finally(() => { if (ticking === work) ticking = null; });
+      ticking = work;
+    }
+    return ticking;
+  }
+
   /** Round after round until stopped; slower while the server keeps failing. A wrong token stops it. */
   async function run({ signal } = {}) {
+    if (running) throw new Error('Gateway is already running');
+    running = true;
+    runSignal = signal;
     let failures = 0;
     let announced = false;
+    try {
     while (!signal?.aborted) {
       let wait;
       try {
@@ -233,6 +357,7 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
         failures = 0;
         wait = Math.min(300, Math.max(5, Number(status.poll_seconds) || 15));
       } catch (err) {
+        if (signal?.aborted) break;
         if (err.fatal) {
           log(`Stopped: ${err.message}`);
           throw err;
@@ -244,16 +369,18 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
       }
       await sleep(wait * 1000, signal);
     }
+    } finally { runSignal = undefined; running = false; }
   }
 
   return { tick, run, deliver, deliverAll, backup, folderOf };
 }
 
-module.exports = { createGateway, safeName, folderName, ServerError };
+module.exports = { createGateway, safeName, folderName, ServerError, sleep };
 
 /* ── run from the command line ── */
 if (require.main === module) {
-  const { MEXA_URL, MEXA_TOKEN, PROGRAM_DIR = 'machines', MACHINE_DIRS } = process.env;
+  const { MEXA_URL, MEXA_TOKEN, PROGRAM_DIR = 'machines', MACHINE_DIRS,
+    GATEWAY_REQUEST_TIMEOUT_MS = '30000', GATEWAY_MAX_PROGRAM_BYTES = '20971520' } = process.env;
   const log = message => console.log(`${new Date().toISOString()}  ${message}`);
   if (!MEXA_URL || !MEXA_TOKEN) {
     console.error('Set MEXA_URL (the MEXA server, e.g. https://stmapi.stmcnc.com) and MEXA_TOKEN (the company\'s mxg_ token from S&T).');
@@ -275,7 +402,8 @@ if (require.main === module) {
   }
   const controller = new AbortController();
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { log('Stopping.'); controller.abort(); });
-  createGateway({ url: MEXA_URL, token: MEXA_TOKEN, programDir: PROGRAM_DIR, machineDirs, log })
+  createGateway({ url: MEXA_URL, token: MEXA_TOKEN, programDir: PROGRAM_DIR, machineDirs, log,
+    requestTimeoutMs: Number(GATEWAY_REQUEST_TIMEOUT_MS), maxProgramBytes: Number(GATEWAY_MAX_PROGRAM_BYTES) })
     .run({ signal: controller.signal })
     .then(() => process.exit(0), () => process.exit(1));
 }

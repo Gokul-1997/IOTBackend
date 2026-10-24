@@ -1,0 +1,64 @@
+chunk-ZYO73R3B.js                                                | -                                                             |   6.05 kB |
+chunk-TTKXB2U7.js                                                | -                                                             |   5.80 kB |
+spec-app-shared-chart-memo.js                                    | spec-app-shared-chart-memo                                    |   5.69 kB |
+spec-app-shared-pause-offscreen.directive.js                     | spec-app-shared-pause-offscreen.directive                     |   5.66 kB |
+chunk-C56JKOKH.js                                                | -                                                             |   5.60 kB |
+chunk-JBWBLPNK.js                                                | -                                                             |   5.19 kB |
+spec-app-layout-nav-menu.js                                      | spec-app-layout-nav-menu                                      |   5.18 kB |
+spec-app-core-guards-company-admin.guard.js                      | spec-app-core-guards-company-admin.guard                      |   4.83 kB |
+spec-app-shared-meter-panel-meter-panel.component.js             | spec-app-shared-meter-panel-meter-panel.component             |   4.51 kB |
+spec-app-shared-stored-image.directive.js                        | spec-app-shared-stored-image.directive                        |   4.13 kB |
+spec-app-core-services-theme.service.js                          | spec-app-core-services-theme.service                          |   4.11 kB |
+chunk-IBEFV5KW.js                                                | -                                                             |   3.63 kB |
+spec-app-shared-metric-help-metric-help.content.js               | spec-app-shared-metric-help-metric-help.content               |   2.93 kB |
+spec-app-core-services-socket.service.js                         | spec-app-core-services-socket.service                         |   2.82 kB |
+chunk-TFKVPRMT.js                                                | -                                                             |   2.79 kB |
+spec-app-core-guards-snt-super.guard.js                          | spec-app-core-guards-snt-super.guard                          |   2.77 kB |
+spec-app-shared-linked-filters.js                                | spec-app-shared-linked-filters                                |   2.72 kB |
+spec-app-core-guards-admin.guard.js                              | spec-app-core-guards-admin.guard                              |   2.71 kB |
+spec-app-core-guards-assistant.guard.js                          | spec-app-core-guards-assistant.guard                          |   2.50 kB |
+spec-app-shared-auto-apply.directive.js                          | spec-app-shared-auto-apply.directive                          |   2.17 kB |
+chunk-GRPDHFZE.js                                                | -                                                             |   1.97 kB |
+spec-app-shared-linked-record.js                                 | spec-app-shared-linked-record                                 |   1.94 kB |
+chunk-KWLO7DZV.js                                                | -                                                             |   1.89 kB |
+spec-app-shared-report-file.js                                   | spec-app-shared-report-file                                   |   1.89 kB |
+chunk-HVAIHREL.js                                                | -                                                             |   1.88 kB |
+chunk-DSEJXRN7.js                                                | -                                                             |   1.85 kB |
+chunk-FJH2Y77Y.js                                                | -                                                             |   1.84 kB |
+spec-app-shared-visible-refresh.js                               | spec-app-shared-visible-refresh                               |   1.75 kB |
+spec-app-core-guards-auth.guard.js                               | spec-app-core-guards-auth.guard                               |   1.73 kB |
+chunk-V4YQJGXC.js                                                | -                                                             |   1.61 kB |
+spec-app-shared-enum-label.pipe.js                               | spec-app-shared-enum-label.pipe                               |   1.56 kB |
+spec-app-shared-lost-cost.js                                     | spec-app-shared-lost-cost                                     |   1.34 kB |
+chunk-TRETFS6C.js                                                | -                                                             |   1.31 kB |
+chunk-XRT5VKLV.js                                                | -                                                             |   1.27 kB |
+spec-app-shared-updated-label.js                                 | spec-app-shared-updated-label                                 |   1.25 kB |
+init-testbed.js                                                  | init-testbed                                                  |   1.21 kB |
+spec-app-shared-report-value.js                                  | spec-app-shared-report-value                                  |   1.12 kB |
+spec-app-shared-format-number.js                                 | spec-app-shared-format-number                                 |   1.02 kB |
+vitest-mock-patch.js                                             | vitest-mock-patch                                             | 974 bytes |
+chunk-NQLI3PDR.js                                                | -                                                             | 934 bytes |
+chunk-CNTWA3AV.js                                                | -                                                             | 915 bytes |
+spec-app-shared-severity.js                                      | spec-app-shared-severity                                      | 852 bytes |
+spec-app-core-ui-table-scroll-hints.js                           | spec-app-core-ui-table-scroll-hints                           | 833 bytes |
+chunk-XCLEPD66.js                                                | -                                                             | 703 bytes |
+chunk-5CXXLYBQ.js                                                | -                                                             | 659 bytes |
+chunk-7L6T2VKO.js                                                | -                                                             | 606 bytes |
+chunk-PWKCTJ5A.js                                                | -                                                             | 348 bytes |
+spec-app-sanity.js                                               | spec-app-sanity                                               | 155 bytes |
+
+                                                                 | Initial total                                                 |   1.23 MB
+
+Lazy chunk files                                                 | Names                                                         |  Raw size
+chunk-Y7QYZHGE.js                                                | fake-socket-io                                                | 196 bytes |
+
+Application bundle generation complete. [3.108 seconds] - 2026-10-24T08:40:10.890Z
+
+
+ RUN  v4.1.12 /Users/dharstecsolutions/Documents/Gokul/IOT/FrontendIOT
+
+
+ Test Files  46 passed (46)
+      Tests  350 passed (350)
+   Start at  14:10:11
+   Duration  1.68s (transform 1.56s, setup 2.01s, import 2.90s, tests 1.59s, environment 18.80s)

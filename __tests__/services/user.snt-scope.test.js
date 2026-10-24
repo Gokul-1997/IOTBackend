@@ -16,7 +16,7 @@
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 const { mockDb, resetDb } = require('../helpers/mockDb');
-jest.mock('bcryptjs', () => ({ hash: jest.fn(async () => 'hashed'), compare: jest.fn(async () => true) }));
+jest.mock('bcrypt', () => ({ hash: jest.fn(async () => 'hashed'), compare: jest.fn(async () => true) }));
 const svc = require('../../src/users/user.service');
 
 const snt = { id: 1, is_snt_super: true, company_id: null };

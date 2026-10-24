@@ -12,7 +12,7 @@ import { createRequire } from 'module';
 import fs from 'fs';
 const require = createRequire(import.meta.url);
 const { Pool } = require(new URL('../../../node_modules/pg', import.meta.url).pathname);
-const bcrypt = require(new URL('../../../node_modules/bcryptjs', import.meta.url).pathname);
+const bcrypt = require(new URL('../../../node_modules/bcrypt', import.meta.url).pathname);
 
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
 const BASE = arg('base', 'http://127.0.0.1:58000');

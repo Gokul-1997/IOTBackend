@@ -571,14 +571,14 @@ exports.gatewayReport = async (gateway, body = {}) => {
          FROM machines m
         WHERE f.id = $1 AND f.company_id = $2 AND f.kind = 'NEW' AND m.id = f.machine_id
           AND ($5::int IS NULL OR f.machine_id = $5::int)
-          AND (f.delivery_status IS DISTINCT FROM $3 OR f.delivery_message IS DISTINCT FROM $4)
+          AND f.delivery_status IS NULL AND f.deleted_at IS NULL
         RETURNING f.id, f.machine_id, f.program_name, f.uploaded_by, m.machine_serial_no`,
       [id, gateway.company_id, status, status === 'DONE' ? null : message, named?.id ?? null]
     );
     let row = file;
     if (!row) {
       ({ rows: [row] } = await pool.query(
-        `SELECT f.id, f.kind, f.machine_id, m.machine_serial_no
+        `SELECT f.id, f.kind, f.machine_id, f.delivery_status, f.delivery_message, f.deleted_at, m.machine_serial_no
            FROM program_files f JOIN machines m ON m.id = f.machine_id
           WHERE f.id = $1 AND f.company_id = $2`,
         [id, gateway.company_id]
@@ -592,6 +592,11 @@ exports.gatewayReport = async (gateway, body = {}) => {
           + 'Report DONE or FAILED only for a program from GET /status (program.file_id).', 'BACKUP_NEEDS_NO_REPORT');
       }
       if (named && Number(row.machine_id) !== Number(named.id)) throw mismatch(`Program ${id}`, row);
+      if (row.deleted_at) throw fail('This program was removed. Its delivery report cannot be changed.', 'FILE_REMOVED', 409);
+      if (row.delivery_status && (row.delivery_status !== status ||
+          (row.delivery_message ?? null) !== (status === 'DONE' ? null : message))) {
+        throw fail('This program already has a final delivery result. Upload it again to request another transfer.', 'REPORT_CONFLICT', 409);
+      }
     }
     const machine = { id: row.machine_id, company_id: gateway.company_id, machine_serial_no: row.machine_serial_no };
     if (file?.uploaded_by) {

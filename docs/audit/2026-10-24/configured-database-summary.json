@@ -1,0 +1,131 @@
+{
+  "scope": "Configured database metadata only; enforced READ ONLY transaction; no customer records read; no mutations",
+  "readonly": [
+    {
+      "transaction_read_only": "on"
+    }
+  ],
+  "versions": [
+    {
+      "postgres": "14.21 (Ubuntu 14.21-1.pgdg24.04+1)",
+      "timescale": "2.19.3"
+    }
+  ],
+  "connection": [
+    {
+      "ssl": false
+    }
+  ],
+  "role": [
+    {
+      "rolsuper": true,
+      "rolbypassrls": false,
+      "rolcreaterole": false,
+      "rolcreatedb": false
+    }
+  ],
+  "hypertables": [
+    {
+      "hypertable_schema": "public",
+      "hypertable_name": "energy_meter_readings",
+      "num_chunks": "4",
+      "compression_enabled": false
+    },
+    {
+      "hypertable_schema": "public",
+      "hypertable_name": "telemetry_raw",
+      "num_chunks": "228",
+      "compression_enabled": true
+    }
+  ],
+  "dimensions": [
+    {
+      "hypertable_name": "_materialized_hypertable_10",
+      "column_name": "hour_start",
+      "dimension_type": "Time",
+      "time_interval": {
+        "days": 10
+      },
+      "integer_interval": null
+    },
+    {
+      "hypertable_name": "energy_meter_readings",
+      "column_name": "read_at",
+      "dimension_type": "Time",
+      "time_interval": {
+        "days": 7
+      },
+      "integer_interval": null
+    },
+    {
+      "hypertable_name": "telemetry_raw",
+      "column_name": "received_at",
+      "dimension_type": "Time",
+      "time_interval": {
+        "days": 1
+      },
+      "integer_interval": null
+    }
+  ],
+  "policies": [
+    {
+      "application_name": "Telemetry Reporter [1]",
+      "proc_name": "policy_telemetry",
+      "schedule_interval": {
+        "hours": 24
+      },
+      "scheduled": true
+    },
+    {
+      "application_name": "Job History Log Retention Policy [3]",
+      "proc_name": "policy_job_stat_history_retention",
+      "schedule_interval": {
+        "months": 1
+      },
+      "scheduled": true
+    },
+    {
+      "application_name": "Compression Policy [1003]",
+      "proc_name": "policy_compression",
+      "schedule_interval": {
+        "hours": 12
+      },
+      "scheduled": true
+    }
+  ],
+  "aggregates": [
+    {
+      "hypertable_name": "telemetry_raw",
+      "view_name": "production_hourly_mv",
+      "materialized_only": true
+    }
+  ],
+  "storage": [
+    {
+      "database_bytes": "2279648603"
+    }
+  ],
+  "constraints": [
+    {
+      "conname": "fk_line_plant_company_pms",
+      "table_name": "line",
+      "convalidated": false
+    },
+    {
+      "conname": "fk_machine_line_placement_pms",
+      "table_name": "machines",
+      "convalidated": false
+    },
+    {
+      "conname": "fk_machine_plant_company_pms",
+      "table_name": "machines",
+      "convalidated": false
+    }
+  ],
+  "migration_comparison_counts": {
+    "matches": 56
+  },
+  "public_table_count": 70,
+  "public_column_count": 822,
+  "rls_enabled_table_count": 0
+}

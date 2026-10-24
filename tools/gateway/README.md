@@ -18,8 +18,9 @@ the company's one token, about **all** the company's machines at once:
         since 10:42"
 ```
 
-Two programs for one machine go one after the other; different machines do
-not wait for each other. Backups go the other way: **Backup now** on the page
+Programs and machines are processed in order, up to ten programs per machine
+per round. Each HTTP call has a deadline, so an unavailable server cannot hold
+the round forever. Backups go the other way: **Backup now** on the page
 → the gateway sees the request on its next `/status` → sends that machine's
 program with `POST /backup` → it appears under Backups.
 
@@ -28,7 +29,7 @@ program with `POST /backup` → it appears under Backups.
 1. Ask S&T for the company's gateway token (S&T Super Admin → Company
    Management → the company → **Gateway** → Make token → Copy). It starts
    `mxg_` and is shown once. One token for all machines.
-2. Install Node.js 20 or newer. Nothing else.
+2. Install a supported Node.js LTS (22 or newer; the gateway requires at least 20.10). Nothing else.
 3. Start the gateway, with a folder standing in for the machines:
 
    **Windows (PowerShell)**
@@ -64,11 +65,30 @@ Stop it with Ctrl+C.
 | `MEXA_TOKEN` | the company's gateway token (`mxg_…`, from S&T) |
 | `PROGRAM_DIR` | the folder that holds one folder per machine, named as in MEXA (default `machines`) |
 | `MACHINE_DIRS` | optional JSON: each machine's own folder, e.g. `{"VMC-01":"\\\\cnc01\\programs","VMC-02":"D:\\DNC\\VMC-02"}` — then only these machines are served by this PC |
+| `GATEWAY_REQUEST_TIMEOUT_MS` | deadline covering response headers and body, default `30000`, maximum `300000` |
+| `GATEWAY_MAX_PROGRAM_BYTES` | download and local backup limit, default `20971520` (20 MiB), maximum 100 MiB; keep consistent with server `PROGRAM_MAX_MB` |
 
 Run it as a service so it starts with the PC (Windows: Task Scheduler "At
 startup", or NSSM; Linux: a systemd unit with `Restart=always`). One gateway
 serves every machine; with `MACHINE_DIRS`, two PCs can split the machines
 between them.
+
+Give each machine a distinct folder. Ambiguous sanitized names are refused
+before downloading; use explicit `MACHINE_DIRS` to resolve them. Only one
+gateway may own a machine at a time; the API does not provide a distributed
+transfer lease across competing gateway processes.
+
+Before overwriting a different program, the folder adapter saves its previous
+contents and SHA-256 metadata in `.mexa-backups`, flushes both, writes a unique
+temporary file, preserves an existing destination's permissions, then renames
+and checks the resulting file. New programs use the service account's umask.
+Safety backups are private to that account. Set a disk budget and archive these
+versions under the factory's retention policy; the gateway never deletes them
+automatically. Storage durability on a network share depends on its filesystem.
+
+This adapter confirms a file in a configured folder. Its Backup now operation
+selects the newest regular file; confirming the CNC's active program or safe
+machine state requires a tested controller-specific adapter and vendor support.
 
 A controller that is not reached through a folder (FTP, FANUC FOCAS,
 Mitsubishi, Siemens tools…) needs only the two functions marked **MACHINE**

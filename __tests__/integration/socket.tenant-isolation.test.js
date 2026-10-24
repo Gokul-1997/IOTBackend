@@ -32,16 +32,20 @@ const USERS = {
   6: { is_active: true, company_id: 4, plant_id: 12, company_active: true },
   7: { is_active: true, company_id: 4, company_active: true, auth_revision: '1' },
   8: { is_active: true, company_id: 4, company_active: true, auth_revision: '9007199254740993' },
-  9: { is_active: true, company_id: 4, company_active: true, auth_revision: '0' }
+  9: { is_active: true, company_id: 4, company_active: true, auth_revision: '0' },
+  10: { is_active: true, company_id: 4, company_active: true },
+  11: { is_active: true, company_id: 4, company_active: true }
 };
+let companyGrants = [];
 let raceReads = 0;
-const db = { query: async (sql, [id, ids, plantId]) => ({ rows: sql.includes('FROM machines')
+const db = { query: async (sql, [id, ids, plantId]) => ({ rows: sql.includes('FROM company_permissions')
+  ? companyGrants.map(permission_key => ({ permission_key })) : sql.includes('FROM machines')
   ? (ids || []).filter(machineId => ({ 101: 4, 102: 4, 201: 5 })[machineId] === id && (plantId == null || ({101: 11, 102: 12})[machineId] === plantId)).map(id => ({ id }))
   : USERS[id] ? [{ ...USERS[id], ...(id === 9 && ++raceReads > 1 ? { auth_revision: '1' } : {}) }] : [] }) };
 
 let httpServer, io, url;
 const clients = [];
-beforeEach(async () => { await placement.load({ query: async () => ({ rows: MACHINES }) }); });
+beforeEach(async () => { companyGrants = []; await placement.load({ query: async () => ({ rows: MACHINES }) }); });
 
 beforeAll(done => {
   httpServer = http.createServer();
@@ -53,7 +57,7 @@ afterAll(done => { for (const c of clients) c.close(); io.close(); httpServer.cl
 
 /** A client signed in as `userId`; `claims` can lie about the company. */
 function client(userId, claims = {}) {
-  const token = jwt.sign({ user_id: userId, ...claims }, process.env.JWT_SECRET);
+  const token = jwt.sign({ user_id: userId, permissions: ['page:dashboard:view'], ...claims }, process.env.JWT_SECRET);
   const c = connect(url, { auth: { token }, transports: ['websocket'], reconnection: false });
   clients.push(c);
   return c;
@@ -104,6 +108,26 @@ test('bounded subscriptions receive only selected machines, can change and unsub
   await settle();
   expect(got).toEqual([101, 102]);
   c.close();
+});
+
+test('a notification-only account cannot listen to or subscribe to machine telemetry', async () => {
+  const c = client(10, { permissions: ['page:quality:view'] }); await connected(c);
+  const got = updatesOf(c);
+  expect(await subscribe(c, [101])).toEqual({ ok: false, code: 'FORBIDDEN' });
+  const unread = new Promise(resolve => c.once('unreadCount', resolve));
+  io.to('user:10').emit('unreadCount', { count: 3 });
+  expect(await unread).toEqual({ count: 3 });
+  socketServer.relay(io, JSON.stringify({ machine_id: 101, company_id: 4 }));
+  await settle(); expect(got).toEqual([]); c.close();
+});
+
+test('a role grant cannot bypass the company withholding dashboard access', async () => {
+  companyGrants = ['page:quality:view'];
+  const c = client(11, { roles: ['COMPANY_ADMIN'] }); await connected(c);
+  const got = updatesOf(c);
+  expect(await subscribe(c, [101])).toEqual({ ok: false, code: 'FORBIDDEN' });
+  socketServer.relay(io, JSON.stringify({ machine_id: 101, company_id: 4 }));
+  await settle(); expect(got).toEqual([]); c.close();
 });
 
 test('foreign IDs and oversized subscriptions are rejected without leaking data', async () => {

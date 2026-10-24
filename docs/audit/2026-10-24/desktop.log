@@ -1,0 +1,16 @@
+
+> frontend-iot@1.0.0 test:desktop
+> node --test electron/*.test.cjs
+
+✔ bundled assets and Angular routes remain inside the website (0.461416ms)
+✔ encoded traversal, invalid paths and foreign hosts cannot read local files (0.120584ms)
+✔ only the app origin can navigate in the desktop window (0.083375ms)
+✔ external links permit web URLs without launching local or executable protocols (0.065459ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 38.487125

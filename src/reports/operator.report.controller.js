@@ -1,3 +1,4 @@
+const sendError = require('../utils/controller-error');
 const service = require('./operator.report.service');
 
 exports.getOperatorPerformance = async (req, res) => {
@@ -5,6 +6,6 @@ exports.getOperatorPerformance = async (req, res) => {
     const result = await service.getOperatorPerformance({ ...req.query, company_id: req.user.company_id });
     res.json({ success: true, ...result });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    return sendError(e, req, res, { success: false });
   }
 };

@@ -9,7 +9,7 @@
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
-jest.mock('bcryptjs', () => ({
+jest.mock('bcrypt', () => ({
   compare: jest.fn(),
   hash:    jest.fn(async (p) => `hash:${p}`)
 }));
@@ -25,7 +25,7 @@ jest.mock(
 
 process.env.JWT_SECRET = 'test-secret';
 
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const auth = require('../../src/auth/auth.service');
 

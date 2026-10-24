@@ -72,17 +72,12 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 
 /* readiness: the process can do its job — the database and Redis answer.
    For the load balancer and monitoring; 503 with what is down otherwise. */
+const readiness = require('./lib/readiness').createReadiness({ db: require('./db'), redis: require('./redis') });
 app.get('/health/ready', async (req, res) => {
   const db = require('./db');
-  const redis = require('./redis');
-  const within = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
-  const [dbOk, redisOk] = await Promise.all([
-    within(db.query('SELECT 1'), 2000).then(() => true, () => false),
-    within(redis.ping(), 2000).then(r => r === 'PONG', () => false)
-  ]);
-  const ok = dbOk && redisOk;
-  res.status(ok ? 200 : 503).json({
-    ok, db: dbOk, redis: redisOk,
+  const state = await readiness();
+  res.status(state.ok ? 200 : 503).json({
+    ...state,
     db_pool: { total: db.totalCount, idle: db.idleCount, waiting: db.waitingCount },
     uptime_sec: Math.floor(process.uptime())
   });

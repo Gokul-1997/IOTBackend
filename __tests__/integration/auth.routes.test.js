@@ -44,7 +44,7 @@
  */
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
-jest.mock('bcryptjs', () => ({
+jest.mock('bcrypt', () => ({
   compare: jest.fn(),
   hash:    jest.fn(async (p) => `hashed:${p}`)
 }));
@@ -64,7 +64,7 @@ process.env.JWT_SECRET = 'test-secret';
 
 const request = require('supertest');
 const express = require('express');
-const bcrypt  = require('bcryptjs');
+const bcrypt  = require('bcrypt');
 const { mockDb, resetDb } = require('../helpers/mockDb');
 
 beforeEach(() => resetDb());
@@ -74,7 +74,7 @@ beforeEach(() => resetDb());
 function makeApp() {
   jest.resetModules();
   jest.doMock('../../src/db', () => mockDb);
-  jest.doMock('bcryptjs', () => ({
+  jest.doMock('bcrypt', () => ({
     compare: bcrypt.compare,
     hash:    bcrypt.hash
   }));

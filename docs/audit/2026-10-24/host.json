@@ -1,0 +1,10 @@
+{
+  "node": "v24.22.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M3",
+  "logical_cpus": 8,
+  "total_memory_mb": 8192,
+  "database": "disposable local PostgreSQL18.3 + TimescaleDB2.30.2",
+  "scope": "single local host; fixture node includes publisher/viewer clients; separate database and broker CPU excluded"
+}

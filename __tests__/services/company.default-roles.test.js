@@ -16,7 +16,7 @@
 
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 const { mockDb, resetDb } = require('../helpers/mockDb');
-jest.mock('bcryptjs', () => ({ hash: jest.fn(async () => 'hashed'), compare: jest.fn(async () => true) }));
+jest.mock('bcrypt', () => ({ hash: jest.fn(async () => 'hashed'), compare: jest.fn(async () => true) }));
 jest.mock('../../src/utils/nodemailer', () => ({ sendEmail: jest.fn(async () => {}) }), { virtual: false });
 
 const roleSvc = require('../../src/roles/role.service');

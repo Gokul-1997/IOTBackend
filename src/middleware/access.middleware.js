@@ -44,7 +44,7 @@ const cacheKey = (id, revision, userId) => revision == null || userId == null
  * unavailable must never take a page down, so both cache calls are best
  * effort and the database is the fallback.
  */
-async function loadCompanyGrants(company_id, authRevision, userId) {
+async function loadCompanyGrants(company_id, authRevision, userId, database = db) {
   let redis = null;
   try { redis = require('../redis'); } catch { /* no cache configured */ }
 
@@ -55,7 +55,7 @@ async function loadCompanyGrants(company_id, authRevision, userId) {
     } catch { /* fall through to the database */ }
   }
 
-  const { rows } = await db.query(
+  const { rows } = await database.query(
     `SELECT p.permission_key
        FROM company_permissions cp
        JOIN permissions p ON p.id = cp.permission_id
@@ -89,7 +89,7 @@ async function denialFor(user, key) {
 /** A shared endpoint can serve several screens; one complete role+company
  * grant must match. A role grant for one screen cannot be paired with a
  * company grant for a different screen. */
-async function denialForAny(user, keys) {
+async function denialForAny(user, keys, database = db) {
   if (!user) return 'NO_USER';
   if (user.is_snt_super) return null;
 
@@ -107,7 +107,7 @@ async function denialForAny(user, keys) {
   // A successful Manage Access change advances every company user's
   // revision. Fresh tokens can never reuse a cache entry from before it,
   // even if an in-flight read fills that old entry after invalidation.
-  const grants = await loadCompanyGrants(user.company_id, user.auth_revision, user.id);
+  const grants = await loadCompanyGrants(user.company_id, user.auth_revision, user.id, database);
   const granted = key => grants.has(key) || (grants.size === 0 && !isOptInKey(key));
   if (!allowed.some(granted)) return 'COMPANY';
   return null;

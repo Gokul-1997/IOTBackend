@@ -1,0 +1,30 @@
+(node:64229) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS __tests__/health-endpoint.test.js
+PASS __tests__/admission.test.js
+PASS __tests__/journal-flusher.test.js
+PASS __tests__/alarm-text.test.js
+PASS __tests__/shifts-hourly.test.js
+PASS __tests__/mqtt-ack.test.js
+PASS __tests__/buffer-resilience.test.js
+PASS __tests__/schema-check.test.js
+PASS __tests__/power-signals.test.js
+PASS __tests__/mqtt-config.test.js
+PASS __tests__/quarantine-inspector.test.js
+PASS __tests__/meter-writer.test.js
+PASS __tests__/telemetry-fields.test.js
+PASS __tests__/alarm-log.test.js
+PASS __tests__/controller-identity.test.js
+PASS __tests__/parts-delta.test.js
+PASS __tests__/condition-signals.test.js
+PASS __tests__/energy-step.test.js
+PASS __tests__/startup-schema.test.js
+PASS __tests__/normalize-status.test.js
+PASS __tests__/counter-integrity.test.js
+PASS __tests__/ingress-lag.test.js
+
+Test Suites: 22 passed, 22 total
+Tests:       399 passed, 399 total
+Snapshots:   0 total
+Time:        6.722 s, estimated 7 s
+Ran all test suites.

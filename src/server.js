@@ -64,19 +64,23 @@ const stopAlarmNotifications = startAlarmNotifications({ pool: db });
 
 startListening(httpServer, db, PORT).then(() => {
   console.log(`Server-2 running on port ${PORT}`);
-}).catch(async (err) => {
+}).catch((err) => {
   console.error('Startup failed; API listener remains closed:', err.message);
-  require('./cron').stop?.();
-  await stopAlarmNotifications();
-  await Promise.allSettled([subscriber.quit(), redis.quit(), db.end()]);
-  io.close();
-  process.exit(1);
+  void shutdown('Startup failure', 1);
 });
 
 /* ===============================
    🛑 Graceful Shutdown
 ================================ */
-const shutdown = async (signal) => {
+let shuttingDown = false;
+const shutdown = async (signal, exitCode = 0) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // Arm before awaiting dependencies: a stalled quit/stop must not defeat it.
+  setTimeout(() => {
+    console.error('Force shutdown');
+    process.exit(1);
+  }, 10000);
   console.log(`${signal} received: shutting down...`);
 
   try {
@@ -91,7 +95,7 @@ const shutdown = async (signal) => {
     httpServer.close(async () => {
       console.log('HTTP server closed.');
       await db.end().catch(() => {});
-      process.exit(0);
+      process.exit(exitCode);
     });
 
   } catch (err) {
@@ -99,10 +103,6 @@ const shutdown = async (signal) => {
     process.exit(1);
   }
 
-  setTimeout(() => {
-    console.error('Force shutdown');
-    process.exit(1);
-  }, 10000).unref();
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const { effectivePlantId } = require('./plant-scope');
 const { matches, revisionOf } = require('./auth-revision');
 const placement = require('./machine-placement');
+const { denialForAny } = require('../middleware/access.middleware');
 
 /*
  * Live machine data over Socket.IO, kept inside each company.
@@ -88,7 +89,14 @@ function attach(io, { db }) {
         socket.disconnect(true);
         return false;
       }
-      if (companyId) socket.join(feedRoom);
+      // A notification connection is not permission to read machine telemetry.
+      // Keep the private user room, but only join data rooms when both the role
+      // and the company's page access permit the live dashboards.
+      socket.machineFeedAllowed = !!companyId && !await denialForAny(
+        { ...socket.user, id: userId }, ['page:dashboard:view', 'page:dashboard:live:view'], db
+      );
+      if (!socket.connected) return false;
+      if (socket.machineFeedAllowed) socket.join(feedRoom);
       return true;
     })().catch(() => { socket.disconnect(true); return false; });
 
@@ -101,6 +109,7 @@ function attach(io, { db }) {
     socket.on('subscribeMachines', async (ids, acknowledge) => {
       const reply = typeof acknowledge === 'function' ? acknowledge : () => {};
       if (!await ready) return reply({ ok: false, code: 'UNAUTHORIZED' });
+      if (!socket.machineFeedAllowed) return reply({ ok: false, code: 'FORBIDDEN' });
       if (Date.now() - scopeWindow >= 1000) { scopeWindow = Date.now(); scopeRequests = 0; }
       if (++scopeRequests > 10) return reply({ ok: false, code: 'RATE_LIMITED' });
       if (!companyId || !Array.isArray(ids) || ids.length > 100 ||

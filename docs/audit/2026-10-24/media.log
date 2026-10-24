@@ -1,0 +1,1 @@
+Local media PostgreSQL 18.3 (Homebrew) fixture passed: real migration runner/ledger, repeatable migration/empty rollback, retained nonempty catalogue, immutable uploads, company/plant/grant/uploader access, moved-machine access, ownership constraints, failed-insert cleanup, blocked plant-deletion rollback and restricted-role deletion retaining tenant catalogue/bytes.

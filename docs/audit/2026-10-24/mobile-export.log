@@ -1,0 +1,26 @@
+Starting Metro Bundler
+
+| (node:60423) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+| (Use `node --trace-warnings ...` to show where the warning was created)
+Web Bundled 399ms index.ts (555 modules)
+
+› Assets (15):
+assets/fonts/Ubuntu-Bold.d0fc30856a541539009e73c787a68bc1.ttf (332KB)
+assets/fonts/Ubuntu-Medium.335cc443917aa5c0bebfa28a64e8ad97.ttf (339KB)
+assets/fonts/Ubuntu-Regular.b3488e8486d2b4e3a0666997f91c7ed9.ttf (352KB)
+node_modules/@expo/vector-icons/build/vendor/react-native-vector-icons/Fonts/Ionicons.b4eb097d35f44ed943676fd56f6bdc51.ttf (390KB)
+node_modules/@react-navigation/elements/lib/module/assets/back-icon-mask.0a328cd9c1afd0afe8e3b1ec5165b1b4.png (653B)
+node_modules/@react-navigation/elements/lib/module/assets/back-icon.35ba0eaec5a4f5ed12ca16fabeae451d.png (207B)
+node_modules/@react-navigation/elements/lib/module/assets/clear-icon.c94f6478e7ae0cdd9f15de1fcb9e5e55.png (4 variations | 425B)
+node_modules/@react-navigation/elements/lib/module/assets/close-icon.808e1b1b9b53114ec2838071a7e6daa7.png (4 variations | 235B)
+node_modules/@react-navigation/elements/lib/module/assets/search-icon.286d67d3f74808a60a78d3ebf1a5fb57.png (928B)
+
+› web bundles (1):
+_expo/static/js/web/index-c241474a68a24492f1b4cff85f383779.js (1.2MB)
+
+› Files (3):
+favicon.ico (15KB)
+index.html (1.2KB)
+metadata.json (49B)
+
+Exported: /private/tmp/iot-master-mobile-web-export

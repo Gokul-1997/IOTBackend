@@ -1,0 +1,1 @@
+Authorization PostgreSQL/HTTP/Socket fixture passed: migration/reapply/rollback, legacy0, trusted scope/ALS, role/company/user mutation revocation, active socket teardown, stale handshake rejection, transaction rollback with grants intact, Redis failure independence and exact BIGINT revision comparison.

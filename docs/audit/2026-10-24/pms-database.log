@@ -1,0 +1,1 @@
+PMS PostgreSQL fixture passed: migration/reapply/rollback, duplicate preflight without data loss, tenant/plant placement, immutable job snapshots, concurrent quota, atomic shift links, plant-bound schedule/log/ticket/downtime reads and writes, unplaced records excluded and company-admin access preserved.
