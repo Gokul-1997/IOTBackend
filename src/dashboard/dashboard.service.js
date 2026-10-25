@@ -156,10 +156,11 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
   /* ================= CURRENT JOB ================= */
 
   const { rows: jobRows } = await db.query(`
-    SELECT machine_id,part_name,component_id,target_qty
-    FROM machine_current_job
-    WHERE machine_id=ANY($1)
-    AND is_active=TRUE
+    SELECT j.machine_id, j.part_name, j.component_id, c.part_number, j.target_qty
+    FROM machine_current_job j
+    LEFT JOIN components c ON c.id = j.component_id
+    WHERE j.machine_id=ANY($1)
+    AND j.is_active=TRUE
   `, [machineIds]);
 
   const jobMap = {};
@@ -394,6 +395,8 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
 
       part_name:    job.part_name    || null,
       component_id: job.component_id || null,
+      // "Part No" on the card and on the machine page alike (the user, 25 Oct 2026)
+      part_number:  job.part_number  || null,
 
       status,
       alarm,
@@ -528,6 +531,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       SELECT
         j.part_name,
         j.component_id,
+        c.part_number,
         c.cycle_time,
         j.target_qty AS target,
         COALESCE(c.multiplication_factor, 1) AS multiplication_factor
@@ -808,10 +812,10 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
 
       job: {
         part_name: component?.part_name || '--',
-        // the current job's component id — the value the Live Dashboard card shows (the
-        // user, 25 Oct 2026: the two pages showed different Component IDs; this one showed
-        // the component's part number)
-        component_id: component?.component_id ?? '--',
+        // part_number from components table; fallback to component_id FK from machine_current_job
+        component_id: component?.part_number || component?.component_id || '--',
+        // "Part No" on this page and on the Live Dashboard card alike (the user, 25 Oct 2026)
+        part_number:  component?.part_number || null,
         target_qty:   component?.target      || 0,
         achieved_qty: achievedBase,
         cycle_time: component?.cycle_time || null
