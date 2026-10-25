@@ -144,6 +144,8 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
      AND o.is_active=TRUE
     WHERE oma.machine_id=ANY($2)
       AND oma.is_active=TRUE
+    -- two operators on one machine and shift: the latest assignment, as on the machine page
+    ORDER BY oma.machine_id, oma.id DESC
   `, [shift.id, machineIds]);
 
   const operatorMap = {};
@@ -507,6 +509,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         AND o.is_active = TRUE
       WHERE a.machine_id = $1
         AND a.is_active = TRUE
+      ORDER BY a.id DESC          -- the latest assignment, as the Live Dashboard picks it
       LIMIT 1
     `, [machineId, shift?.id]);
  
@@ -525,7 +528,6 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       SELECT
         j.part_name,
         j.component_id,
-        c.part_number,
         c.cycle_time,
         j.target_qty AS target,
         COALESCE(c.multiplication_factor, 1) AS multiplication_factor
@@ -806,8 +808,10 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
 
       job: {
         part_name: component?.part_name || '--',
-        // part_number from components table; fallback to component_id FK from machine_current_job
-        component_id: component?.part_number || component?.component_id || '--',
+        // the current job's component id — the value the Live Dashboard card shows (the
+        // user, 25 Oct 2026: the two pages showed different Component IDs; this one showed
+        // the component's part number)
+        component_id: component?.component_id ?? '--',
         target_qty:   component?.target      || 0,
         achieved_qty: achievedBase,
         cycle_time: component?.cycle_time || null
