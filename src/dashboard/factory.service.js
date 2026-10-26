@@ -195,15 +195,18 @@ exports.getFactoryDashboard = async (req) => {
       machineId ? [companyId, machineId] : [companyId]
     ),
 
-    /* yesterday's energy and output, for the "vs yesterday" comparisons */
+    /* yesterday's energy and output, for the "vs yesterday" comparisons —
+       per machine, so its output counts parts as today's does */
     db.query(`
-      SELECT COALESCE(SUM(energy_kwh),0)::float AS kwh,
+      SELECT machine_id,
+             COALESCE(SUM(energy_kwh),0)::float AS kwh,
              COALESCE(SUM(produced_qty),0)::int AS produced
         FROM production_hourly
        WHERE company_id = $1${plantSql('machine_id')}
          AND hour_start >= ($2::date - 1)::timestamp AT TIME ZONE 'Asia/Kolkata'
          AND hour_start <  ($2::date)::timestamp AT TIME ZONE 'Asia/Kolkata'
-         ${machineId ? 'AND machine_id = $3' : ''}`,
+         ${machineId ? 'AND machine_id = $3' : ''}
+       GROUP BY machine_id`,
       machineId ? [companyId, win.day, machineId] : [companyId, win.day]
     )
   ]);
@@ -239,16 +242,23 @@ exports.getFactoryDashboard = async (req) => {
   const shiftTarget = [...targetOf.values()].reduce((a, t) => a + t.target, 0);
   const targetMachines = [...targetOf.entries()].filter(([, t]) => t.target > 0).map(([id]) => id);
 
-  /* One row per shift: all output (as before), and the output of machines
-     with a target set against the sum of those targets. */
+  /* Output in parts: a machine's counter times the parts its job makes per
+     cycle (the component's multiplication factor) — as the Live Dashboard,
+     the machine page and this page's trend count it. The shift bars and the
+     "pieces" figure counted the bare counter (26 Oct 2026, the user: the
+     bar read 232 while Actual vs Target read 272 for the same shift). */
+  const parts = (machineId, counted) => Math.round(Number(counted || 0) * multOf(machineId));
+
+  /* One row per shift: all output, and the output of machines with a target
+     set against the sum of those targets. */
   const shifts = new Map();
   for (const r of shiftRes.rows) {
     const e = shifts.get(r.shift_id) || {
       shift_id: r.shift_id, shift_code: r.shift_code, shift_name: r.shift_name,
       start_time: r.start_time, end_time: r.end_time, produced: 0, actual: 0
     };
-    e.produced += r.produced;
-    if (r.machine_id && targetMachines.includes(r.machine_id)) e.actual += Math.round(r.produced * multOf(r.machine_id));
+    e.produced += parts(r.machine_id, r.produced);
+    if (r.machine_id && targetMachines.includes(r.machine_id)) e.actual += parts(r.machine_id, r.produced);
     shifts.set(r.shift_id, e);
   }
   const shiftwise = [...shifts.values()].map(e => ({ ...e, target: shiftTarget || null }));
@@ -278,7 +288,7 @@ exports.getFactoryDashboard = async (req) => {
     const key = bucket.toISOString();
     const e = byHour.get(key) || { hour: bucket, kwh: 0, produced: 0, shift_id: r.shift_id };
     e.kwh += r.kwh;
-    e.produced += Math.round(r.produced * multOf(r.machine_id));
+    e.produced += parts(r.machine_id, r.produced);
     byHour.set(key, e);
   }
   const trend = [...byHour.values()].map(e => {
@@ -291,7 +301,10 @@ exports.getFactoryDashboard = async (req) => {
     };
   });
 
-  const yday = yesterdayRes.rows[0] || { kwh: 0, produced: 0 };
+  /* the window's output in parts, from the same rows as the trend */
+  const producedParts = energyRes.rows.reduce((a, r) => a + parts(r.machine_id, r.produced), 0);
+  const yday = yesterdayRes.rows.reduce((a, r) => ({ kwh: a.kwh + Number(r.kwh || 0), produced: a.produced + parts(r.machine_id, r.produced) }),
+                                         { kwh: 0, produced: 0 });
   const pctChange = (now, before) => (before > 0 ? Number((((now - before) / before) * 100).toFixed(1)) : null);
   const perPart = (kwh, produced) => (rate && produced > 0 ? Number(((kwh * rate) / produced).toFixed(2)) : null);
 
@@ -311,7 +324,7 @@ exports.getFactoryDashboard = async (req) => {
     machines: machineRes.rows[0],
 
     production: {
-      produced: prod.produced,
+      produced: producedParts,
       // against the job targets of the machines that have one; null when none do
       actual: actualInScope,
       target: targetInScope || null,
@@ -347,8 +360,8 @@ exports.getFactoryDashboard = async (req) => {
       // comparisons, null when there is nothing to compare against
       day_vs_yesterday_pct:   pctChange(prod.energy_kwh, yday.kwh),
       month_vs_last_pct:      pctChange(monthRes.rows[0]?.kwh || 0, monthRes.rows[0]?.prev_kwh || 0),
-      cost_per_part:          perPart(prod.energy_kwh, prod.produced),
-      cost_per_part_vs_yesterday_pct: pctChange(perPart(prod.energy_kwh, prod.produced) || 0, perPart(yday.kwh, yday.produced) || 0)
+      cost_per_part:          perPart(prod.energy_kwh, producedParts),
+      cost_per_part_vs_yesterday_pct: pctChange(perPart(prod.energy_kwh, producedParts) || 0, perPart(yday.kwh, yday.produced) || 0)
     },
 
     shiftwise,
