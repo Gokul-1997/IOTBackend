@@ -25,6 +25,13 @@ const row = (o = {}) => ({
 });
 
 beforeEach(() => resetDb());
+afterEach(() => jest.restoreAllMocks());
+
+test('a valid gateway credential cannot bypass an expired application license',async()=>{
+  const gate=jest.spyOn(require('../../src/licensing/runtime'),'assertAccess').mockRejectedValueOnce(Object.assign(new Error('Subscription expired'),{status:403,code:'LICENSE_EXPIRED'}));
+  const r=await run({authorization:`Bearer ${token}`},[row()]);expect(gate).toHaveBeenCalledWith({company_id:5});
+  expect(r.res.code).toBe(403);expect(r.res.body.code).toBe('LICENSE_EXPIRED');expect(r.next).not.toHaveBeenCalled();
+});
 
 describe('tokens', () => {
   test('generated tokens have the documented shape and are random', () => {

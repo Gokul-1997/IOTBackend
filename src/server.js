@@ -84,6 +84,7 @@ const shutdown = async (signal, exitCode = 0) => {
   console.log(`${signal} received: shutting down...`);
 
   try {
+    require('./licensing/runtime').stop();
     require('./cron').stop?.();
     await stopAlarmNotifications();
     await subscriber.unsubscribe('machine_updates');

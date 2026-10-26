@@ -1,0 +1,50 @@
+# Staged only. The installer never starts this without explicit Phase 3 release.
+# External PostgreSQL/Timescale, Redis and MQTT must already be provisioned.
+name: mexa-onprem
+services:
+  api:
+    image: ${API_IMAGE:?Use a private image pinned by sha256 digest}
+    restart: unless-stopped
+    env_file: [api.env]
+    environment:
+      DEPLOYMENT_MODE: on_prem
+      LICENSE_ACTIVATION_TOKEN_FILE: /run/secrets/installation-token
+      LICENSE_VERIFY_KEY_FILE: /run/secrets/license-public-key.pem
+      STORAGE_ROOT: /var/lib/mexa/storage
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes:
+      - storage:/var/lib/mexa/storage
+      - ./secrets/installation-token:/run/secrets/installation-token:ro
+      - ./secrets/license-public-key.pem:/run/secrets/license-public-key.pem:ro
+      - ./secrets/database-ca.pem:/run/secrets/database-ca.pem:ro
+    expose: ["8000"]
+    stop_grace_period: 15s
+  web:
+    image: ${WEB_IMAGE:?Use a private image pinned by sha256 digest}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    ports: ["127.0.0.1:${WEB_PORT:-8080}:8080"]
+    depends_on: [api]
+  collector:
+    image: ${COLLECTOR_IMAGE:?Use a private image pinned by sha256 digest}
+    restart: unless-stopped
+    env_file: [collector.env]
+    environment:
+      JOURNAL_DIR: /var/lib/mexa/journal
+      MQTT_LOG_DIR: /var/log/mexa
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes: ["journal:/var/lib/mexa/journal", "collector_logs:/var/log/mexa", "./secrets/database-ca.pem:/run/secrets/database-ca.pem:ro"]
+    stop_grace_period: 15s
+volumes:
+  storage:
+  journal:
+  collector_logs:

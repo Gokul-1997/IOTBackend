@@ -74,8 +74,10 @@ module.exports = async (req, res, next) => {
       plan:        decoded.plan || null
     };
 
+    await require('../licensing/runtime').assertAccess(req.user);
     readScope.run(req.user, next);
   } catch (err) {
+    if (err.code?.startsWith('LICENSE_')) return res.status(err.status || 503).json({ message: err.message, code: err.code });
     /* The token was valid (a bad one is answered above); what failed is the
        look-up of the account — the database out of reach for a moment.
        401 here made the web app sign everyone out on a network blip, as an

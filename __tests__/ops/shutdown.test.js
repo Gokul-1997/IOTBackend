@@ -15,6 +15,7 @@ test('shutdown deadline still fires if an awaited dependency never stops; repeat
     './lib/start-listening': { startListening: async () => {} },
     './alarms/alarm-notification-listener': { startAlarmNotifications: () => stop },
     './cron': { stop() {} },
+    './licensing/runtime': { stop() {} },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../src/server.js'), 'utf8'), {
     require: name => { if (!(name in deps)) throw Error(name); return deps[name]; },

@@ -20,6 +20,8 @@
  */
 Object.assign(process.env, {
   NODE_ENV: 'test',
+  PHASE3_LICENSING_ENABLED: 'false',
+  DEPLOYMENT_MODE: 'cloud',
   DOTENV_CONFIG_QUIET: 'true',
   POSTGRESQL_HOST: '127.0.0.1',
   POSTGRESQL_PORT: '1',

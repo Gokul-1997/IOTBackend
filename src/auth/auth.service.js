@@ -145,6 +145,8 @@ exports.login = async ({ email, password }, req) => {
   const company_permissions = companyPermRes.rows.map(r => r.permission_key);
   const is_snt_super = roles.includes('SNT_SUPER');
 
+  await require('../licensing/runtime').assertAccess({ company_id: user.company_id, is_snt_super });
+
   // Step 4: Only update session info (use transaction)
   const client = await db.connect();
   try {
@@ -282,6 +284,8 @@ exports.refresh = async (refreshToken, req) => {
   );
   const su = sessionUser.rows[0] || {};
   const is_snt_super_refresh = roles.includes('SNT_SUPER');
+
+  await require('../licensing/runtime').assertAccess({ company_id: su.company_id, is_snt_super: is_snt_super_refresh });
 
   /* What the company has been granted, read fresh. Login sends this to the
      browser once and nothing ever updated it, so a change made in Manage

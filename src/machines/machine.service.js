@@ -16,6 +16,7 @@ async function lockCompany(client, companyId) {
   if (!rows.length) throw { status: 404, message: 'Company not found' };
 }
 async function enforceQuota(client, companyId) {
+  await require('../licensing/runtime').assertMachineSlot(companyId, client);
   const { rows } = await client.query(
     `SELECT COALESCE(cp.max_machines, p.max_machines) AS max_machines
        FROM company_plans cp LEFT JOIN plans p ON p.id = cp.plan_id

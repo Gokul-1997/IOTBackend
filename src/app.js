@@ -75,7 +75,8 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 const readiness = require('./lib/readiness').createReadiness({ db: require('./db'), redis: require('./redis') });
 app.get('/health/ready', async (req, res) => {
   const db = require('./db');
-  const state = await readiness();
+  const state = { ...await readiness() };
+  if (!require('./licensing/runtime').ready()) { state.ok = false; state.license = false; }
   res.status(state.ok ? 200 : 503).json({
     ...state,
     db_pool: { total: db.totalCount, idle: db.idleCount, waiting: db.waitingCount },

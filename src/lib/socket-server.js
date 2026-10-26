@@ -44,6 +44,9 @@ function attach(io, { db }) {
         return next(error);
       }
 
+      await require('../licensing/runtime').assertAccess({ company_id: rows[0].company_id,
+        is_snt_super: decoded.is_snt_super || decoded.roles?.includes('SNT_SUPER') });
+
       // the company comes from the database, never from the client
       socket.user = { ...decoded, company_id: rows[0].company_id, plant_id: rows[0].plant_id,
         user_type: rows[0].user_type, auth_revision: revisionOf(rows[0].auth_revision) };
@@ -89,6 +92,7 @@ function attach(io, { db }) {
         socket.disconnect(true);
         return false;
       }
+      await require('../licensing/runtime').assertAccess(socket.user);
       // A notification connection is not permission to read machine telemetry.
       // Keep the private user room, but only join data rooms when both the role
       // and the company's page access permit the live dashboards.
@@ -143,6 +147,26 @@ function attach(io, { db }) {
 
     socket.on('joinPlant', () => { /* superseded by the company room */ });
   });
+
+  // One sweep per process, grouped by company, rather than one online check
+  // or database timer per connected browser. Stop paid access on open sockets.
+  if (require('../licensing/config').enabled()) {
+    let running = false;
+    const timer = setInterval(async () => {
+      if (running) return;
+      running = true;
+      try {
+        const checks = new Map();
+        for (const socket of io.sockets.sockets.values()) {
+          const key = `${socket.user?.company_id}:${!!socket.user?.is_snt_super}`;
+          if (!checks.has(key)) checks.set(key, require('../licensing/runtime').assertAccess(socket.user).then(() => true, () => false));
+          if (!await checks.get(key)) socket.disconnect(true);
+        }
+      } finally { running = false; }
+    }, 10_000);
+    timer.unref?.();
+    io.httpServer?.once('close', () => clearInterval(timer));
+  }
 }
 
 /** A machine update from the collector (Redis machine_updates) → its company only. */

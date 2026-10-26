@@ -13,6 +13,14 @@ const user = { id: 1, username: 'alice', plant_id: 11, company_id: 4, user_type:
 const req = () => ({ headers: { authorization: 'Bearer signed-token' } });
 const res = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() });
 beforeEach(() => { resetDb(); jest.clearAllMocks(); jwt.verify.mockReturnValue({ ...token }); });
+afterEach(() => jest.restoreAllMocks());
+
+test('license expiry blocks the authenticated request using trusted database company scope', async () => {
+  const gate=jest.spyOn(require('../../src/licensing/runtime'),'assertAccess').mockRejectedValueOnce(Object.assign(new Error('Subscription expired'),{status:403,code:'LICENSE_EXPIRED'}));
+  mockDb.queueResponse({rows:[user]});const response=res(),next=jest.fn();await auth(req(),response,next);
+  expect(gate).toHaveBeenCalledWith(expect.objectContaining({company_id:4}));expect(response.status).toHaveBeenCalledWith(403);
+  expect(response.json).toHaveBeenCalledWith(expect.objectContaining({code:'LICENSE_EXPIRED'}));expect(next).not.toHaveBeenCalled();
+});
 
 test.each([undefined, '', 'Token abc'])('missing or wrong Bearer header %s is refused before lookup', async header => {
   const response = res(); const next = jest.fn();

@@ -1,4 +1,5 @@
 module.exports = app => {
+  app.use('/api/licensing', require('./licensing/authority.routes'));
   // ── Core Auth & Users ──────────────────────────────────────────
   app.use('/api/auth',         require('./auth/auth.routes'));
   app.use('/api/users',        require('./users/user.routes'));

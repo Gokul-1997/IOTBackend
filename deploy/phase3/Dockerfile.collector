@@ -1,0 +1,14 @@
+ARG NODE_IMAGE=node:24-bookworm-slim
+FROM ${NODE_IMAGE} AS dependencies
+WORKDIR /app
+COPY pms-backend/package.json pms-backend/package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+FROM ${NODE_IMAGE}
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node pms-backend/package.json pms-backend/app.js pms-backend/buffer.js pms-backend/db.js pms-backend/redis.js pms-backend/server.js pms-backend/mqtt.js pms-backend/health.js pms-backend/mqtt-logger.js ./
+COPY --chown=node:node pms-backend/src ./src
+RUN mkdir -p /var/lib/mexa/journal /var/log/mexa && chown -R node:node /var/lib/mexa /var/log/mexa
+USER node
+CMD ["node", "app.js"]

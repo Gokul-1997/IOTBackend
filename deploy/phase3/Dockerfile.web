@@ -1,0 +1,15 @@
+ARG NODE_IMAGE=node:24-bookworm-slim
+ARG NGINX_IMAGE=nginxinc/nginx-unprivileged:stable-alpine
+FROM ${NODE_IMAGE} AS build
+WORKDIR /app
+COPY FrontendIOT/package.json FrontendIOT/package-lock.json ./
+RUN npm ci
+COPY FrontendIOT/angular.json FrontendIOT/tsconfig.json FrontendIOT/tsconfig.app.json FrontendIOT/tsconfig.spec.json FrontendIOT/postcss.config.js FrontendIOT/tailwind.config.js ./
+COPY FrontendIOT/src ./src
+COPY FrontendIOT/public ./public
+RUN npx ng build --configuration onprem && find dist -name '*.map' -delete
+FROM ${NGINX_IMAGE}
+COPY --from=build /app/dist/FrontendIOT/browser /usr/share/nginx/html
+COPY Backend/deploy/phase3/nginx.conf /etc/nginx/conf.d/default.conf
+USER 101
+EXPOSE 8080

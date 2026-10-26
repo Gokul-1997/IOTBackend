@@ -43,6 +43,7 @@ module.exports = async (req, res, next) => {
     // unknown and revoked read the same: nothing to learn from probing
     if (!g) return deny(res, 401, 'TOKEN_INVALID', 'This gateway token is not valid. Ask S&T for your company\'s gateway token.');
     if (g.company_active === false) return deny(res, 403, 'COMPANY_DISABLED', "The company's access has been turned off.");
+    await require('../licensing/runtime').assertAccess({ company_id: g.company_id });
 
     const ip = req.ip || null;
     const version = String(req.headers['x-agent-version'] || '').slice(0, 50) || null;
@@ -59,6 +60,7 @@ module.exports = async (req, res, next) => {
     req.gateway = { id: g.id, company_id: g.company_id, company_name: g.company_name };
     next();
   } catch (err) {
+    if (err.code?.startsWith('LICENSE_')) return deny(res, err.status || 503, err.code, err.message);
     console.error('Gateway auth failed:', err.message);
     deny(res, 500, 'SERVER_ERROR', 'The server could not check the gateway token. Try again.');
   }
