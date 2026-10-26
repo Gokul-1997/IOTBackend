@@ -193,6 +193,7 @@ exports.getMaintenanceDashboard = async (req) => {
         m.image_url,
         j.component_id,
         j.part_name,
+        c.part_number,
         j.target_qty,
         op.operator_name,
         l.machine_status,
@@ -214,6 +215,7 @@ exports.getMaintenanceDashboard = async (req) => {
       LEFT JOIN runtime rt ON rt.machine_id = m.id
       LEFT JOIN machine_current_job j
              ON j.machine_id = m.id AND j.is_active = TRUE
+      LEFT JOIN components c ON c.id = j.component_id
       LEFT JOIN LATERAL (
         SELECT o.operator_name
         FROM operator_machine_assignments oma
