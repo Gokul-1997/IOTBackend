@@ -3,8 +3,7 @@
  *
  * One aggregate for the whole shop floor, filterable by shift, machine
  * and date. Everything here reads the rollup tables the MQTT processor
- * maintains (production_hourly, oee_hourly) rather than telemetry_raw —
- * same source the machine dashboard uses, so the two always agree.
+ * maintains (production_hourly) rather than scanning raw history.
  *
  * The existing dashboard.service covers the per-machine grid; this is
  * the factory-level view that sits above it.
@@ -12,10 +11,7 @@
 const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { severityClass } = require('./severity');
-// resolveWindow/scope moved to ./window.js when the Maintenance dashboard
-// needed the same filter behaviour — two screens filtered identically must
-// resolve identically, so there is one copy rather than two.
-const { resolveWindow, scope, parseMachineId } = require('./window');
+const { resolveWindow, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
@@ -23,20 +19,19 @@ const SEVERITY_CLASS = severityClass('severity');
 
 /**
  * Resolve the reporting window.
- * A date alone means that whole day; adding a shift narrows it to that
- * shift's window, handling the overnight case where a shift starts on
- * one date and ends on the next.
+ * Production uses the Production Report's shift START date. One bounded
+ * set of recorded hourly rows feeds the headline, shift bars and trends;
+ * a current component's multiplication factor must not rewrite old output.
+ * Other dashboards keep their existing shared calendar-window behaviour.
  */
 exports.getFactoryDashboard = async (req) => {
+  const asOf       = new Date();
   const companyId  = req.user.company_id;
   const machineId  = parseMachineId(req.query.machine_id);
   const win        = await resolveWindow(companyId, req.query);
 
-  const s = scope(companyId, win, machineId);
-
   const [
-    settingsRes, machineRes, prodRes, machineTotals,
-    shiftRes, downtimeRes, alarmRes, energyRes, targetRes, yesterdayRes
+    settingsRes, machineRes, shiftRes, targetRes, yesterdayRes
   ] = await Promise.all([
 
     /* company tariff — cost is unavailable rather than zero when unset.
@@ -105,119 +100,143 @@ exports.getFactoryDashboard = async (req) => {
       machineId ? [companyId, machineId] : [companyId]
     ),
 
-    /* production + run/idle + energy for the window */
-    db.query(`
-      SELECT COALESCE(SUM(produced_qty),0)::int   AS produced,
-             COALESCE(SUM(run_seconds),0)::int    AS run_seconds,
-             COALESCE(SUM(idle_seconds),0)::int   AS idle_seconds,
-             COALESCE(SUM(energy_kwh),0)::float   AS energy_kwh
-      FROM production_hourly WHERE ${s.sql}`, s.params
-    ),
-
-    /* OEE, worked out exactly as the OEE Dashboard does: from the window's
-       summed run time, planned time, output and rejects, performance from
-       the cycle time on each machine's current job.
-
-       This tile used to average oee_hourly. An hour in which a machine made
-       nothing has no performance, so nearly every hourly OEE row is 0 or
-       empty and the tile read 0% — while the OEE Dashboard showed the real
-       figure for the same machines on the same day. */
-    oeeSvc.machineTotals({ companyId, machineId, shiftId: win.shift?.id || null, start: win.from, end: win.to }),
-
-    /* shift-wise production (whole day, ignores the shift filter on purpose
-       — the point of the chart is to compare shifts), per machine so each
-       machine's output can be set against its own job target */
+    /* Compare the shifts STARTING on the selected plant date, independently
+       of the shift filter. A calendar-midnight bound put yesterday's night
+       shift (00:00–08:00) under tonight's Shift 2 before it had even started.
+       The coarse bounds keep the rollup scan bounded for chunk/index pruning;
+       the per-shift bounds assign overnight output to its actual start date.
+       Rollups start at the clock hour, including a shift starting at 08:30,
+       so its first bucket overlaps rather than starts at the shift boundary.
+       Do not admit upcoming shifts or future buckets, even if bad source data
+       was preloaded. Keep zero rows through the LEFT JOIN for those shifts. */
     db.query(`
       SELECT sh.id AS shift_id, sh.shift_code, sh.shift_name, sh.start_time, sh.end_time,
-             p.machine_id,
-             COALESCE(SUM(p.produced_qty),0)::int AS produced
+             p.machine_id, p.hour_start,
+             COALESCE(SUM(p.produced_qty),0)::int AS produced,
+             COALESCE(SUM(p.run_seconds),0)::int AS run_seconds,
+             COALESCE(SUM(p.idle_seconds),0)::int AS idle_seconds,
+             COALESCE(SUM(p.energy_kwh),0)::float AS kwh
       FROM shifts sh
       LEFT JOIN production_hourly p
         ON p.shift_id = sh.id
        AND p.company_id = sh.company_id
-       AND p.hour_start >= $2 AND p.hour_start < $3${plantSql('p.machine_id')}
+       AND EXISTS (SELECT 1 FROM machines owned WHERE owned.id = p.machine_id AND owned.company_id = $1)
+       AND p.hour_start >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour'
+       AND p.hour_start < LEAST((($2::date + 2)::timestamp AT TIME ZONE 'Asia/Kolkata'), $3::timestamptz)
+       AND p.hour_start + INTERVAL '1 hour' > ($2::date + sh.start_time) AT TIME ZONE 'Asia/Kolkata'
+       AND p.hour_start < (
+             CASE WHEN sh.start_time >= sh.end_time
+                  THEN $2::date + INTERVAL '1 day' + sh.end_time
+                  ELSE $2::date + sh.end_time
+             END
+           ) AT TIME ZONE 'Asia/Kolkata'
+       AND ($2::date + sh.start_time) AT TIME ZONE 'Asia/Kolkata' <= $3::timestamptz${plantSql('p.machine_id')}
        ${machineId ? 'AND p.machine_id = $4' : ''}
-      WHERE sh.company_id = $1 AND sh.is_active${sharedEntityPlantSql('sh')}
-      GROUP BY sh.id, sh.shift_code, sh.shift_name, sh.start_time, sh.end_time, p.machine_id
-      ORDER BY sh.shift_code`,
+      WHERE sh.company_id = $1 AND (sh.is_active OR p.hour_start IS NOT NULL)${sharedEntityPlantSql('sh')}
+      GROUP BY sh.id, sh.shift_code, sh.shift_name, sh.start_time, sh.end_time, p.machine_id, p.hour_start
+      UNION ALL
+      /* Legacy/unassigned records have no shift start date. Include only
+         their selected calendar day, never an unbounded history fallback. */
+      SELECT NULL::int AS shift_id, 'Unassigned' AS shift_code, 'Unassigned' AS shift_name,
+             NULL::time AS start_time, NULL::time AS end_time, p.machine_id, p.hour_start,
+             COALESCE(SUM(p.produced_qty),0)::int AS produced,
+             COALESCE(SUM(p.run_seconds),0)::int AS run_seconds,
+             COALESCE(SUM(p.idle_seconds),0)::int AS idle_seconds,
+             COALESCE(SUM(p.energy_kwh),0)::float AS kwh
+      FROM production_hourly p
+      JOIN machines owned ON owned.id = p.machine_id AND owned.company_id = $1
+      LEFT JOIN shifts missing_shift ON missing_shift.id = p.shift_id AND missing_shift.company_id = p.company_id
+      WHERE p.company_id = $1 AND missing_shift.id IS NULL${plantSql('p.machine_id')}
+        AND p.hour_start >= $2::date::timestamp AT TIME ZONE 'Asia/Kolkata'
+        AND p.hour_start < LEAST((($2::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'), $3::timestamptz)
+        ${machineId ? 'AND p.machine_id = $4' : ''}
+      GROUP BY p.machine_id, p.hour_start
+      ORDER BY shift_code, hour_start`,
       machineId
-        ? [companyId, `${win.day}T00:00:00+05:30`, `${win.day}T23:59:59.999+05:30`, machineId]
-        : [companyId, `${win.day}T00:00:00+05:30`, `${win.day}T23:59:59.999+05:30`]
-    ),
-
-    /* downtime split by reason and planned/unplanned */
-    db.query(`
-      SELECT COALESCE(r.name,'Unclassified') AS reason,
-             COALESCE(r.category,'UNPLANNED') AS category,
-             COALESCE(SUM(d.duration_seconds),0)::int AS seconds,
-             COUNT(*)::int AS events
-      FROM downtime_events d
-      LEFT JOIN downtime_reasons r ON r.id = d.downtime_reason_id
-      WHERE d.company_id = $1${plantSql('d.machine_id')} AND d.started_at >= $2 AND d.started_at < $3
-        ${machineId ? 'AND d.machine_id = $4' : ''}
-      GROUP BY r.name, r.category
-      ORDER BY seconds DESC`,
-      machineId ? [companyId, win.from, win.to, machineId] : [companyId, win.from, win.to]
-    ),
-
-    /* alarm summary by class */
-    db.query(`
-      SELECT ${SEVERITY_CLASS} AS class,
-             COUNT(*)::int AS count,
-             COUNT(*) FILTER (WHERE is_resolved IS NOT TRUE)::int AS open
-      FROM machine_alarms
-      WHERE company_id = $1${plantSql('machine_id')} AND started_at >= $2 AND started_at < $3
-        ${machineId ? 'AND machine_id = $4' : ''}
-      GROUP BY 1`,
-      machineId ? [companyId, win.from, win.to, machineId] : [companyId, win.from, win.to]
-    ),
-
-    /* hourly energy + production trend, per machine and shift so output
-       can be counted in parts and set against the hourly target */
-    db.query(`
-      SELECT hour_start, machine_id, shift_id,
-             COALESCE(SUM(energy_kwh),0)::float AS kwh,
-             COALESCE(SUM(produced_qty),0)::int AS produced
-      FROM production_hourly WHERE ${s.sql}
-      GROUP BY hour_start, machine_id, shift_id ORDER BY hour_start`, s.params
+        ? [companyId, win.day, asOf.toISOString(), machineId]
+        : [companyId, win.day, asOf.toISOString()]
     ),
 
     /* Each machine's target for a shift: the target quantity on its current
        job — the same figure the live dashboard measures a shift against. */
     db.query(`
-      SELECT j.machine_id, j.target_qty::numeric AS target,
-             COALESCE(c.multiplication_factor, 1)::numeric AS mult
+      SELECT j.machine_id, j.target_qty::numeric AS target
         FROM machine_current_job j
         JOIN machines m ON m.id = j.machine_id AND m.company_id = $1 AND m.is_active
-        LEFT JOIN components c ON c.id = j.component_id
        WHERE j.is_active = TRUE${plantSql('j.machine_id')}
          ${machineId ? 'AND j.machine_id = $2' : ''}`,
       machineId ? [companyId, machineId] : [companyId]
     ),
 
-    /* yesterday's energy and output, for the "vs yesterday" comparisons —
-       per machine, so its output counts parts as today's does */
+    /* Yesterday uses the same shift-start-day attribution and recorded
+       units as today, rather than comparing unlike calendar windows. */
     db.query(`
-      SELECT machine_id,
-             COALESCE(SUM(energy_kwh),0)::float AS kwh,
-             COALESCE(SUM(produced_qty),0)::int AS produced
-        FROM production_hourly
-       WHERE company_id = $1${plantSql('machine_id')}
-         AND hour_start >= ($2::date - 1)::timestamp AT TIME ZONE 'Asia/Kolkata'
-         AND hour_start <  ($2::date)::timestamp AT TIME ZONE 'Asia/Kolkata'
-         ${machineId ? 'AND machine_id = $3' : ''}
-       GROUP BY machine_id`,
-      machineId ? [companyId, win.day, machineId] : [companyId, win.day]
+      SELECT p.machine_id,
+             COALESCE(SUM(p.energy_kwh),0)::float AS kwh,
+             COALESCE(SUM(p.produced_qty),0)::int AS produced
+        FROM production_hourly p
+        JOIN machines owned ON owned.id = p.machine_id AND owned.company_id = $1
+        LEFT JOIN shifts sh ON sh.id = p.shift_id AND sh.company_id = p.company_id
+       WHERE p.company_id = $1${plantSql('p.machine_id')}${sharedEntityPlantSql('sh')}
+         AND p.hour_start >= (($2::date - 1)::timestamp AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour'
+         AND p.hour_start < LEAST((($2::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'), $3::timestamptz)
+         AND (
+           (sh.id IS NULL
+             AND p.hour_start >= ($2::date - 1)::timestamp AT TIME ZONE 'Asia/Kolkata'
+             AND p.hour_start < $2::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+           OR (sh.id IS NOT NULL
+             AND p.hour_start + INTERVAL '1 hour' > ($2::date - 1 + sh.start_time) AT TIME ZONE 'Asia/Kolkata'
+             AND p.hour_start < (
+               CASE WHEN sh.start_time >= sh.end_time
+                    THEN $2::date - 1 + INTERVAL '1 day' + sh.end_time
+                    ELSE $2::date - 1 + sh.end_time
+               END
+             ) AT TIME ZONE 'Asia/Kolkata'
+             AND ($2::date - 1 + sh.start_time) AT TIME ZONE 'Asia/Kolkata' <= $3::timestamptz)
+         )
+         ${machineId ? 'AND p.machine_id = $4' : ''}
+         ${win.shift ? `AND p.shift_id = $${machineId ? 5 : 4}` : ''}
+       GROUP BY p.machine_id`,
+      [companyId, win.day, asOf.toISOString(), ...(machineId ? [machineId] : []), ...(win.shift ? [win.shift.id] : [])]
     )
   ]);
 
   const settings   = settingsRes.rows[0] || {};
   const rate       = Number(settings.energy_rate_per_kwh || 0);
-  const prod       = prodRes.rows[0];
+  const windowRows = shiftRes.rows.filter(r => r.hour_start && (!win.shift || r.shift_id === win.shift.id));
+  const prod = windowRows.reduce((total, row) => ({
+    produced: total.produced + Number(row.produced || 0),
+    run_seconds: total.run_seconds + Number(row.run_seconds || 0),
+    idle_seconds: total.idle_seconds + Number(row.idle_seconds || 0),
+    energy_kwh: total.energy_kwh + Number(row.kwh || 0)
+  }), { produced: 0, run_seconds: 0, idle_seconds: 0, energy_kwh: 0 });
+
+  // Factory-local event/OEE bounds follow the shifts starting this date.
+  // Shared resolveWindow still serves other analytics screens unchanged.
+  const shiftWindows = new Map();
+  for (const row of shiftRes.rows) {
+    if (row.shift_id == null || shiftWindows.has(row.shift_id)) continue;
+    const startsAt = new Date(`${win.day}T${row.start_time}+05:30`);
+    const endsAt = new Date(`${win.day}T${row.end_time}+05:30`);
+    if (endsAt <= startsAt) endsAt.setTime(endsAt.getTime() + 86_400_000);
+    shiftWindows.set(row.shift_id, {
+      starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(),
+      status: asOf < startsAt ? 'upcoming' : asOf < endsAt ? 'in_progress' : 'completed'
+    });
+  }
+  const eventWindows = win.shift ? [shiftWindows.get(win.shift.id)].filter(Boolean) : [...shiftWindows.values()];
+  if (!win.shift && windowRows.some(row => row.shift_id == null)) eventWindows.push({
+    starts_at: `${win.day}T00:00:00+05:30`,
+    ends_at: new Date(Date.parse(`${win.day}T00:00:00+05:30`) + 86_400_000).toISOString()
+  });
+  const eventStart = eventWindows.length ? new Date(Math.min(...eventWindows.map(w => Date.parse(w.starts_at)))).toISOString() : win.from;
+  const eventEnd = new Date(Math.max(Date.parse(eventStart), Math.min(asOf.getTime(), eventWindows.length ? Math.max(...eventWindows.map(w => Date.parse(w.ends_at))) : Date.parse(win.to)))).toISOString();
+  const eventParams = machineId ? [companyId, eventStart, eventEnd, machineId] : [companyId, eventStart, eventEnd];
+  const eventShift = win.shift ? `$${eventParams.push(win.shift.id)}` : null;
 
   /* month-to-date energy, for the monthly cost figure, and the same days
      of last month for the "vs last month" comparison */
-  const monthRes = await db.query(`
+  const monthRequest = db.query(`
     SELECT COALESCE(SUM(energy_kwh) FILTER (
              WHERE hour_start >= date_trunc('month', $2::date)
                AND hour_start <  (date_trunc('month', $2::date) + INTERVAL '1 month')), 0)::float AS kwh,
@@ -232,22 +251,52 @@ exports.getFactoryDashboard = async (req) => {
     machineId ? [companyId, win.day, machineId] : [companyId, win.day]
   );
 
-  /* ── OEE: the OEE Dashboard's own sums ── */
-  const derived = machineTotals.map(r => oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS));
+  const [machineTotals, downtimeRes, alarmRes, monthRes] = await Promise.all([
+    oeeSvc.machineTotals({ companyId, machineId, shiftId: win.shift?.id || null, start: eventStart, end: eventEnd }),
+    db.query(`
+      SELECT COALESCE(r.name,'Unclassified') AS reason,
+             COALESCE(r.category,'UNPLANNED') AS category,
+             COALESCE(SUM(d.duration_seconds),0)::int AS seconds,
+             COUNT(*)::int AS events
+      FROM downtime_events d
+      LEFT JOIN downtime_reasons r ON r.id = d.downtime_reason_id
+      WHERE d.company_id = $1${plantSql('d.machine_id')} AND d.started_at >= $2 AND d.started_at < $3
+        ${machineId ? 'AND d.machine_id = $4' : ''}
+        ${eventShift ? `AND d.shift_id = ${eventShift}` : ''}
+      GROUP BY r.name, r.category ORDER BY seconds DESC`, eventParams),
+    db.query(`
+      SELECT ${SEVERITY_CLASS} AS class, COUNT(*)::int AS count,
+             COUNT(*) FILTER (WHERE is_resolved IS NOT TRUE)::int AS open
+      FROM machine_alarms
+      WHERE company_id = $1${plantSql('machine_id')} AND started_at >= $2 AND started_at < $3
+        ${machineId ? 'AND machine_id = $4' : ''}
+        ${eventShift ? `AND shift_id = ${eventShift}` : ''}
+      GROUP BY 1`, eventParams),
+    monthRequest
+  ]);
+
+  /* Keep the existing OEE derivation/cycle/quality method, but its production
+     inputs must be the exact same shift-day rows as the other factory tiles.
+     This also preserves a partial first-hour bucket at a half-hour start. */
+  const totalsByMachine = new Map();
+  for (const row of windowRows) {
+    const total = totalsByMachine.get(row.machine_id) || { produced: 0, run_seconds: 0, idle_seconds: 0, hours: 0 };
+    total.produced += Number(row.produced || 0);
+    total.run_seconds += Number(row.run_seconds || 0);
+    total.idle_seconds += Number(row.idle_seconds || 0);
+    total.hours += 1;
+    totalsByMachine.set(row.machine_id, total);
+  }
+  const derived = machineTotals.map(row => oeeSvc.deriveOee({
+    ...row, ...(totalsByMachine.get(row.machine_id) || { produced: 0, run_seconds: 0, idle_seconds: 0, hours: 0 })
+  }, oeeSvc.DEFAULT_THRESHOLDS));
   const fleet = oeeSvc.fleetOee(derived, oeeSvc.DEFAULT_THRESHOLDS);
 
   /* ── targets ── */
-  const targetOf = new Map(targetRes.rows.map(r => [r.machine_id, { target: Number(r.target) || 0, mult: Number(r.mult) || 1 }]));
-  const multOf = id => targetOf.get(id)?.mult || 1;
+  const targetOf = new Map(targetRes.rows.map(r => [r.machine_id, { target: Number(r.target) || 0 }]));
   const shiftTarget = [...targetOf.values()].reduce((a, t) => a + t.target, 0);
   const targetMachines = [...targetOf.entries()].filter(([, t]) => t.target > 0).map(([id]) => id);
-
-  /* Output in parts: a machine's counter times the parts its job makes per
-     cycle (the component's multiplication factor) — as the Live Dashboard,
-     the machine page and this page's trend count it. The shift bars and the
-     "pieces" figure counted the bare counter (26 Oct 2026, the user: the
-     bar read 232 while Actual vs Target read 272 for the same shift). */
-  const parts = (machineId, counted) => Math.round(Number(counted || 0) * multOf(machineId));
+  const targetMachineIds = new Set(targetMachines);
 
   /* One row per shift: all output, and the output of machines with a target
      set against the sum of those targets. */
@@ -255,22 +304,25 @@ exports.getFactoryDashboard = async (req) => {
   for (const r of shiftRes.rows) {
     const e = shifts.get(r.shift_id) || {
       shift_id: r.shift_id, shift_code: r.shift_code, shift_name: r.shift_name,
-      start_time: r.start_time, end_time: r.end_time, produced: 0, actual: 0
+      start_time: r.start_time, end_time: r.end_time, produced: 0, actual: 0,
+      ...shiftWindows.get(r.shift_id)
     };
-    e.produced += parts(r.machine_id, r.produced);
-    if (r.machine_id && targetMachines.includes(r.machine_id)) e.actual += parts(r.machine_id, r.produced);
+    e.produced += Number(r.produced || 0);
+    if (targetMachineIds.has(r.machine_id)) e.actual += Number(r.produced || 0);
     shifts.set(r.shift_id, e);
   }
-  const shiftwise = [...shifts.values()].map(e => ({ ...e, target: shiftTarget || null }));
+  const shiftwise = [...shifts.values()].map(e => ({ ...e, target: e.shift_id == null ? null : shiftTarget || null }));
 
-  /* Overall production against target, over the shifts in the window. */
+  /* Headline actual, pieces and trend use the same stored quantities and
+     start-date rows as Production Report. Current targets stay configurable. */
   const inScope = win.shift ? shiftwise.filter(r => r.shift_id === win.shift.id) : shiftwise;
-  const actualInScope = inScope.reduce((a, r) => a + r.actual, 0);
-  const targetInScope = shiftTarget * inScope.length;
+  const actualInScope = windowRows.reduce((a, r) => a + (targetMachineIds.has(r.machine_id) ? Number(r.produced || 0) : 0), 0);
+  const targetInScope = shiftTarget * inScope.filter(row => row.shift_id != null).length;
 
   /* Hourly trend: output in parts, and each hour's share of the targets —
      a shift's target spread evenly over its hours. */
   const shiftHours = new Map(shiftwise.map(r => {
+    if (r.shift_id == null) return [null, null];
     const [sh, sm] = String(r.start_time).split(':').map(Number);
     const [eh, em] = String(r.end_time).split(':').map(Number);
     let mins = (eh * 60 + em) - (sh * 60 + sm);
@@ -282,16 +334,16 @@ exports.getFactoryDashboard = async (req) => {
      otherwise every hour is drawn twice. */
   const IST = 5.5 * 3600 * 1000, HOUR = 3600 * 1000;
   const byHour = new Map();
-  for (const r of energyRes.rows) {
+  for (const r of windowRows) {
     const t = new Date(r.hour_start).getTime();
     const bucket = new Date(Math.floor((t + IST) / HOUR) * HOUR - IST);
     const key = bucket.toISOString();
     const e = byHour.get(key) || { hour: bucket, kwh: 0, produced: 0, shift_id: r.shift_id };
-    e.kwh += r.kwh;
-    e.produced += parts(r.machine_id, r.produced);
+    e.kwh += Number(r.kwh || 0);
+    e.produced += Number(r.produced || 0);
     byHour.set(key, e);
   }
-  const trend = [...byHour.values()].map(e => {
+  const trend = [...byHour.values()].sort((a, b) => a.hour.getTime() - b.hour.getTime()).map(e => {
     const hrs = shiftHours.get(e.shift_id);
     return {
       hour: e.hour,
@@ -301,9 +353,8 @@ exports.getFactoryDashboard = async (req) => {
     };
   });
 
-  /* the window's output in parts, from the same rows as the trend */
-  const producedParts = energyRes.rows.reduce((a, r) => a + parts(r.machine_id, r.produced), 0);
-  const yday = yesterdayRes.rows.reduce((a, r) => ({ kwh: a.kwh + Number(r.kwh || 0), produced: a.produced + parts(r.machine_id, r.produced) }),
+  const producedParts = prod.produced;
+  const yday = yesterdayRes.rows.reduce((a, r) => ({ kwh: a.kwh + Number(r.kwh || 0), produced: a.produced + Number(r.produced || 0) }),
                                          { kwh: 0, produced: 0 });
   const pctChange = (now, before) => (before > 0 ? Number((((now - before) / before) * 100).toFixed(1)) : null);
   const perPart = (kwh, produced) => (rate && produced > 0 ? Number(((kwh * rate) / produced).toFixed(2)) : null);
@@ -319,7 +370,7 @@ exports.getFactoryDashboard = async (req) => {
       shift_code: win.shift?.shift_code || null,
       machine_id: machineId
     },
-    updated_at: new Date().toISOString(),
+    updated_at: asOf.toISOString(),
 
     machines: machineRes.rows[0],
 

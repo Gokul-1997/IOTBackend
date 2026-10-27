@@ -102,7 +102,7 @@ describe('a small report downloads as the screen shows it', () => {
     mockDb.queueResponse(rows([]));
     const res = await request(app).get('/api/reports/production').query({ date: '2026-10-20' }).buffer(true).parse(binary);
     expect(res.status).toBe(200);
-    expect(mockDb.calls()[0].params).toEqual([5, '2026-10-20', '2026-10-20']);
+    expect(mockDb.calls()[0].params).toEqual([5, '2026-10-20', '2026-10-20', expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)]);
     const sheet = await sheetOf(res.body);
     // an empty report still says what it would have held
     expect(sheet.getRow(1).values.slice(1)).toEqual(['Machine', 'Operator', 'Shift', 'Hour', 'Run Time', 'Idle Time', 'Parts Made', 'Energy (kWh)']);

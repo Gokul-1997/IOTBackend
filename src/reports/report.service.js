@@ -71,9 +71,10 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
   if (operator_id) { params.push(operator_id); conds.push(`op.operator_id     = $${params.length}`); }
 
   const extra = conds.length ? 'AND ' + conds.join(' AND ') : '';
+  const asOf = `$${params.push(new Date().toISOString())}::timestamptz`;
 
   const { rows } = await db.query(`
-    WITH ${OPERATOR_CTE}
+    WITH ${OPERATOR_CTE}, report_clock AS (SELECT ${asOf} AS as_of)
     SELECT
       m.machine_serial_no                                                        AS machine,
       COALESCE(op.operator_name, '--')                                           AS operator,
@@ -87,19 +88,34 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
       ROUND(COALESCE(p.energy_kwh, 0)::numeric, 3)                              AS energy_kwh
     FROM production_hourly p
     JOIN machines m ON m.id = p.machine_id
-    LEFT JOIN shifts   s    ON s.id = p.shift_id
+    CROSS JOIN report_clock clock
+    LEFT JOIN shifts   s    ON s.id = p.shift_id AND s.company_id = $1
     LEFT JOIN op_map   op   ON op.machine_id = p.machine_id
-    WHERE m.company_id = $1${plantSql('m.id')}
+    WHERE m.company_id = $1 AND p.company_id = $1${plantSql('m.id')}${sharedEntityPlantSql('s')}
+      /* Bound the rollup scan before resolving each shift's start date.
+         Include the first partial clock hour, but never future buckets. */
+      AND p.hour_start >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour'
+      AND p.hour_start < LEAST((($3::date + 2)::timestamp AT TIME ZONE 'Asia/Kolkata'), clock.as_of)
       AND (
-        s.start_time IS NULL
+        (s.start_time IS NULL
+          AND p.hour_start >= $2::date::timestamp AT TIME ZONE 'Asia/Kolkata'
+          AND p.hour_start < ($3::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
         OR (
-          p.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+          s.start_time IS NOT NULL
+          AND p.hour_start + INTERVAL '1 hour' > ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
           AND p.hour_start < (
-                CASE WHEN s.start_time > s.end_time
+                CASE WHEN s.start_time >= s.end_time
                      THEN ($3::date + INTERVAL '1 day' + s.end_time)
                      ELSE ($3::date + s.end_time)
                 END
               ) AT TIME ZONE 'Asia/Kolkata'
+          /* A preloaded 20:00 bucket must not show a 20:30 shift at 20:15.
+             This also holds when the selected range starts before today. */
+          AND (
+            ((clock.as_of AT TIME ZONE 'Asia/Kolkata')::date + s.start_time) AT TIME ZONE 'Asia/Kolkata' <= clock.as_of
+            OR p.hour_start + INTERVAL '1 hour' <=
+              ((clock.as_of AT TIME ZONE 'Asia/Kolkata')::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+          )
         )
       )
       ${extra}

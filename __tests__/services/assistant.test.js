@@ -203,7 +203,7 @@ describe('a question answered from the reports', () => {
     const a = createAssistant({ callModel, config: config(), now: () => new Date('2026-10-22T06:00:00Z') });
     const r = await a.chat(person(), ask('VMC production today'));
     expect(r).toMatchObject({ kind: 'clarify', text: 'Which VMC — VMC - 12 - F or VMC - 13 - M?', sources: [] });
-    expect(db.queries.find(q => /FROM production_hourly p/.test(q.text)).params).toEqual([5, '2026-10-22', '2026-10-22', 1]);
+    expect(db.queries.find(q => /FROM production_hourly p/.test(q.text)).params).toEqual([5, '2026-10-22', '2026-10-22', 1, expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)]);
     const [, second] = toolResults(sent).slice(-2);
     expect(second.is_error).toBe(true);
     expect(JSON.parse(second.content)).toMatchObject({ problem: '"VMC" matches more than one machine.' });
