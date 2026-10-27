@@ -27,7 +27,7 @@
                 "status"
               ]
             },
-            "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+            "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n- `machine_status` is what the machine is doing now, as the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY` (an emergency stop) or `OFFLINE` (no data for a minute). `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: then `program` and `backup_request` are `null` and nothing moves for the machine until it is running or idle again; its programs stay in line (`programs_waiting`).\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
           },
           "event": [
             {
@@ -49,7 +49,7 @@
                   "    pm.collectionVariables.set('fileId', m.program.file_id);",
                   "    pm.collectionVariables.set('sha256', m.program.sha256);",
                   "    console.log(m.machine + ' (machine_id ' + m.machine_id + ', ' + (m.controller_type || 'controller type not set') + ', program path ' + (m.program_path || 'not set') + '): ' + m.program.program_name + ' waiting (' + m.programs_waiting + ' in line) → call 2. Download the program');",
-                  "  } else console.log(m.machine + ': nothing waiting.');",
+                  "  } else console.log(m.machine + (m.on_hold ? ': on hold (' + m.machine_status + ') — nothing moves until it is running or idle' : ': nothing waiting.'));",
                   "  if (m.backup_request) {",
                   "    pm.collectionVariables.set('backupRequestId', m.backup_request.id);",
                   "    console.log(m.machine + ': backup asked for → read the program from the CNC and call 4a (or 4b on failure)');",
@@ -61,7 +61,7 @@
           ],
           "response": [
             {
-              "name": "Programs waiting, a backup asked for",
+              "name": "Programs waiting, a backup asked for, a machine on hold",
               "originalRequest": {
                 "method": "GET",
                 "header": [],
@@ -77,7 +77,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n- `machine_status` is what the machine is doing now, as the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY` (an emergency stop) or `OFFLINE` (no data for a minute). `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: then `program` and `backup_request` are `null` and nothing moves for the machine until it is running or idle again; its programs stay in line (`programs_waiting`).\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "OK",
               "code": 200,
@@ -88,7 +88,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine_id\": 7,\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"controller_type\": \"FANUC\",\n      \"api_key\": \"3f9a2c1e7b4d8a0c6e5f1b2d3a4c5e6f\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"program\": {\n        \"file_id\": 42,\n        \"program_name\": \"O1001.nc\",\n        \"size_bytes\": 1472,\n        \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n        \"uploaded_at\": \"2026-10-22T08:00:00.000Z\"\n      },\n      \"programs_waiting\": 2,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 8,\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"controller_name\": null,\n      \"controller_type\": null,\n      \"api_key\": \"b71c0d9e8f7a6b5c4d3e2f1a0b9c8d7e\",\n      \"program_path\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": {\n        \"id\": 9,\n        \"requested_at\": \"2026-10-22T08:05:00.000Z\"\n      }\n    },\n    {\n      \"machine_id\": 9,\n      \"machine\": \"VMC-03\",\n      \"machine_ip\": \"192.168.1.12\",\n      \"controller_name\": \"Mitsubishi M80\",\n      \"controller_type\": \"MITSUBISHI\",\n      \"api_key\": \"0a1b2c3d4e5f60718293a4b5c6d7e8f9\",\n      \"program_path\": \"M01:\\\\PRG\\\\USER\\\\\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
+              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine_id\": 7,\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"controller_type\": \"FANUC\",\n      \"api_key\": \"3f9a2c1e7b4d8a0c6e5f1b2d3a4c5e6f\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"machine_status\": \"RUNNING\",\n      \"on_hold\": false,\n      \"program\": {\n        \"file_id\": 42,\n        \"program_name\": \"O1001.nc\",\n        \"size_bytes\": 1472,\n        \"sha256\": \"9f2c1a7e4b0d8c3f6a5e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807f6e\",\n        \"uploaded_at\": \"2026-10-22T08:00:00.000Z\"\n      },\n      \"programs_waiting\": 2,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 8,\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"controller_name\": null,\n      \"controller_type\": null,\n      \"api_key\": \"b71c0d9e8f7a6b5c4d3e2f1a0b9c8d7e\",\n      \"program_path\": null,\n      \"machine_status\": \"IDLE\",\n      \"on_hold\": false,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": {\n        \"id\": 9,\n        \"requested_at\": \"2026-10-22T08:05:00.000Z\"\n      }\n    },\n    {\n      \"machine_id\": 9,\n      \"machine\": \"VMC-03\",\n      \"machine_ip\": \"192.168.1.12\",\n      \"controller_name\": \"Mitsubishi M80\",\n      \"controller_type\": \"MITSUBISHI\",\n      \"api_key\": \"0a1b2c3d4e5f60718293a4b5c6d7e8f9\",\n      \"program_path\": \"M01:\\\\PRG\\\\USER\\\\\",\n      \"machine_status\": \"IDLE\",\n      \"on_hold\": false,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 15,\n      \"machine\": \"HMC-15\",\n      \"machine_ip\": \"192.168.1.15\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"controller_type\": \"FANUC\",\n      \"api_key\": \"5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"machine_status\": \"EMERGENCY\",\n      \"on_hold\": true,\n      \"program\": null,\n      \"programs_waiting\": 1,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
             },
             {
               "name": "Nothing to do",
@@ -107,7 +107,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n- `machine_status` is what the machine is doing now, as the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY` (an emergency stop) or `OFFLINE` (no data for a minute). `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: then `program` and `backup_request` are `null` and nothing moves for the machine until it is running or idle again; its programs stay in line (`programs_waiting`).\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "OK",
               "code": 200,
@@ -118,7 +118,7 @@
                   "value": "application/json; charset=utf-8"
                 }
               ],
-              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine_id\": 7,\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"controller_type\": \"FANUC\",\n      \"api_key\": \"3f9a2c1e7b4d8a0c6e5f1b2d3a4c5e6f\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 8,\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"controller_name\": null,\n      \"controller_type\": null,\n      \"api_key\": \"b71c0d9e8f7a6b5c4d3e2f1a0b9c8d7e\",\n      \"program_path\": null,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
+              "body": "{\n  \"company\": \"Acme Gears\",\n  \"machines\": [\n    {\n      \"machine_id\": 7,\n      \"machine\": \"VMC-01\",\n      \"machine_ip\": \"192.168.1.10\",\n      \"controller_name\": \"FANUC 0i-MF\",\n      \"controller_type\": \"FANUC\",\n      \"api_key\": \"3f9a2c1e7b4d8a0c6e5f1b2d3a4c5e6f\",\n      \"program_path\": \"//CNC_MEM/USER/PATH1/\",\n      \"machine_status\": \"RUNNING\",\n      \"on_hold\": false,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    },\n    {\n      \"machine_id\": 8,\n      \"machine\": \"VMC-02\",\n      \"machine_ip\": null,\n      \"controller_name\": null,\n      \"controller_type\": null,\n      \"api_key\": \"b71c0d9e8f7a6b5c4d3e2f1a0b9c8d7e\",\n      \"program_path\": null,\n      \"machine_status\": \"OFFLINE\",\n      \"on_hold\": true,\n      \"program\": null,\n      \"programs_waiting\": 0,\n      \"backup_request\": null\n    }\n  ],\n  \"poll_seconds\": 15\n}"
             },
             {
               "name": "Wrong, replaced or stopped token",
@@ -137,7 +137,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n- `machine_status` is what the machine is doing now, as the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY` (an emergency stop) or `OFFLINE` (no data for a minute). `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: then `program` and `backup_request` are `null` and nothing moves for the machine until it is running or idle again; its programs stay in line (`programs_waiting`).\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Unauthorized",
               "code": 401,
@@ -167,7 +167,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n- `machine_status` is what the machine is doing now, as the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY` (an emergency stop) or `OFFLINE` (no data for a minute). `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: then `program` and `backup_request` are `null` and nothing moves for the machine until it is running or idle again; its programs stay in line (`programs_waiting`).\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Unauthorized",
               "code": 401,
@@ -197,7 +197,7 @@
                     "status"
                   ]
                 },
-                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
+                "description": "One call for **every machine** of the company — call it every `poll_seconds` (15 s).\n\n- `machines[].program` is the program in front of that machine's line (`null`: nothing waiting). Download it (call 2), write it to the CNC, report it (3a / 3b).\n- `programs_waiting` counts it and the ones behind it: two uploads for one machine go one after the other.\n- `backup_request` is not null when someone pressed **Backup now**: read the program from the CNC and upload it (call 4a), or report that you could not (call 4b).\n- `machine_id` names the machine in calls 2–4. `machine_ip` is its IP: the one its telemetry reports, else the **Machine IP** typed on the Machines page (`null` when neither is known).\n- `controller_type` is the **Controller type** chosen on the Machines page: `FANUC` or `MITSUBISHI` (`null` when not chosen) — how to talk to that CNC.\n- `controller_name` and `program_path` are the **Controller** and **Program path** on the Machines page (`null` when not filled in): the program path is the folder on the CNC, e.g. `//CNC_MEM/USER/PATH1/` on a Fanuc.\n- `api_key` is the machine's telemetry key (MQTT topic `machines/{api_key}/telemetry`): keep this answer as private as the token.\n- `machine_status` is what the machine is doing now, as the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY` (an emergency stop) or `OFFLINE` (no data for a minute). `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: then `program` and `backup_request` are `null` and nothing moves for the machine until it is running or idle again; its programs stay in line (`programs_waiting`).\n\nThe tests below pick the machine in the `machineId` variable (or the first one with something to do) and save `machineId`, `fileId`, `sha256` and `backupRequestId` for the next calls."
               },
               "status": "Forbidden",
               "code": 403,
@@ -236,7 +236,7 @@
                 }
               ]
             },
-            "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+            "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
           },
           "event": [
             {
@@ -277,7 +277,7 @@
                     }
                   ]
                 },
-                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
               },
               "status": "OK",
               "code": 200,
@@ -338,7 +338,7 @@
                     }
                   ]
                 },
-                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
               },
               "status": "Not Found",
               "code": 404,
@@ -350,6 +350,43 @@
                 }
               ],
               "body": "{\n  \"status\": \"error\",\n  \"code\": \"NO_PROGRAM\",\n  \"message\": \"Nothing is waiting for VMC-01.\"\n}"
+            },
+            {
+              "name": "The machine is on hold (alarm, emergency stop or offline)",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/device/v1/program?machine_id={{machineId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "device",
+                    "v1",
+                    "program"
+                  ],
+                  "query": [
+                    {
+                      "key": "machine_id",
+                      "value": "{{machineId}}",
+                      "description": "The machine, as /status lists it (machine_id)"
+                    }
+                  ]
+                },
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "body": "{\n  \"status\": \"error\",\n  \"code\": \"MACHINE_ON_HOLD\",\n  \"message\": \"HMC-15 is in emergency stop. Program transfer is off until it is running or idle again.\"\n}"
             },
             {
               "name": "No such machine",
@@ -375,7 +412,7 @@
                     }
                   ]
                 },
-                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
               },
               "status": "Not Found",
               "code": 404,
@@ -412,7 +449,7 @@
                     }
                   ]
                 },
-                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
               },
               "status": "Bad Request",
               "code": 400,
@@ -449,7 +486,7 @@
                     }
                   ]
                 },
-                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once."
+                "description": "The program in front of the machine's line, as a file. Check `X-Sha256` against the file before writing it to the CNC. `X-File-Id` is the id to report.\n\nAfter writing, report the result: **3a** (DONE) or **3b** (FAILED, with the reason). The report's answer names the machine's next program (`next_program`), which can follow at once.\n\n`409 MACHINE_ON_HOLD`: the machine went into alarm, emergency stop or offline. Leave it: the program stays in line and `/status` offers it again when the machine is running or idle."
               },
               "status": "Bad Request",
               "code": 400,
@@ -495,7 +532,7 @@
                 }
               }
             },
-            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+            "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
           },
           "event": [
             {
@@ -547,7 +584,7 @@
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -591,7 +628,7 @@
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -635,7 +672,7 @@
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "OK",
               "code": 200,
@@ -679,7 +716,7 @@
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Not Found",
               "code": 404,
@@ -723,7 +760,7 @@
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Bad Request",
               "code": 400,
@@ -767,7 +804,7 @@
                     }
                   }
                 },
-                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
+                "description": "The program is on the machine. The page shows **On the machine** and the person who uploaded it is notified. The program leaves the line; the answer's `next_program` is the machine's next one (`null`: nothing else waits, or the machine went on hold).\n\n`machine_id` is optional: sent, it must be the program's machine (`MACHINE_MISMATCH` otherwise). Sending the same report again (a retry after a lost answer) changes nothing: `\"unchanged\": true`."
               },
               "status": "Bad Request",
               "code": 400,

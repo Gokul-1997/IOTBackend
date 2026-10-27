@@ -36,14 +36,16 @@ beforeEach(async () => {
 afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 test('machines: the list, and beside it the company\'s one gateway — never a token', async () => {
-  mockDb.queueResponse({ rows: [{ id: 7, machine_serial_no: 'VMC-1', next_id: null, report_id: null, backup_id: null, request_id: null }], rowCount: 1 },
+  mockDb.queueResponse({ rows: [{ id: 7, machine_serial_no: 'VMC-1', machine_state: 'IDLE', last_seen_at: 'T2',
+                                  next_id: null, report_id: null, backup_id: null, request_id: null }], rowCount: 1 },
     one({ id: 1, token_prefix: 'mxg_abcdefgh', created_at: 'T0', last_seen_at: 'T1', last_seen_ip: '203.0.113.9', online: true }));
   const res = await request(app).get('/api/programs/machines');
   expect(res.status).toBe(200);
   expect(res.headers['cache-control']).toBe('no-store');
   expect(res.body).toEqual({
     status: 'success',
-    data: [{ id: 7, machine_serial_no: 'VMC-1', program_path: null, machine_ip: null, controller_type: null,
+    data: [{ id: 7, machine_serial_no: 'VMC-1', status: 'IDLE', last_seen_at: 'T2', on_hold: false,
+             program_path: null, machine_ip: null, controller_type: null,
              next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }],
     gateway: { token_prefix: 'mxg_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true }
   });
@@ -63,6 +65,23 @@ test.each(['page:programs:upload', 'page:programs:transfer'])('upload needs both
   const res = await request(app).post('/api/programs/files').field('machine_id', '7').attach('file', Buffer.from('M30'), 'O1.nc');
   expect(res.status).toBe(403);
   expect(mockDb.calls().find(c => /program_files/.test(c.text))).toBeUndefined();
+});
+
+/* 27 Oct 2026, the user: "alarm, emergency, disconnect — program transfer must not work" */
+test('upload and backup for a machine on hold: 409 with the reason, nothing saved', async () => {
+  mockDb.queueResponse(one({ ...machine, machine_state: 'EMERGENCY' }));
+  const res = await request(app).post('/api/programs/files')
+    .field('machine_id', '7').attach('file', Buffer.from('%\nO1001\nM30\n%'), 'O1001.nc');
+  expect(res.status).toBe(409);
+  expect(res.body).toEqual({ status: 'error', code: 'MACHINE_ON_HOLD',
+    message: 'VMC-1 is in emergency stop. Program transfer is off until it is running or idle again.' });
+  expect(mockDb.calls().find(c => /program_files/.test(c.text))).toBeUndefined();
+
+  mockDb.queueResponse(one({ ...machine, machine_state: 'OFFLINE' }));
+  const backup = await request(app).post('/api/programs/machines/7/backup');
+  expect(backup.status).toBe(409);
+  expect(backup.body).toMatchObject({ code: 'MACHINE_ON_HOLD', message: expect.stringMatching(/^VMC-1 is disconnected/) });
+  expect(mockDb.calls().find(c => /program_backup_requests/.test(c.text))).toBeUndefined();
 });
 
 test('backup request needs Fetch from Machine; the first click makes it, the second finds it', async () => {

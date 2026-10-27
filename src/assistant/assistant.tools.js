@@ -110,6 +110,8 @@ const clip = (v, n = 120) => (v == null ? null : String(v).replace(/\s+/g, ' ').
 /** "22 Oct 2026, 2:05 pm" in the company's own time. */
 const at = (v, tz) => (v ? new Intl.DateTimeFormat('en-IN', { timeZone: tz || 'Asia/Kolkata', day: 'numeric', month: 'short',
   year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(v)) : null);
+/** A machine's state now (Program Transfer's machine list), in words. */
+const MACHINE_STATUS_WORD = { RUNNING: 'running', IDLE: 'idle', ALARM: 'in alarm', EMERGENCY: 'in emergency stop', OFFLINE: 'disconnected' };
 
 /** The period input every dated tool takes. */
 const PERIOD_INPUT = {
@@ -456,7 +458,7 @@ const TOOLS = {
     access: ACCESS.programs,
     definition: {
       name: 'program_transfer_status',
-      description: 'Program Transfer now: whether the company\'s gateway is online, and for each machine the program next to send, how many wait, the last one the machine took or refused, and a backup asked for.',
+      description: 'Program Transfer now: whether the company\'s gateway is online, and for each machine its status (transfer is off while it is in alarm, emergency stop or disconnected), the program next to send, how many wait, the last one the machine took or refused, and a backup asked for.',
       input_schema: { type: 'object', properties: { machine: NAMED_INPUT.machine }, additionalProperties: false }
     },
     async run(user, input, ctx) {
@@ -464,6 +466,7 @@ const TOOLS = {
       const { gateway, machines } = await programsSvc.listMachines({ user });
       const listed = machines.filter(m => !machine || m.id === machine.id).slice(0, 40).map(m => ({
         machine: m.machine_serial_no,
+        status: MACHINE_STATUS_WORD[m.status] ?? null, transfer_off: !!m.on_hold,
         next_to_send: m.next?.program_name ?? null, waiting: m.waiting,
         last: m.last_report ? { program: m.last_report.program_name, result: m.last_report.delivery_status === 'DONE' ? 'on the machine' : 'refused',
                                 reason: clip(m.last_report.delivery_message), at: at(m.last_report.delivered_at, ctx.timezone) } : null,

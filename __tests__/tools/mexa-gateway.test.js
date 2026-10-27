@@ -51,18 +51,18 @@ describe('against the real gateway API', () => {
                   agent_version: 'mexa-gateway 3', company_name: 'Acme Gears', company_active: true })
           : none;
       }
-      if (/FROM machines m\s+LEFT JOIN LATERAL/.test(text)) {                       // GET /status: every machine at once
+      if (/LEFT JOIN program_backup_requests r\s+ON r\.machine_id = m\.id/.test(text)) {   // GET /status: every machine at once
         state.statusCalls += 1;
         return { rows: state.machines.map(m => {
           const line = waiting(m.id), head = line[0], request = state.requests.find(r => r.machine_id === m.id && !r.closed_at);
           return { machine_id: m.id, machine_serial_no: m.machine_serial_no, machine_ip: m.machine_ip, controller: m.controller,
-                   controller_type: m.controller_type,
+                   controller_type: m.controller_type, machine_state: m.machine_state,
                    api_key: m.api_key, program_path: m.program_path, file_id: head?.id ?? null,
                    program_name: head?.program_name, size_bytes: head?.size_bytes, sha256: head?.sha256, created_at: head?.created_at,
                    waiting: line.length ? String(line.length) : null, request_id: request?.id ?? null, requested_at: request?.requested_at };
         }) };
       }
-      if (/FROM machines m WHERE m\.id = \$1 AND m\.company_id = \$2/.test(text)) {      // which machine a call names: its machine_id
+      if (/WHERE m\.id = \$1 AND m\.company_id = \$2/.test(text)) {                     // which machine a call names: its machine_id
         const m = state.machines.find(x => x.id === params[0] && x.company_id === params[1]);
         return m ? one(m) : none;
       }
@@ -159,6 +159,27 @@ describe('against the real gateway API', () => {
     expect(db.statusCalls).toBe(2);
     expect(fs.readFileSync(path.join(dir, 'VMC-1', 'O1001.nc'), 'utf8')).toBe('edited on the machine');
     expect(lines.join('\n')).not.toContain(token);
+  });
+
+  /* 27 Oct 2026, the user: nothing goes to a machine in alarm, emergency stop or disconnected */
+  test('a machine on hold is offered nothing: its program stays in line, the other machine gets its own', async () => {
+    db.machines[0].machine_state = 'EMERGENCY';
+    db.machines[1].machine_state = 'RUNNING';
+    await uploaded(7, 'M30\n', 'O1001.nc');
+    await uploaded(8, 'M30\n', 'O2001.nc');
+    const dir = path.join(TMP, 'factory-hold');
+    const status = await createGateway({ url, token, programDir: dir }).tick();
+    expect(status.machines.map(m => [m.machine, m.machine_status, m.on_hold, m.program?.program_name ?? null, m.programs_waiting]))
+      .toEqual([['VMC-1', 'EMERGENCY', true, null, 1], ['VMC-2', 'RUNNING', false, 'O2001.nc', 1]]);
+    expect(fs.existsSync(path.join(dir, 'VMC-1', 'O1001.nc'))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, 'VMC-2', 'O2001.nc'), 'utf8')).toBe('M30\n');
+    expect(db.files.map(f => [f.program_name, f.delivery_status])).toEqual([['O1001.nc', null], ['O2001.nc', 'DONE']]);
+
+    // asked for anyway, by a gateway that does not read on_hold: refused, and still in line
+    const res = await fetch(`${url}/api/device/v1/program?machine_id=7`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'MACHINE_ON_HOLD', message: 'VMC-1 is in emergency stop. Program transfer is off until it is running or idle again.' });
+    expect(db.files[0].delivery_status).toBeNull();
   });
 
   test('MACHINE_DIRS: only the machines named are served here, into their own folders; the rest wait for their gateway', async () => {
@@ -286,6 +307,13 @@ describe('edge cases, against a scripted server', () => {
     const api = scripted({ 'GET /status': status(waiting),
       'GET /program': () => new Response(JSON.stringify({ code: 'NO_PROGRAM', message: 'Nothing is waiting for VMC-1.' }), { status: 404 }) });
     await expect(createGateway({ url: 'https://mexa.test', token: 't', programDir: dirOf('gone'), fetch: api.fetch }).tick()).resolves.toBeTruthy();
+    expect(api.reports()).toEqual([]);
+  });
+
+  test('a machine put on hold between /status and the download is skipped, not an error', async () => {
+    const api = scripted({ 'GET /status': status(waiting),
+      'GET /program': () => new Response(JSON.stringify({ code: 'MACHINE_ON_HOLD', message: 'VMC-1 is in alarm. Program transfer is off until it is running or idle again.' }), { status: 409 }) });
+    await expect(createGateway({ url: 'https://mexa.test', token: 't', programDir: dirOf('held'), fetch: api.fetch }).tick()).resolves.toBeTruthy();
     expect(api.reports()).toEqual([]);
   });
 

@@ -728,14 +728,14 @@ describe('the rest of the company', () => {
     database();
     const spy = jest.spyOn(require('../../src/programs/program.service'), 'listMachines').mockResolvedValue({
       gateway: { token_prefix: 'mxg_x', online: false, last_seen_at: '2026-10-22T05:00:00Z' },
-      machines: [{ id: 1, machine_serial_no: 'VMC - 12 - F', next: { program_name: 'O2002.nc' }, waiting: 2,
+      machines: [{ id: 1, machine_serial_no: 'VMC - 12 - F', status: 'EMERGENCY', on_hold: true, next: { program_name: 'O2002.nc' }, waiting: 2,
                    last_report: { program_name: 'O2001.nc', delivery_status: 'FAILED', delivery_message: 'CNC memory full', delivered_at: '2026-10-22T04:00:00Z' },
                    backup_request: null, backup_failure: null }]
     });
     const r = await run('program_transfer_status');
     expect(spy.mock.calls[0][0].user).toMatchObject({ id: 2, company_id: 5 });
     expect(r.out).toEqual({ gateway: 'offline since 22 Oct 2026, 10:30 am', machines: [{
-      machine: 'VMC - 12 - F', next_to_send: 'O2002.nc', waiting: 2,
+      machine: 'VMC - 12 - F', status: 'in emergency stop', transfer_off: true, next_to_send: 'O2002.nc', waiting: 2,
       last: { program: 'O2001.nc', result: 'refused', reason: 'CNC memory full', at: '22 Oct 2026, 9:30 am' }, backup_asked: false, backup_failed: null }] });
     expect(JSON.stringify(r.out)).not.toContain('mxg_');                  // nothing of the token
     spy.mockRestore();

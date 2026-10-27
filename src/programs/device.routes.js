@@ -5,8 +5,10 @@
  * three together.
  *
  *   GET  /status    { company, machines: [...], poll_seconds } — every machine, one call:
- *                   machine_id, name, IP, controller_name, api_key, program_path, …
- *   GET  /program   ?machine_id=ID: that machine's next program
+ *                   machine_id, name, IP, controller_name, api_key, program_path,
+ *                   machine_status, on_hold (in alarm, emergency stop or disconnected:
+ *                   nothing is offered for it), …
+ *   GET  /program   ?machine_id=ID: that machine's next program (409 MACHINE_ON_HOLD while on hold)
  *   POST /backup    multipart "machine_id" + "file": a backup from a machine
  *   POST /report    JSON: the program is on the machine / was refused,
  *                   or a backup could not be read

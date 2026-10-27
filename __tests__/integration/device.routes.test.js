@@ -85,12 +85,12 @@ test('status: every machine of the company in one call — its id, name, IP, con
     company: 'Acme Gears',
     machines: [
       { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', controller_type: 'FANUC', api_key: 'k'.repeat(32),
-        program_path: '//CNC_MEM/USER/PATH1/',
+        program_path: '//CNC_MEM/USER/PATH1/', machine_status: null, on_hold: false,
         program: { file_id: 81, program_name: 'O8001.nc', size_bytes: 20, sha256: 'a'.repeat(64), uploaded_at: '2026-10-22T05:00:00Z' },
         programs_waiting: 2,
         backup_request: { id: 9, requested_at: '2026-10-22T05:10:00Z' } },
       { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: null, controller_type: null, api_key: null, program_path: null,
-        program: null, programs_waiting: 0, backup_request: null }
+        machine_status: null, on_hold: false, program: null, programs_waiting: 0, backup_request: null }
     ],
     poll_seconds: 15
   });

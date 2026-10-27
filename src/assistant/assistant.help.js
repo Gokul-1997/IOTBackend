@@ -65,10 +65,11 @@ The bell (top right) holds notifications; your name opens Profile, Settings and 
   },
   {
     id: 'program_transfer', title: 'Program Transfer: sending NC programs to machines',
-    keywords: 'program programs transfer upload nc file cnc send machine backup gateway token waiting line queue refused download',
+    keywords: 'program programs transfer upload nc file cnc send machine backup gateway token waiting line queue refused download alarm emergency disconnected hold',
     text: `- Master → Program Transfer: choose the machine, then Upload program (.nc and other NC text files up to 20 MB). Uploading needs the "Upload to library" and "Send to machine" permissions.
 - Programs wait in line for each machine, oldest first; the company's gateway sends them one at a time. A file shows "Next to send", "Waiting · 2nd in line", "On the machine" or "Refused by machine" with the reason.
 - Backup now asks the gateway to send the machine's current program back; it appears under Backups.
+- The machine list shows each machine's status. Program transfer is off for a machine in alarm, in emergency stop or disconnected: Upload and Backup now wait, and so do programs already in line, until it is running or idle again.
 - The page shows whether the company's gateway is online. Its token is made by S&T, not on this page.`
   },
   {

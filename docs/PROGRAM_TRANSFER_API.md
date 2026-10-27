@@ -6,7 +6,7 @@ all the company's machines, and one status call for all of them.**
 
 | Call | What it does |
 | --- | --- |
-| `GET  /api/device/v1/status` | Every machine at once: its `machine_id`, name, controller and controller type (Fanuc / Mitsubishi), `api_key` and program path; is a program waiting for it? Did someone ask for a backup? |
+| `GET  /api/device/v1/status` | Every machine at once: its `machine_id`, name, controller and controller type (Fanuc / Mitsubishi), `api_key` and program path, and what it is doing now; is a program waiting for it? Did someone ask for a backup? |
 | `GET  /api/device/v1/program?machine_id=ID` | Download the program waiting for that machine |
 | `POST /api/device/v1/backup` | Upload a backup file from a machine (form fields `machine_id`, `file`) |
 | `POST /api/device/v1/report` | Say what happened: program written, machine refused it, backup could not be read |
@@ -37,6 +37,17 @@ every 15 s:  GET /status                                ← ONE call for every m
 
 Twenty machines cost one call every 15 seconds, not twenty. Programs and
 backups add calls only when there is something to move.
+
+## A machine on hold gets nothing
+
+A machine **in alarm, in emergency stop or disconnected** (MEXA has had no
+data from it for a minute) is on hold: nothing goes to it and no backup is
+asked of it. `/status` says so (`machine_status`, `on_hold: true`) and lists
+its `program` and `backup_request` as `null`, however many programs wait
+for it; `GET /program` for it answers `409 MACHINE_ON_HOLD`. Its programs
+stay in line and are offered again, by themselves, once it is running or
+idle. People cannot upload for it or press Backup now meanwhile: the page
+shows the machine's status and why transfer is off.
 
 ## Programs wait in line, per machine
 
@@ -128,6 +139,8 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
       "controller_type": "FANUC",
       "api_key": "3f9a…32 characters…",
       "program_path": "//CNC_MEM/USER/PATH1/",
+      "machine_status": "RUNNING",
+      "on_hold": false,
       "program": {
         "file_id": 42,
         "program_name": "O1001.nc",
@@ -146,6 +159,8 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
       "controller_type": "MITSUBISHI",
       "api_key": "b71c…32 characters…",
       "program_path": null,
+      "machine_status": "IDLE",
+      "on_hold": false,
       "program": null,
       "programs_waiting": 0,
       "backup_request": { "id": 9, "requested_at": "2026-10-22T08:05:00.000Z" }
@@ -171,10 +186,18 @@ curl -H "Authorization: Bearer $TOKEN" https://SERVER/api/device/v1/status
   (`null` when not filled in). Write programs there, and read backups from
   there, on the CNC. It is typed in MEXA: never take it for a folder on the
   gateway PC without checking it against the folders that PC may use.
+- `machine_status` is what the machine is doing now, from its telemetry, as
+  the Live Dashboard shows it: `RUNNING`, `IDLE`, `ALARM`, `EMERGENCY`
+  (an emergency stop) or `OFFLINE` (no data for a minute).
+- `on_hold` is `true` in `ALARM`, `EMERGENCY` or `OFFLINE`: nothing moves for
+  the machine until it is running or idle again (see *A machine on hold gets
+  nothing*).
 - `program` is the program in front of the machine's line (`null`: nothing
-  waiting). Download it (call 2), write it, report it (call 4).
-- `programs_waiting` counts it and the ones behind it.
-- `backup_request` is not `null` when someone pressed **Backup now**. Read the
+  waiting, or the machine is on hold). Download it (call 2), write it, report
+  it (call 4).
+- `programs_waiting` counts it and the ones behind it (on hold too).
+- `backup_request` is not `null` when someone pressed **Backup now** (and the
+  machine is not on hold). Read the
   program from the CNC and upload it (call 3). A request nobody answers within
   30 minutes lapses: it is no longer listed, and the page tells the person
   the gateway did not answer.
@@ -197,7 +220,9 @@ The body is the file itself. The headers say what it is:
 | `Content-Length` | `1472` |
 
 `404 NO_PROGRAM` means nothing is waiting for that machine (someone deleted
-it on the page after your `/status`). The same program can be downloaded as
+it on the page after your `/status`). `409 MACHINE_ON_HOLD` means the
+machine went into alarm, emergency stop or offline: leave it; the program
+stays in line and `/status` offers it again when the machine is back. The same program can be downloaded as
 often as needed until it is reported; each download shows it on the page as
 sent to the gateway, at that time.
 
@@ -255,7 +280,8 @@ The answer to a program report names the machine's next program:
                     "sha256": "…", "uploaded_at": "2026-10-22T08:01:00.000Z" } }
 ```
 
-`next_program` is `null` when nothing else waits for that machine.
+`next_program` is `null` when nothing else waits for that machine, or the
+machine went on hold meanwhile (its next one waits for it).
 
 | Report | What the page shows | Who is notified |
 | --- | --- | --- |
@@ -307,6 +333,7 @@ Every error is JSON: `{"status":"error","code":"…","message":"…"}`.
 | 404 | `MACHINE_NOT_FOUND` | No such machine in the company: use the `machine_id` `/status` lists |
 | 409 | `MACHINE_AMBIGUOUS` | (by name, from an older gateway) two machines share that name: send `machine_id` |
 | 404 | `NO_PROGRAM` | Nothing is waiting for that machine |
+| 409 | `MACHINE_ON_HOLD` | The machine is in alarm, emergency stop or offline: its programs wait until it is running or idle again |
 | 404 | `FILE_NOT_FOUND` / `REQUEST_NOT_FOUND` | Report: no such program / backup request in the company |
 | 409 | `REPORT_CONFLICT` / `FILE_REMOVED` | A final result conflicts with the report, or the program was removed |
 | 400 | `MACHINE_MISMATCH` | The `machine_id` sent with a report is not the program's (or request's) machine; or a name or IP sent with `machine_id` is not that machine's |

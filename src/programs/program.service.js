@@ -23,6 +23,11 @@
  * FOCAS, a USB stick…) is the gateway team's business: the server never
  * connects to a machine.
  *
+ * Nothing moves for a machine in alarm, in emergency stop or disconnected
+ * (27 Oct 2026, the user: "program transfer must not work then; show the
+ * machine's status"): people cannot upload for it or ask it for a backup,
+ * and the gateway is offered neither until it is running or idle again.
+ *
  * Files are rows in program_files (030), kind NEW (an upload) or BACKUP. An
  * upload's place in line is its delivery_status (051, 053): NULL waiting,
  * then DONE or FAILED as reported, or SKIPPED (made before the line existed;
@@ -50,8 +55,46 @@ const BACKUP_WAIT_MIN = 30;
 const REPORT_WAIT_MIN = 10;
 /** How often a gateway is asked to call /status. */
 const POLL_SECONDS = 15;
+/** A machine that sent no telemetry for this long is disconnected, as the Live Dashboard says (dashboard/fleet-page.js). */
+const MACHINE_LIVE_SEC = 60;
 
 const fail = (message, code, status = 400) => Object.assign(new Error(message), { code, status });
+
+/*
+ * What a machine is doing now, from its telemetry, as the Live Dashboard
+ * reads it: OFFLINE when it sent nothing for MACHINE_LIVE_SEC, else ALARM
+ * while it alarms (EMERGENCY when an emergency stop is among its open
+ * alarms), else RUNNING or IDLE. `m` is the machine; the bounded read lets
+ * TimescaleDB look at the last hour's chunks only.
+ */
+const STATE_JOINS = `
+         LEFT JOIN LATERAL (
+                SELECT t.machine_status, t.alarm, t.received_at FROM telemetry_raw t
+                 WHERE t.company_id = m.company_id AND t.machine_id = m.id
+                   AND t.received_at > NOW() - INTERVAL '1 hour'
+                 ORDER BY t.received_at DESC LIMIT 1) live ON true
+         LEFT JOIN LATERAL (
+                SELECT true AS emergency FROM machine_alarms a
+                 WHERE a.machine_id = m.id AND a.ended_at IS NULL
+                   AND (a.alarm_type ILIKE '%emergenc%' OR a.message ILIKE '%emergenc%')
+                 LIMIT 1) emg ON true`;
+const STATE = `CASE
+           WHEN live.received_at IS NULL OR live.received_at < NOW() - make_interval(secs => ${MACHINE_LIVE_SEC}) THEN 'OFFLINE'
+           WHEN live.alarm AND emg.emergency THEN 'EMERGENCY'
+           WHEN live.alarm THEN 'ALARM'
+           WHEN UPPER(live.machine_status) IN ('RUN', 'RUNNING', 'CUTTING') THEN 'RUNNING'
+           ELSE 'IDLE' END`;
+
+/** The states in which nothing moves for a machine, and how a sentence says so. */
+const HOLD = {
+  ALARM: 'is in alarm',
+  EMERGENCY: 'is in emergency stop',
+  OFFLINE: 'is disconnected: MEXA has had no data from it for a minute'
+};
+const onHold = state => Object.hasOwn(HOLD, String(state));
+const holdError = machine => fail(
+  `${machine.machine_serial_no} ${HOLD[machine.machine_state]}. Program transfer is off until it is running or idle again.`,
+  'MACHINE_ON_HOLD', 409);
 
 function pageOf(query, defLimit = 20) {
   const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || defLimit));
@@ -67,17 +110,25 @@ function idOf(value, message, code) {
 
 const scope = (req) => ({ companyId: req.user.company_id, plantId: effectivePlantId(req.user) });
 
-/** A switched-on machine of the caller's company (and plant, for a plant user), or a 404. */
+/** A switched-on machine of the caller's company (and plant, for a plant user), with its state now; or a 404. */
 async function getMachine(req, machineId) {
   const id = idOf(machineId, 'Machine not found.', 'MACHINE_NOT_FOUND');
   const { companyId, plantId } = scope(req);
   const { rows } = await pool.query(
-    `SELECT id, company_id, machine_serial_no
-       FROM machines WHERE id = $1 AND company_id = $2 AND is_active = true${plantSql('id', plantId, companyId)}`,
+    `SELECT m.id, m.company_id, m.machine_serial_no, ${STATE} AS machine_state
+       FROM machines m${STATE_JOINS}
+      WHERE m.id = $1 AND m.company_id = $2 AND m.is_active = true${plantSql('m.id', plantId, companyId)}`,
     [id, companyId]
   );
   if (!rows.length) throw fail('Machine not found.', 'MACHINE_NOT_FOUND', 404);
   return rows[0];
+}
+
+/** As getMachine, for sending a program or asking a backup: a machine in alarm, emergency stop or disconnected is a 409 that says so. */
+async function readyMachine(req, machineId) {
+  const machine = await getMachine(req, machineId);
+  if (onHold(machine.machine_state)) throw holdError(machine);
+  return machine;
 }
 
 const FILE_COLUMNS = `f.id, f.machine_id, f.program_name, f.kind, f.size_bytes, f.sha256, f.created_at,
@@ -89,12 +140,13 @@ const WAITING = `f.kind = 'NEW' AND f.delivery_status IS NULL AND f.deleted_at I
 /** The machine's address as MEXA knows it: the controller's, from its telemetry (else the one typed in long ago). */
 const MACHINE_IP = `COALESCE(NULLIF(btrim(m.controller_ip), ''), NULLIF(btrim(m.ip_address), ''))`;
 
-/** The program a machine gets next: its oldest upload still in line. */
-async function nextProgram(machineId, db = pool) {
+/** The program a machine gets next: its oldest upload still in line. `ready`: none while the machine is on hold. */
+async function nextProgram(machineId, db = pool, { ready = false } = {}) {
   const { rows } = await db.query(
     `SELECT ${FILE_COLUMNS}, f.folder, f.stored_name
-       FROM program_files f
-      WHERE f.machine_id = $1 AND ${WAITING}
+       FROM program_files f${ready ? `
+       JOIN machines m ON m.id = f.machine_id${STATE_JOINS}` : ''}
+      WHERE f.machine_id = $1 AND ${WAITING}${ready ? ` AND ${STATE} IN ('RUNNING', 'IDLE')` : ''}
       ORDER BY f.created_at, f.id
       LIMIT 1`,
     [machineId]
@@ -161,18 +213,21 @@ function backupFailure(r) {
 }
 
 /**
- * The company's gateway, and its machines: each with where its programs go
- * (the program path, IP and controller type the gateway is given — shown so
- * a wrong one is seen; 23 Oct 2026), the program in front of its line, how
- * many wait and whether the gateway has taken it, the last program the
- * gateway reported on (on the machine, or refused), its last backup, and
- * what became of the last backup asked for.
+ * The company's gateway, and its machines: each with what it is doing now
+ * (on hold — in alarm, emergency stop or disconnected — nothing moves for
+ * it; 27 Oct 2026), where its programs go (the program path, IP and
+ * controller type the gateway is given — shown so a wrong one is seen;
+ * 23 Oct 2026), the program in front of its line, how many wait and whether
+ * the gateway has taken it, the last program the gateway reported on (on the
+ * machine, or refused), its last backup, and what became of the last backup
+ * asked for.
  */
 exports.listMachines = async (req) => {
   const { companyId, plantId } = scope(req);
   const [{ rows }, gateway] = await Promise.all([
     pool.query(
       `SELECT m.id, m.machine_serial_no, m.program_path, m.controller_type, ${MACHINE_IP} AS machine_ip,
+              ${STATE} AS machine_state, live.received_at AS last_seen_at,
               q.id AS next_id, q.program_name AS next_name, q.size_bytes AS next_size, q.created_at AS next_at, q.waiting,
               q.sent_to_gateway_at AS next_sent_at,
               COALESCE(q.sent_to_gateway_at <= NOW() - make_interval(mins => $3), false) AS next_report_late,
@@ -180,7 +235,7 @@ exports.listMachines = async (req) => {
               b.id AS backup_id, b.program_name AS backup_name, b.created_at AS backup_at,
               lr.id AS request_id, lr.requested_at, lr.closed_at AS request_closed_at, lr.error_message AS request_error,
               COALESCE(lr.closed_at IS NULL AND lr.requested_at > NOW() - make_interval(mins => $2), false) AS request_waiting
-         FROM machines m
+         FROM machines m${STATE_JOINS}
          LEFT JOIN LATERAL (
                 SELECT f.id, f.program_name, f.size_bytes, f.created_at, f.sent_to_gateway_at, COUNT(*) OVER () AS waiting
                   FROM program_files f
@@ -208,6 +263,10 @@ exports.listMachines = async (req) => {
   const machines = rows.map(r => ({
     id: r.id,
     machine_serial_no: r.machine_serial_no,
+    // RUNNING, IDLE, ALARM, EMERGENCY or OFFLINE; on_hold: no upload, no backup, nothing offered to the gateway
+    status: r.machine_state || null,
+    last_seen_at: r.last_seen_at || null,
+    on_hold: onHold(r.machine_state),
     // what the gateway is told about this machine (GET /status), as set on the Machines page
     program_path: given(r.program_path),
     machine_ip: r.machine_ip || null,
@@ -257,9 +316,9 @@ exports.listFiles = async (req) => {
   };
 };
 
-/** Upload a program: it joins the end of the machine's line, for its gateway to download. */
+/** Upload a program: it joins the end of the machine's line, for its gateway to download. Not while the machine is on hold. */
 exports.upload = async (req) => {
-  const machine = await getMachine(req, req.body?.machine_id);
+  const machine = await readyMachine(req, req.body?.machine_id);
   const file = await saveFile({ machine, kind: 'NEW', staged: req.file, programName: req.body?.program_name, userId: req.user.id });
   auditOf(req, { action: 'PROGRAM_UPLOAD', resource: 'program_file', resource_id: file.id,
                  new_value: { machine: machine.machine_serial_no, program: file.program_name, sha256: file.sha256 } });
@@ -304,10 +363,11 @@ exports.deleteFile = async (req) => {
 /**
  * Ask the machine's gateway for a backup. One open request per machine: a
  * second click while one waits returns that one. A request the gateway has
- * not answered within BACKUP_WAIT_MIN is closed, and a new one is made.
+ * not answered within BACKUP_WAIT_MIN is closed, and a new one is made. Not
+ * while the machine is on hold.
  */
 exports.requestBackup = async (req) => {
-  const machine = await getMachine(req, req.params.machineId);
+  const machine = await readyMachine(req, req.params.machineId);
   await pool.query(
     `UPDATE program_backup_requests SET closed_at = NOW()
       WHERE machine_id = $1 AND closed_at IS NULL AND requested_at <= NOW() - make_interval(mins => $2)`,
@@ -429,8 +489,9 @@ async function machineOf(gateway, input = {}) {
   const ip = given(input.machine_ip);
   if (id) {
     const { rows: [m] } = await pool.query(
-      `SELECT m.id, m.company_id, m.machine_serial_no, m.is_active, ${MACHINE_IP} AS machine_ip
-         FROM machines m WHERE m.id = $1 AND m.company_id = $2`,
+      `SELECT m.id, m.company_id, m.machine_serial_no, m.is_active, ${MACHINE_IP} AS machine_ip, ${STATE} AS machine_state
+         FROM machines m${STATE_JOINS}
+        WHERE m.id = $1 AND m.company_id = $2`,
       [id, gateway.company_id]
     );
     if (!m) throw fail(`No machine ${id} in ${gateway.company_name}. Use the machine_id GET /status lists.`, 'MACHINE_NOT_FOUND', 404);
@@ -444,8 +505,8 @@ async function machineOf(gateway, input = {}) {
     throw fail('Say which machine: "machine_id", as GET /status lists it.', 'MACHINE_REQUIRED');
   }
   const { rows } = await pool.query(
-    `SELECT m.id, m.company_id, m.machine_serial_no, m.is_active, ${MACHINE_IP} AS machine_ip
-       FROM machines m
+    `SELECT m.id, m.company_id, m.machine_serial_no, m.is_active, ${MACHINE_IP} AS machine_ip, ${STATE} AS machine_state
+       FROM machines m${STATE_JOINS}
       WHERE m.company_id = $1
         AND ($2::text IS NULL OR lower(btrim(m.machine_serial_no)) = lower($2::text))
         AND ($3::text IS NULL OR ${MACHINE_IP} = $3::text OR ($2::text IS NOT NULL AND ${MACHINE_IP} IS NULL))`,
@@ -467,16 +528,19 @@ async function machineOf(gateway, input = {}) {
  * What the gateway polls — one call for every machine of the company: who it
  * is (machine_id — what the other calls send —, name, IP, controller and its
  * type (FANUC / MITSUBISHI), its telemetry api_key and its program path, from
- * the Machines page), the
+ * the Machines page), what it is doing now, the
  * program in front of its line (and how many wait), and an open backup
- * request. The answer carries each machine's api_key: as private as the token.
+ * request. A machine on hold (in alarm, emergency stop or disconnected) is
+ * offered neither until it is running or idle again. The answer carries each
+ * machine's api_key: as private as the token.
  */
 exports.gatewayStatus = async (gateway) => {
   const { rows } = await pool.query(
     `SELECT m.id AS machine_id, m.machine_serial_no, ${MACHINE_IP} AS machine_ip, m.controller, m.controller_type, m.api_key, m.program_path,
+            ${STATE} AS machine_state,
             q.id AS file_id, q.program_name, q.size_bytes, q.sha256, q.created_at, q.waiting,
             r.id AS request_id, r.requested_at
-       FROM machines m
+       FROM machines m${STATE_JOINS}
        LEFT JOIN LATERAL (
               SELECT f.id, f.program_name, f.size_bytes, f.sha256, f.created_at, COUNT(*) OVER () AS waiting
                 FROM program_files f
@@ -490,26 +554,33 @@ exports.gatewayStatus = async (gateway) => {
   );
   return {
     company: gateway.company_name,
-    machines: rows.map(r => ({
-      machine_id: Number(r.machine_id),
-      machine: r.machine_serial_no,
-      machine_ip: r.machine_ip || null,
-      controller_name: given(r.controller),
-      controller_type: r.controller_type || null,
-      api_key: r.api_key || null,
-      program_path: given(r.program_path),
-      program: r.file_id ? fileView({ id: r.file_id, program_name: r.program_name, size_bytes: r.size_bytes,
-                                      sha256: r.sha256, created_at: r.created_at }) : null,
-      programs_waiting: Number(r.waiting || 0),
-      backup_request: r.request_id ? { id: Number(r.request_id), requested_at: r.requested_at } : null
-    })),
+    machines: rows.map(r => {
+      const hold = onHold(r.machine_state);
+      return {
+        machine_id: Number(r.machine_id),
+        machine: r.machine_serial_no,
+        machine_ip: r.machine_ip || null,
+        controller_name: given(r.controller),
+        controller_type: r.controller_type || null,
+        api_key: r.api_key || null,
+        program_path: given(r.program_path),
+        machine_status: r.machine_state || null,
+        on_hold: hold,
+        // on hold: its line waits (programs_waiting still counts it), and so does a backup asked for
+        program: !hold && r.file_id ? fileView({ id: r.file_id, program_name: r.program_name, size_bytes: r.size_bytes,
+                                                 sha256: r.sha256, created_at: r.created_at }) : null,
+        programs_waiting: Number(r.waiting || 0),
+        backup_request: !hold && r.request_id ? { id: Number(r.request_id), requested_at: r.requested_at } : null
+      };
+    }),
     poll_seconds: POLL_SECONDS
   };
 };
 
-/** The program in front of a machine's line, to download — marked as with the gateway until it reports. */
+/** The program in front of a machine's line, to download — marked as with the gateway until it reports. None while the machine is on hold. */
 exports.gatewayProgram = async (gateway, query = {}) => {
   const machine = await machineOf(gateway, query);
+  if (onHold(machine.machine_state)) throw holdError(machine);
   const program = await nextProgram(machine.id);
   if (!program) throw fail(`Nothing is waiting for ${machine.machine_serial_no}.`, 'NO_PROGRAM', 404);
   await pool.query(
@@ -606,8 +677,9 @@ exports.gatewayReport = async (gateway, body = {}) => {
         : tellUser(machine, file.uploaded_by, 'WARNING', `Program not accepted — ${machine.machine_serial_no}`,
                    `${machine.machine_serial_no} could not use "${file.program_name}": ${message}`, file.id));
     }
+    // the next one waits while the machine is on hold
     return { file_id: id, machine_id: Number(machine.id), machine: machine.machine_serial_no, status, ...(file ? {} : { unchanged: true }),
-             next_program: fileView(await nextProgram(machine.id)) };
+             next_program: fileView(await nextProgram(machine.id, pool, { ready: true })) };
   }
 
   const id = idOf(body.backup_request_id, 'No backup request with this id.', 'REQUEST_NOT_FOUND');
@@ -656,4 +728,5 @@ async function tellUser(machine, userId, type, title, message, fileId = null) {
   }
 }
 
-exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, REPORT_WAIT_MIN, POLL_SECONDS, nextProgram, machineOf, machineIdOf, backupFailure };
+exports._internal = { ONLINE_WINDOW_SEC, BACKUP_WAIT_MIN, REPORT_WAIT_MIN, POLL_SECONDS, MACHINE_LIVE_SEC, nextProgram, machineOf, machineIdOf,
+                      backupFailure, onHold };

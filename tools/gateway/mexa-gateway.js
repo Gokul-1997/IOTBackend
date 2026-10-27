@@ -14,6 +14,8 @@
  *                machine's next program, which goes the same way at once
  *     a machine asked for a backup → read the newest program in its folder
  *                → POST /backup (or POST /report FAILED, and why)
+ *     a machine on hold (in alarm, emergency stop or offline) is offered
+ *                neither until it is running or idle again
  *
  * A machine's folder is PROGRAM_DIR/<machine name> — or, with MACHINE_DIRS,
  * the folder given for it (the CNC's network share, its DNC folder). To try
@@ -269,8 +271,9 @@ function createGateway({ url, token, programDir = 'machines', machineDirs = null
       try {
         more = !!(await deliver(machine)).next_program;
       } catch (err) {
-        // deleted on the page, or the machine renamed, between /status and now: nothing to do here
-        if (err instanceof ServerError && ['NO_PROGRAM', 'MACHINE_NOT_FOUND', 'MACHINE_INACTIVE'].includes(err.code)) return written;
+        // deleted on the page, the machine renamed, or it went into alarm, emergency stop or offline
+        // (on hold: its programs wait) between /status and now: nothing to do here
+        if (err instanceof ServerError && ['NO_PROGRAM', 'MACHINE_NOT_FOUND', 'MACHINE_INACTIVE', 'MACHINE_ON_HOLD'].includes(err.code)) return written;
         throw err;
       }
     }

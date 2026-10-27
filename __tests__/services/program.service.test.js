@@ -43,7 +43,7 @@ describe('machines and files', () => {
   test("machines: the company's gateway, and each machine with the program in front of its line, how many wait, the last report, backup and open request", async () => {
     mockDb.queueResponse({ rows: [
       { id: 7, machine_serial_no: 'VMC-1', program_path: ' //CNC_MEM/USER/PATH1/ ', controller_type: 'FANUC', machine_ip: '192.168.1.10',
-        next_id: '44', next_name: 'O2002.nc', next_size: 30, next_at: 'T5', waiting: '2',
+        machine_state: 'RUNNING', last_seen_at: 'T8', next_id: '44', next_name: 'O2002.nc', next_size: 30, next_at: 'T5', waiting: '2',
         next_sent_at: null, next_report_late: false,
         report_id: '40', report_name: 'O1001.nc', delivery_status: 'DONE', delivery_message: null, delivered_at: 'T2b',
         backup_id: '41', backup_name: 'O1001.nc', backup_at: 'T3', request_id: '9', requested_at: 'T4',
@@ -67,7 +67,7 @@ describe('machines and files', () => {
       // where it calls from is for S&T, not the company's page
       gateway: { token_prefix: 'mxg_abcdefgh', token_created_at: 'T0', last_seen_at: 'T1', online: true },
       machines: [
-        { id: 7, machine_serial_no: 'VMC-1',
+        { id: 7, machine_serial_no: 'VMC-1', status: 'RUNNING', last_seen_at: 'T8', on_hold: false,
           // where its programs go, as the gateway is told — shown on the page so a wrong one is seen
           program_path: '//CNC_MEM/USER/PATH1/', machine_ip: '192.168.1.10', controller_type: 'FANUC',
           next: { id: '44', program_name: 'O2002.nc', size_bytes: 30, created_at: 'T5', sent_to_gateway_at: null, report_late: false },
@@ -76,11 +76,12 @@ describe('machines and files', () => {
           last_backup: { id: '41', program_name: 'O1001.nc', created_at: 'T3' },
           backup_request: { id: '9', requested_at: 'T4' },
           backup_failure: null },
-        { id: 8, machine_serial_no: 'VMC-2', program_path: null, machine_ip: null, controller_type: null, next: null, waiting: 0,
+        { id: 8, machine_serial_no: 'VMC-2', status: null, last_seen_at: null, on_hold: false,
+          program_path: null, machine_ip: null, controller_type: null, next: null, waiting: 0,
           last_report: { id: '50', program_name: 'O5000.nc', delivery_status: 'FAILED', delivery_message: 'CNC memory full', delivered_at: 'T7' },
           last_backup: null, backup_request: null, backup_failure: null },
-        { id: 9, machine_serial_no: 'VMC-3', program_path: null, machine_ip: null, controller_type: null,
-          next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }
+        { id: 9, machine_serial_no: 'VMC-3', status: null, last_seen_at: null, on_hold: false,
+          program_path: null, machine_ip: null, controller_type: null, next: null, waiting: 0, last_report: null, last_backup: null, backup_request: null, backup_failure: null }
       ]
     });
   });
@@ -141,6 +142,23 @@ describe('machines and files', () => {
     expect(late.waiting).toBe(3);
   });
 
+  /* 27 Oct 2026, the user: "alarm, emergency, disconnect — program transfer must not work; show the machine status" */
+  test('each machine says what it is doing now, read as the Live Dashboard reads it; in alarm, emergency stop or disconnected it is on hold', async () => {
+    const row = (id, machine_state) => ({ id, machine_serial_no: `VMC-${id}`, machine_state, last_seen_at: 'T9',
+                                          next_id: null, report_id: null, backup_id: null, request_id: null });
+    mockDb.queueResponse({ rows: [row(1, 'RUNNING'), row(2, 'IDLE'), row(3, 'ALARM'), row(4, 'EMERGENCY'), row(5, 'OFFLINE')], rowCount: 5 }, none);
+    const { machines } = await svc.listMachines(req());
+    expect(machines.map(m => [m.status, m.on_hold])).toEqual([
+      ['RUNNING', false], ['IDLE', false], ['ALARM', true], ['EMERGENCY', true], ['OFFLINE', true]]);
+    const { text } = mockDb.calls()[0];
+    // the latest reading of the last hour (TimescaleDB prunes to its chunks); none for a minute: disconnected
+    expect(text).toMatch(/FROM telemetry_raw t\s+WHERE t\.company_id = m\.company_id AND t\.machine_id = m\.id\s+AND t\.received_at > NOW\(\) - INTERVAL '1 hour'/);
+    expect(text).toMatch(/live\.received_at < NOW\(\) - make_interval\(secs => 60\) THEN 'OFFLINE'/);
+    // an emergency stop is an alarm open on the machine that says so
+    expect(text).toMatch(/FROM machine_alarms a\s+WHERE a\.machine_id = m\.id AND a\.ended_at IS NULL\s+AND \(a\.alarm_type ILIKE '%emergenc%' OR a\.message ILIKE '%emergenc%'\)/);
+    expect(text).toMatch(/WHEN live\.alarm AND emg\.emergency THEN 'EMERGENCY'\s+WHEN live\.alarm THEN 'ALARM'/);
+  });
+
   test("a plant user sees only their plant's machines", async () => {
     await svc.listMachines(req({ user: { ...user, plant_id: 3, authorization_plant_id: 3 } }));
     expect(mockDb.calls()[0].text).toMatch(/plant_id = 3/);
@@ -197,6 +215,27 @@ describe('upload', () => {
     mockDb.queueResponse(one(machine));
     await expect(svc.upload(req({ body: { machine_id: '7' } }))).rejects.toMatchObject({ code: 'NO_FILE', status: 400 });
   });
+
+  test.each([
+    ['ALARM', 'VMC-1 is in alarm. Program transfer is off until it is running or idle again.'],
+    ['EMERGENCY', 'VMC-1 is in emergency stop. Program transfer is off until it is running or idle again.'],
+    ['OFFLINE', 'VMC-1 is disconnected: MEXA has had no data from it for a minute. Program transfer is off until it is running or idle again.']
+  ])('a machine %s takes no upload, and nothing is saved', async (machine_state, message) => {
+    mockDb.queueResponse(one({ ...machine, machine_state }));
+    await expect(svc.upload(req({ body: { machine_id: '7' }, file: stage('%\nO1001\nM30\n%\n') })))
+      .rejects.toMatchObject({ status: 409, code: 'MACHINE_ON_HOLD', message });
+    expect(mockDb.calls()).toHaveLength(1);
+    expect(mockDb.calls()[0].text).toMatch(/AS machine_state\s+FROM machines m/);
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+
+  test('a machine running or idle takes it', async () => {
+    for (const machine_state of ['RUNNING', 'IDLE']) {
+      resetDb();
+      mockDb.queueResponse(one({ ...machine, machine_state }), one({ id: '42', program_name: 'O1001.nc' }), one({ position: 1 }));
+      await expect(svc.upload(req({ body: { machine_id: '7' }, file: stage('%\nO1001\nM30\n%\n') }))).resolves.toMatchObject({ queue_position: 1 });
+    }
+  });
 });
 
 describe('delete', () => {
@@ -228,6 +267,14 @@ describe('backup requests', () => {
     resetDb();
     mockDb.queueResponse(one(machine), none, none, one({ id: '9', requested_at: 'T0' }));
     await expect(svc.requestBackup(req({ params: { machineId: '7' } }))).resolves.toEqual({ id: '9', requested_at: 'T0', created: false });
+  });
+
+  test('a machine in alarm, emergency stop or disconnected is not asked: no request is made', async () => {
+    mockDb.queueResponse(one({ ...machine, machine_state: 'EMERGENCY' }));
+    await expect(svc.requestBackup(req({ params: { machineId: '7' } }))).rejects.toMatchObject({ status: 409, code: 'MACHINE_ON_HOLD',
+      message: 'VMC-1 is in emergency stop. Program transfer is off until it is running or idle again.' });
+    expect(mockDb.calls()).toHaveLength(1);
+    expect(audit.log).not.toHaveBeenCalled();
   });
 });
 
@@ -295,11 +342,11 @@ describe('the gateway side: one token, every machine', () => {
       company: 'Acme Gears',
       machines: [
         { machine_id: 7, machine: 'VMC-1', machine_ip: '192.168.1.10', controller_name: 'FANUC 0i-MF', controller_type: 'FANUC', api_key: 'k'.repeat(32),
-          program_path: '//CNC_MEM/USER/PATH1/',
+          program_path: '//CNC_MEM/USER/PATH1/', machine_status: null, on_hold: false,
           program: { file_id: 42, program_name: 'O1001.nc', size_bytes: 24, sha256: 'a'.repeat(64), uploaded_at: 'T0' },
           programs_waiting: 3, backup_request: { id: 9, requested_at: 'T1' } },
         { machine_id: 8, machine: 'VMC-2', machine_ip: null, controller_name: 'M80', controller_type: 'MITSUBISHI', api_key: null, program_path: null,
-          program: null, programs_waiting: 0, backup_request: null }
+          machine_status: null, on_hold: false, program: null, programs_waiting: 0, backup_request: null }
       ],
       poll_seconds: 15
     });
@@ -381,6 +428,28 @@ describe('the gateway side: one token, every machine', () => {
       message: 'Nothing is waiting for VMC-1.' });
   });
 
+  /* 27 Oct 2026, the user: nothing goes to a machine in alarm, emergency stop or disconnected */
+  test('status: a machine on hold is offered neither its program nor a backup asked for; its line still counts', async () => {
+    mockDb.queueResponse({ rows: [
+      { machine_id: '7', machine_serial_no: 'VMC-1', machine_state: 'EMERGENCY', file_id: '42', program_name: 'O1001.nc', waiting: '2',
+        request_id: '9', requested_at: 'T1' },
+      { machine_id: '8', machine_serial_no: 'VMC-2', machine_state: 'IDLE', file_id: '43', program_name: 'O2002.nc', size_bytes: 24,
+        sha256: 'a'.repeat(64), created_at: 'T0', waiting: '1', request_id: null }
+    ], rowCount: 2 });
+    const { machines: [held, ready] } = await svc.gatewayStatus(gateway);
+    expect(held).toMatchObject({ machine_id: 7, machine_status: 'EMERGENCY', on_hold: true, program: null, programs_waiting: 2, backup_request: null });
+    expect(ready).toMatchObject({ machine_id: 8, machine_status: 'IDLE', on_hold: false, program: { file_id: 43 }, programs_waiting: 1 });
+    expect(mockDb.calls()).toHaveLength(1);                                    // still one query for every machine
+  });
+
+  test('program: a machine on hold gets none — it stays in line, not marked as with the gateway', async () => {
+    mockDb.queueResponse(one(vmc1({ machine_state: 'ALARM' })));
+    await expect(svc.gatewayProgram(gateway, { machine_id: '7' })).rejects.toMatchObject({ status: 409, code: 'MACHINE_ON_HOLD',
+      message: 'VMC-1 is in alarm. Program transfer is off until it is running or idle again.' });
+    expect(mockDb.calls()).toHaveLength(1);
+    expect(mockDb.calls()[0].text).toMatch(/AS machine_state\s+FROM machines m/);
+  });
+
   test('backup: saved as a backup of the machine named, answers its open request and tells who asked', async () => {
     mockDb.queueResponse(one(vmc1()),
       one({ id: '43', machine_id: 7, program_name: 'O1001.nc', kind: 'BACKUP', size_bytes: 14, sha256: 'b'.repeat(64), created_at: 'T2' }),
@@ -428,6 +497,8 @@ describe('the gateway reports what happened — and the line moves on', () => {
     expect(sql(/INSERT INTO notifications/).params).toEqual([5, 2, 'INFO', 'Program on VMC-1', '"O1001.nc" was written to VMC-1.',
       '/programs?machine_id=7&file_id=42']);
     expect(mockDb.calls().at(-1).params).toEqual([7]);                                // the line of that machine
+    // named only while the machine may take it: in alarm, emergency stop or disconnected the next one waits
+    expect(mockDb.calls().at(-1).text).toMatch(/JOIN machines m ON m\.id = f\.machine_id[\s\S]+ IN \('RUNNING', 'IDLE'\)\s+ORDER BY f\.created_at, f\.id/);
   });
 
   test('FAILED: the reason is kept, the uploader is warned, and the line moves on all the same', async () => {
