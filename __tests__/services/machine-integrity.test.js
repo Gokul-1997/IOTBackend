@@ -152,3 +152,13 @@ test('an ordinary machine edit can preserve its existing legacy image URL', asyn
   expect(mockDb.calls().find(call => /UPDATE machines/.test(call.text)).params).toContain(legacy);
   expect(mockDb.calls().at(-1).text).toBe('COMMIT');
 });
+/* 28 Oct 2026, the user: a machine's photo can be removed, not only replaced — the form sends it empty */
+test('a removed photo is stored as none, so the machine shows "No photo"', async () => {
+  mockDb.queueResponse(response(), response([{ id: 7, plant_id: 5, image_url: imageUrl(4) }]),
+    response([{ id: 7, plant_id: 5, image_url: null }]), response());
+  await svc.updateMachine(req({ image_url: '' }));
+  const update = mockDb.calls().find(call => /UPDATE machines/.test(call.text));
+  expect(update.text).toMatch(/image_url = \$\d/);
+  expect(update.params[Object.keys({ machine_serial_no: 1, image_url: 1 }).indexOf('image_url')]).toBeNull();
+  expect(mockDb.calls().at(-1).text).toBe('COMMIT');
+});
