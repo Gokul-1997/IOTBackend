@@ -367,3 +367,101 @@ describe('maintenance dashboard — supply voltage', () => {
     expect(svc.supplyOf(undefined)).toBeNull();
   });
 });
+
+describe('maintenance dashboard — Fanuc battery diagnostics and data isolation', () => {
+  test('controller support comes from machine master data and new diagnostics are Fanuc-only', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req());
+    const sql = sqlOf(1);
+    expect(sql).toContain('m.controller_type');
+    expect(sql).toContain("(m.controller_type = 'FANUC') IS TRUE AS battery_supported");
+    for (const column of ['acc_battery_status', 'cnc_battery_warning']) {
+      expect(sql).toContain(`t.${column}`);
+      expect(sql).toContain(`CASE WHEN m.controller_type = 'FANUC' THEN l.${column} END AS ${column}`);
+    }
+    // The legacy field has its own projection; adding 062 never removes it.
+    expect(sql).toContain('l.fan_status, l.apc_battery_status');
+  });
+
+  test('pre062 fallback preserves legacy APC data while each absent new column becomes null', async () => {
+    mockDb.queueResponse({ rows: [] });
+    mockDb.queueError(Object.assign(new Error('column t.acc_battery_status does not exist'), { code: '42703' }));
+    mockDb.queueResponse({ rows: [] }, { rows: [] }, { rows: [] });
+    mockDb.queueError(Object.assign(new Error('column t.cnc_battery_warning does not exist'), { code: '42703' }));
+    const row = { machine_id: 1, controller_type: 'FANUC', battery_supported: true,
+      apc_battery_status: { A: true }, acc_battery_status: null, cnc_battery_warning: null };
+    mockDb.queueResponse({ rows: [row] });
+
+    const result = await svc.getMaintenanceDashboard(req());
+    const queries = mockDb.calls().filter(c => /WITH latest AS[\s\S]*fan_status/.test(c.text));
+    expect(queries).toHaveLength(3);
+    expect(queries.at(-1).text).toContain('t.apc_battery_status, NULL::jsonb AS acc_battery_status, NULL::jsonb AS cnc_battery_warning');
+    expect(result.rows).toEqual([row]);
+    expect(result.unavailable).not.toContain('battery_status');
+  });
+
+  test('an explicit no-warning reading is available, including only an extra axis', () => {
+    expect(svc.unavailableSignals([{ battery_supported: true,
+      acc_battery_status: { B: { ABP: false, INP: false, EXP: false, low: false } }
+    }])).not.toContain('battery_status');
+    expect(svc.unavailableSignals([{ battery_supported: true,
+      cnc_battery_warning: { warning: false }
+    }])).not.toContain('battery_status');
+    expect(svc.unavailableSignals([{ battery_supported: true,
+      acc_battery_status: null, cnc_battery_warning: null
+    }])).toContain('battery_status');
+  });
+
+  test('unsupported machine legacy values do not announce a supported battery signal', () => {
+    expect(svc.unavailableSignals([{ battery_supported: false,
+      apc_battery_status: { X: true }, cnc_battery_voltage: 3.2
+    }])).toContain('battery_status');
+  });
+
+  test('every telemetry query requires source company, current machine ownership and nonfuture timestamps', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req({ machine_id: '7' }));
+    const queries = mockDb.calls().filter(c => /JOIN machines m ON m.id = t.machine_id/.test(c.text));
+    expect(queries).toHaveLength(3);
+    for (const { text } of queries) {
+      expect(text).toMatch(/t\.company_id = \$1/);
+      expect(text).toMatch(/m\.company_id = \$1/);
+      expect(text).toMatch(/m\.is_active/);
+      expect(text).toMatch(/t\.received_at <= NOW\(\)/);
+    }
+    const detail = sqlOf(1);
+    expect(detail).toMatch(/j\.company_id = \$1/);
+    expect(detail).toMatch(/c\.company_id = \$1/);
+    expect(detail).toMatch(/o\.company_id = \$1/);
+    expect(detail).toMatch(/oma\.company_id = \$1/);
+  });
+
+  test('supply voltage requires the reading company, active owned machine and nonfuture reading', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req({ machine_id: '7' }));
+    const { text } = mockDb.calls().find(c => /FROM energy_meter_readings/.test(c.text));
+    expect(text).toMatch(/r\.company_id = \$1/);
+    expect(text).toMatch(/m\.company_id = \$1 AND m\.is_active/);
+    expect(text).toMatch(/r\.read_at <= NOW\(\)/);
+  });
+
+  test('alarm and production records require current active ownership and do not include future data', async () => {
+    queueAll();
+    await svc.getMaintenanceDashboard(req({ machine_id: '7' }));
+    const queries = mockDb.calls().filter(c => /FROM (machine_alarms|production_hourly)/.test(c.text)
+      && /^\s*(?:WITH latest AS|SELECT)/.test(c.text));
+    expect(queries.length).toBeGreaterThan(2);
+    for (const { text } of queries) {
+      expect(text).toContain('AND machine_id IN (SELECT id FROM machines WHERE company_id = $1 AND is_active)');
+      expect(text).toMatch(/(?:started_at|hour_start) <= NOW\(\)/);
+    }
+  });
+
+  test('supply values cannot serialize nonfinite measurements as usable readings', () => {
+    const now = Date.parse('2026-10-28T06:30:00Z');
+    const result = svc.supplyOf({ read_at: new Date(now + 1000), v1n: 'Infinity', v12: 'NaN', v2n: 0 }, now);
+    expect(result.stale).toBe(true);
+    expect(result.ln).toMatchObject({ v1n: null, v2n: 0 });
+    expect(result.ll.v12).toBeNull();
+  });
+});

@@ -7,7 +7,8 @@
  * Condition signals come from the FOCAS collector (pms-backend, columns added
  * by migration 021): spindle speed/load/temperature, servo load and
  * temperature per axis, encoder temperature, insulation resistance, CNC/APC
- * battery voltage, the battery alarm per axis (migration 032) and fan status.
+ * battery voltage, legacy battery flags (032), structured Fanuc detector/CNC
+ * battery warnings (062) and fan status.
  * Controllers differ in what they supply — in September 2026 no machine sent
  * insulation resistance, batteries or fans; from October some send fans as
  * {on, fault, rpm} and the battery as a flag per axis, with no voltage — so
@@ -43,12 +44,12 @@ const TELEMETRY_LOOKBACK = `INTERVAL '1 hour'`;
    hour later. One machine over one day is bounded and indexed — ~0.1 s
    measured on production. */
 const FRESH_WINDOW       = `INTERVAL '60 seconds'`;
+const OWNED_ACTIVE_MACHINE = 'AND machine_id IN (SELECT id FROM machines WHERE company_id = $1 AND is_active)';
 
 /*
- * The battery flag per axis is migration 032's column. Until that has run,
- * the latest-reading query is tried again with the column read as NULL, so
- * the screen keeps working and this build can go out before the migration —
- * as energy-meter.service does for 029's table.
+ * Battery fields are optional during a rolling upgrade (032/062). The
+ * latest-reading query substitutes NULL only for the absent column; legacy
+ * APC flags keep working when the new diagnostics have not been installed.
  */
 /*
  * The supply voltage, from the machine's energy meter (migration 029 keeps
@@ -63,8 +64,9 @@ async function latestSupply(companyId, machineId, from, to) {
     return await db.query(`
       SELECT r.read_at, r.v1n, r.v2n, r.v3n, r.v_ln_avg, r.v12, r.v23, r.v31, r.v_ll_avg
         FROM energy_meter_readings r
-        JOIN machines m ON m.id = r.machine_id AND m.company_id = $1
-       WHERE r.machine_id = $4${plantSql('r.machine_id')} AND r.read_at >= $2 AND r.read_at < $3
+        JOIN machines m ON m.id = r.machine_id AND m.company_id = $1 AND m.is_active
+       WHERE r.company_id = $1 AND r.machine_id = $4${plantSql('r.machine_id')} AND r.read_at >= $2 AND r.read_at < $3
+         AND r.read_at <= NOW()
        ORDER BY r.read_at DESC
        LIMIT 1`, [companyId, from, to, machineId]);
   } catch (err) {
@@ -76,11 +78,11 @@ async function latestSupply(companyId, machineId, from, to) {
 /** The latest meter reading as the screen shows it: two groups of three phases, their averages, and the limits they are judged by. */
 function supplyOf(r, nowMs = Date.now()) {
   if (!r) return null;
-  const n = v => (v === null || v === undefined ? null : Number(v));
+  const n = v => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
   const at = new Date(r.read_at).getTime();
   return {
     read_at: r.read_at,
-    stale: !Number.isFinite(at) || nowMs - at > SUPPLY_STALE_MS,
+    stale: !Number.isFinite(at) || at > nowMs || nowMs - at > SUPPLY_STALE_MS,
     ln: { v1n: n(r.v1n), v2n: n(r.v2n), v3n: n(r.v3n), avg: n(r.v_ln_avg) },
     ll: { v12: n(r.v12), v23: n(r.v23), v31: n(r.v31), avg: n(r.v_ll_avg) },
     limits: {
@@ -94,11 +96,18 @@ function supplyOf(r, nowMs = Date.now()) {
 }
 
 async function withBatteryFlags(query) {
-  try {
-    return await query('t.apc_battery_status');
-  } catch (err) {
-    if (err?.code !== '42703' || !/apc_battery_status/.test(err.message || '')) throw err;
-    return query('NULL::jsonb AS apc_battery_status');
+  const columns = ['apc_battery_status', 'acc_battery_status', 'cnc_battery_warning'];
+  const missing = new Set();
+  // Rolling upgrades may precede 062 (or 032). Replace only a missing
+  // optional battery column, so an older flag remains visible before 062.
+  for (;;) {
+    try {
+      return await query(columns.map(c => missing.has(c) ? `NULL::jsonb AS ${c}` : `t.${c}`).join(', '));
+    } catch (err) {
+      const name = columns.find(c => !missing.has(c) && new RegExp(`\\b${c}\\b`).test(err?.message || ''));
+      if (err?.code !== '42703' || !name) throw err;
+      missing.add(name);
+    }
   }
 }
 
@@ -124,8 +133,9 @@ exports.getMaintenanceDashboard = async (req) => {
                t.machine_id, t.machine_status, t.alarm, t.received_at
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
-        WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
+        WHERE m.company_id = $1 AND t.company_id = $1 AND m.is_active${plantSql('m.id')}
           AND t.received_at > NOW() - ${TELEMETRY_LOOKBACK}
+          AND t.received_at <= NOW()
           ${machineId ? 'AND t.machine_id = $2' : ''}
         ORDER BY t.machine_id, t.received_at DESC
       ),
@@ -174,10 +184,11 @@ exports.getMaintenanceDashboard = async (req) => {
                t.fan_status, ${flags}
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
-        WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
+        WHERE m.company_id = $1 AND t.company_id = $1 AND m.is_active${plantSql('m.id')}
           ${machineId
             ? 'AND t.machine_id = $4 AND t.received_at >= $2 AND t.received_at < $3'
             : `AND t.received_at > NOW() - ${TELEMETRY_LOOKBACK}`}
+          AND t.received_at <= NOW()
         ORDER BY t.machine_id, t.received_at DESC
       ),
       runtime AS (
@@ -185,12 +196,16 @@ exports.getMaintenanceDashboard = async (req) => {
         FROM production_hourly
         WHERE company_id = $1${plantSql('machine_id')} AND hour_start >= $2 AND hour_start < $3
           ${machineId ? 'AND machine_id = $4' : ''}
+          ${OWNED_ACTIVE_MACHINE}
+          AND hour_start <= NOW()
         GROUP BY machine_id
       )
       SELECT
         m.id AS machine_id,
         m.machine_serial_no,
         m.image_url,
+        m.controller_type,
+        (m.controller_type = 'FANUC') IS TRUE AS battery_supported,
         j.component_id,
         j.part_name,
         c.part_number,
@@ -209,18 +224,20 @@ exports.getMaintenanceDashboard = async (req) => {
         l.servo_pulse_x, l.servo_pulse_y, l.servo_pulse_z,
         l.cnc_battery_voltage, l.apc_battery_voltage, l.sequence_number,
         l.fan_status, l.apc_battery_status,
+        CASE WHEN m.controller_type = 'FANUC' THEN l.acc_battery_status END AS acc_battery_status,
+        CASE WHEN m.controller_type = 'FANUC' THEN l.cnc_battery_warning END AS cnc_battery_warning,
         COALESCE(rt.run_seconds, 0)::int AS run_seconds
       FROM machines m
       LEFT JOIN latest  l  ON l.machine_id  = m.id
       LEFT JOIN runtime rt ON rt.machine_id = m.id
       LEFT JOIN machine_current_job j
-             ON j.machine_id = m.id AND j.is_active = TRUE
-      LEFT JOIN components c ON c.id = j.component_id
+             ON j.machine_id = m.id AND j.company_id = $1 AND j.is_active = TRUE
+      LEFT JOIN components c ON c.id = j.component_id AND c.company_id = $1
       LEFT JOIN LATERAL (
         SELECT o.operator_name
         FROM operator_machine_assignments oma
-        JOIN operators o ON o.id = oma.operator_id
-        WHERE oma.machine_id = m.id AND oma.is_active = TRUE
+        JOIN operators o ON o.id = oma.operator_id AND o.company_id = $1
+        WHERE oma.machine_id = m.id AND oma.company_id = $1 AND oma.is_active = TRUE
         ORDER BY oma.assigned_from DESC NULLS LAST, oma.id DESC
         LIMIT 1
       ) op ON TRUE
@@ -239,6 +256,8 @@ exports.getMaintenanceDashboard = async (req) => {
              COUNT(*) FILTER (WHERE is_resolved IS NOT TRUE)::int  AS open
       FROM machine_alarms
       WHERE company_id = $1${plantSql('machine_id')} AND started_at >= $2 AND started_at < $3
+        ${OWNED_ACTIVE_MACHINE}
+        AND started_at <= NOW()
         ${machineId ? 'AND machine_id = $4' : ''}
       GROUP BY 1`, alarmParams
     ),
@@ -254,7 +273,7 @@ exports.getMaintenanceDashboard = async (req) => {
       SELECT COALESCE(SUM(produced_qty),0)::int AS produced,
              COALESCE(SUM(run_seconds),0)::int  AS run_seconds,
              COALESCE(SUM(idle_seconds),0)::int AS idle_seconds
-      FROM production_hourly WHERE ${s.sql}`, s.params
+      FROM production_hourly WHERE ${s.sql} ${OWNED_ACTIVE_MACHINE} AND hour_start <= NOW()`, s.params
     ),
 
     /* condition trend: servo and spindle temperature and insulation
@@ -276,9 +295,10 @@ exports.getMaintenanceDashboard = async (req) => {
                  ROUND(AVG(t.servo_insulation_res_y)::numeric, 1)::float AS servo_insulation_res_y,
                  ROUND(AVG(t.servo_insulation_res_z)::numeric, 1)::float AS servo_insulation_res_z
             FROM telemetry_raw t
-            JOIN machines m ON m.id = t.machine_id AND m.company_id = $1
-           WHERE t.machine_id = $4${plantSql('t.machine_id')}
+            JOIN machines m ON m.id = t.machine_id AND m.company_id = $1 AND m.is_active
+           WHERE t.company_id = $1 AND t.machine_id = $4${plantSql('t.machine_id')}
              AND t.received_at >= $2 AND t.received_at < $3
+             AND t.received_at <= NOW()
            GROUP BY 1 ORDER BY 1`,
           [companyId, win.from, win.to, machineId])
       : Promise.resolve({ rows: [] }),
@@ -292,7 +312,7 @@ exports.getMaintenanceDashboard = async (req) => {
                  COALESCE(SUM(produced_qty), 0)::int AS produced,
                  COALESCE(SUM(run_seconds), 0)::int  AS run_seconds
             FROM production_hourly
-           WHERE ${s.sql}
+           WHERE ${s.sql} ${OWNED_ACTIVE_MACHINE} AND hour_start <= NOW()
            GROUP BY hour_start ORDER BY hour_start`, s.params)
       : Promise.resolve({ rows: [] }),
 
@@ -379,7 +399,8 @@ const SIGNAL_COLUMNS = {
   servo_temperature:     ['servo_temp_x', 'servo_temp_y', 'servo_temp_z'],
   spindle_temperature:   ['spindle_motor_temp'],
   encoder_temperature:   ['encoder_temp_x', 'encoder_temp_y', 'encoder_temp_z'],
-  battery_status:        ['cnc_battery_voltage', 'apc_battery_voltage', 'apc_battery_status'],
+  battery_status:        ['cnc_battery_voltage', 'apc_battery_voltage', 'apc_battery_status',
+                          'acc_battery_status', 'cnc_battery_warning'],
   insulation_resistance: ['spindle_insulation_res', 'servo_insulation_res_x',
                           'servo_insulation_res_y', 'servo_insulation_res_z'],
   fan_amplifier_status:  ['fan_status']
@@ -396,7 +417,8 @@ const SIGNAL_COLUMNS = {
 function unavailableSignals(rows) {
   const list = Array.isArray(rows) ? rows : [];
   return Object.entries(SIGNAL_COLUMNS)
-    .filter(([, cols]) => !list.some(r => cols.some(c => r?.[c] !== null && r?.[c] !== undefined)))
+    .filter(([key, cols]) => !list.some(r => (key !== 'battery_status' || r?.battery_supported !== false)
+      && cols.some(c => r?.[c] !== null && r?.[c] !== undefined)))
     .map(([key]) => key);
 }
 
