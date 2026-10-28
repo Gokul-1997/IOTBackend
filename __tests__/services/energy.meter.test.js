@@ -11,6 +11,7 @@
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const svc = require('../../src/dashboard/energy-meter.service');
+const readScope = require('../../src/lib/read-scope');
 
 const NOW = Date.parse('2026-10-04T11:30:00+05:30');
 const meterRow = { id: 15, machine_serial_no: 'VMC - 1 - F', last_read_at: new Date(NOW - 10e3) };
@@ -42,6 +43,21 @@ describe('meterReadings — input and tenancy', () => {
     expect(mockDb.calls()).toHaveLength(0);
   });
 
+  test.each(['__proto__', 'constructor', 'toString', ['1h']].map(value => [value]))('inherited or non-scalar range %s is rejected', async range => {
+    await expect(svc.meterReadings({ companyId: 4, range, nowMs: NOW })).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test.each([true, [15], {}, 9007199254740992, 0, -1].map(value => [value]))('unsafe/non-scalar machine id %s is rejected', async machineId => {
+    await expect(svc.meterReadings({ companyId: 4, machineId, nowMs: NOW })).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test.each([null, undefined, 0, -1, 'wrong', 9007199254740992])('a missing/invalid company cannot read meters', async companyId => {
+    await expect(svc.meterReadings({ companyId, nowMs: NOW })).rejects.toMatchObject({ status: 403 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
   test("another company's machine is not found, and its readings are never read", async () => {
     mockDb.queueResponse({ rows: [] }, { rows: [] });
     expect(await svc.meterReadings({ companyId: 99, machineId: 15, nowMs: NOW })).toBeNull();
@@ -53,9 +69,12 @@ describe('meterReadings — input and tenancy', () => {
     given();
     await svc.meterReadings({ companyId: 4, nowMs: NOW });
     const q = mockDb.calls()[0];
-    expect(q.text).toMatch(/JOIN machines m ON m.id = r.machine_id/);
-    expect(q.text).toMatch(/WHERE m.company_id = \$1 AND r.read_at >= \$2/);
-    expect(q.params).toEqual([4, new Date(NOW - 30 * 86400e3)]);
+    expect(q.text).toMatch(/FROM machines m\s+JOIN LATERAL/);
+    expect(q.text).toMatch(/WHERE r.machine_id = m.id AND r.company_id = \$1/);
+    expect(q.text).toMatch(/WHERE m.company_id = \$1/);
+    expect(q.text).toMatch(/r.read_at >= \$2 AND r.read_at <= \$3/);
+    expect(q.text).toMatch(/ORDER BY r.read_at DESC LIMIT 1/);
+    expect(q.params).toEqual([4, new Date(NOW - 30 * 86400e3), new Date(NOW)]);
   });
 
   test('with no machine named, the first machine with a meter is shown', async () => {
@@ -91,9 +110,9 @@ describe('meterReadings — the window', () => {
     const d = await svc.meterReadings({ companyId: 4, machineId: 15, range: '4h', nowMs: NOW });
     expect(d.range).toEqual({ key: '4h', from: NOW - 4 * 3600e3, to: NOW, bucket_seconds: 300 });
     const latest = callMatching(/ORDER BY read_at DESC LIMIT 1/);
-    expect(latest.params).toEqual([15, new Date(NOW - 30 * 86400e3), new Date(NOW)]);
+    expect(latest.params).toEqual([15, new Date(NOW - 30 * 86400e3), new Date(NOW), 4]);
     const points = callMatching(/AS kw_avg,\s+MIN\(kw_total\)/);
-    expect(points.params).toEqual([15, new Date(NOW - 4 * 3600e3), new Date(NOW), '300 seconds']);
+    expect(points.params).toEqual([15, new Date(NOW - 4 * 3600e3), new Date(NOW), '300 seconds', 4]);
     expect(points.text).toMatch(/date_bin\(\$4::interval, read_at/);
   });
 
@@ -109,10 +128,11 @@ describe('meterReadings — energy used', () => {
   test('a 0 is a dropped read, a fall counts nothing, and a rise no machine could draw is a misread', async () => {
     given();
     await svc.meterReadings({ companyId: 4, nowMs: NOW });
-    const q = callMatching(/WITH steps AS/);
-    expect(q.text).toMatch(/AND kwh_total > 0/);
-    expect(q.text).toMatch(/WHEN prev_kwh IS NULL OR kwh_total <= prev_kwh THEN 0/);
-    expect(q.text).toMatch(/kwh_total - prev_kwh\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM read_at - prev_at\), 300\) \/ 3600\.0 THEN 0/);
+    const q = callMatching(/WITH reported AS/);
+    expect(q.text).toMatch(/value > 0 OR \(register <> 'kwh' AND positive_before = 0\)/);
+    expect(q.text).toMatch(/WHEN prev_value IS NULL OR value < prev_value THEN NULL/);
+    expect(q.text).toMatch(/value - prev_value\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM read_at - prev_at\), 300\) \/ 3600\.0 THEN NULL/);
+    expect(q.text).toMatch(/value >= 0 AND value < 'Infinity'::float8/);
   });
 
   test('the range\'s energy is the sum of its intervals, and each point carries its own', async () => {
@@ -133,17 +153,31 @@ describe('meterReadings — energy used', () => {
     expect(d.summary.kwh_used).toBeNull();
   });
 
-  test('import, export, kVArh and kVAh are the rise from first to last; a fall is unknown', async () => {
-    given({ summary: { readings: 100,
-      kwh_import_first: 33.1, kwh_import_last: 33.1,
-      kwh_export_first: 77.5, kwh_export_last: 101.5,
-      kvarh_first: 107.9, kvarh_last: 2,          // reset meter
-      kvah_first: null, kvah_last: null } });
+  test('import, export, kVArh and kVAh use measured intervals, not a misleading first-to-last rise', async () => {
+    given({ summary: { readings: 100 }, energy: [
+      { t: NOW - 30e3, kwh_import: 0, kwh_export: 20, kvarh: null, kvah: null },
+      { t: NOW - 15e3, kwh_import: 0, kwh_export: 4, kvarh: null, kvah: null }
+    ] });
     const d = await svc.meterReadings({ companyId: 4, nowMs: NOW });
     expect(d.summary.kwh_import).toBe(0);
     expect(d.summary.kwh_export).toBe(24);
     expect(d.summary.kvarh).toBeNull();
     expect(d.summary.kvah).toBeNull();
+  });
+
+  test('one reading or only rejected steps is unknown usage, while a measured flat pair is zero', async () => {
+    given({ summary: { readings: 1 }, energy: [{ t: NOW, kwh: null, kwh_import: null, energy_intervals: 0, energy_rejected_intervals: 0 }] });
+    let data = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    expect(data.summary.kwh_used).toBeNull();
+    expect(data.summary.kwh_import).toBeNull();
+    resetDb();
+    given({ energy: [{ t: NOW, kwh: null, energy_intervals: 0, energy_rejected_intervals: 2 }] });
+    data = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    expect(data.summary).toMatchObject({ kwh_used: null, energy_intervals: 0, energy_rejected_intervals: 2 });
+    resetDb();
+    given({ energy: [{ t: NOW, kwh: 0, energy_intervals: 1, energy_rejected_intervals: 0 }] });
+    data = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    expect(data.summary).toMatchObject({ kwh_used: 0, energy_intervals: 1, energy_rejected_intervals: 0 });
   });
 });
 
@@ -166,6 +200,28 @@ describe('meterReadings — the latest reading', () => {
     expect(d.latest).toBeNull();
     expect(d.checks.ct_reversed).toBe(false);
   });
+
+  test('nonfinite stored numbers cannot become real meter values or chart values', async () => {
+    given({ latest: [reading({ kw_total: 'NaN', pf_avg: 'Infinity' })], points: [{ t: NOW, kw_avg: '-Infinity' }], energy: [{ t: NOW, kwh: 'NaN' }] });
+    const d = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    expect(d.latest.kw_total).toBeNull();
+    expect(d.latest.pf_avg).toBeNull();
+    expect(d.points[0].kw_avg).toBeNull();
+    expect(d.points[0].kwh).toBeNull();
+    expect(d.summary.kwh_used).toBeNull();
+  });
+});
+
+test('every reading query rechecks recorded company and authorized plant, including after the machine lookup', async () => {
+  given({ machine: [{ id: 15, machine_serial_no: 'VMC - 1 - F' }] });
+  await readScope.run({ company_id: 4, plant_id: 11, roles: ['USER'] }, () => svc.meterReadings({ companyId: 4, machineId: 15, nowMs: NOW }));
+  const calls = mockDb.calls();
+  expect(calls).toHaveLength(6);
+  for (const query of calls.slice(2)) {
+    expect(query.text).toMatch(/company_id = \$[45]/);
+    expect(query.text).toMatch(/authorized_machine.company_id = 4 AND authorized_machine.plant_id = 11/);
+    expect(query.params.at(-1)).toBe(4);
+  }
 });
 
 describe('meterReadings — checks on the meter', () => {

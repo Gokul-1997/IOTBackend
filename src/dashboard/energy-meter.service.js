@@ -63,11 +63,14 @@ const READING_COLUMNS = [
 ];
 
 const httpError = (message, status) => Object.assign(new Error(message), { status });
-const num = v => (v === null || v === undefined ? null : Number(v));
+const num = v => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
 const ms = v => (v ? new Date(v).getTime() : null);
-/* A running total's rise from the first reading to the last; null when it
-   fell (a reset or replaced meter) or either end is missing. */
-const rise = (first, last) => (first == null || last == null || Number(last) < Number(first) ? null : Number(last) - Number(first));
+const COUNTERS = ['kwh', 'kwh_import', 'kwh_export', 'kvarh', 'kvah'];
+/* Null is an unknown interval, not evidence of zero consumption. */
+const measuredSum = (rows, key) => {
+  const values = rows.map(row => num(row[key])).filter(v => v !== null);
+  return values.length ? values.reduce((total, value) => total + value, 0) : null;
+};
 
 exports.RANGES = RANGES;
 exports.LIMITS = LIMITS;
@@ -76,13 +79,17 @@ exports.READING_COLUMNS = READING_COLUMNS;
 /** Machines of this company that have sent meter readings in the last 30 days. */
 async function meters(companyId, nowMs) {
   const { rows } = await db.query(
-    `SELECT m.id, m.machine_serial_no, MAX(r.read_at) AS last_read_at
-       FROM energy_meter_readings r
-       JOIN machines m ON m.id = r.machine_id
-      WHERE m.company_id = $1 AND r.read_at >= $2${plantSql('m.id')}
-      GROUP BY m.id, m.machine_serial_no
+    `SELECT m.id, m.machine_serial_no, latest.read_at AS last_read_at
+       FROM machines m
+       JOIN LATERAL (
+         SELECT r.read_at FROM energy_meter_readings r
+          WHERE r.machine_id = m.id AND r.company_id = $1
+            AND r.read_at >= $2 AND r.read_at <= $3
+          ORDER BY r.read_at DESC LIMIT 1
+       ) latest ON TRUE
+      WHERE m.company_id = $1${plantSql('m.id')}
       ORDER BY m.machine_serial_no`,
-    [companyId, new Date(nowMs - LOOKBACK_MS)]
+    [companyId, new Date(nowMs - LOOKBACK_MS), new Date(nowMs)]
   );
   return rows.map(r => ({ id: r.id, serial: r.machine_serial_no, last_read_at: ms(r.last_read_at) }));
 }
@@ -101,12 +108,13 @@ function checksFor(latest) {
  * not this company's.
  */
 exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Date.now() }) => {
+  if (!Number.isSafeInteger(Number(companyId)) || Number(companyId) <= 0) throw httpError('No company assigned', 403);
+  if (typeof range !== 'string' || !Object.hasOwn(RANGES, range)) throw httpError(`range must be one of ${Object.keys(RANGES).join(', ')}`, 400);
   const r = RANGES[range];
-  if (!r) throw httpError(`range must be one of ${Object.keys(RANGES).join(', ')}`, 400);
   let id = null;
   if (machineId !== undefined && machineId !== null && machineId !== '') {
     id = Number(machineId);
-    if (!Number.isInteger(id) || id <= 0) throw httpError('machine_id must be a positive integer', 400);
+    if ((typeof machineId !== 'number' && typeof machineId !== 'string') || !Number.isSafeInteger(id) || id <= 0) throw httpError('machine_id must be a positive integer', 400);
   }
 
   const from = new Date(nowMs - r.seconds * 1000);
@@ -144,8 +152,9 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
     db.query(
       `SELECT * FROM energy_meter_readings
         WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3
+          AND company_id = $4${plantSql('machine_id')}
         ORDER BY read_at DESC LIMIT 1`,
-      [machine.id, new Date(nowMs - LOOKBACK_MS), to]),
+      [machine.id, new Date(nowMs - LOOKBACK_MS), to, companyId]),
     db.query(
       `SELECT (EXTRACT(EPOCH FROM date_bin($4::interval, read_at, TIMESTAMPTZ '2000-01-01 00:00:00+00')) * 1000)::bigint AS t,
               COUNT(*)::int                           AS samples,
@@ -164,32 +173,59 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
               AVG(frequency_hz)::float                AS hz_avg
          FROM energy_meter_readings
         WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3
+          AND company_id = $5${plantSql('machine_id')}
         GROUP BY 1
         ORDER BY 1`,
-      [machine.id, from, to, interval]),
-    /* Energy used per interval, from the running total: consecutive real
-       readings only (a 0 is a dropped read), a fall counts nothing, and so
-       does a rise no machine could draw — the Energy screen's rules. */
+      [machine.id, from, to, interval, companyId]),
+    /* Energy used per interval, from measured counter pairs. Missing,
+       reset and implausible pairs are unknown, never manufactured zero.
+       A zero total is a dropped read. For other registers, zero is useful
+       before the first positive reading (unused Import/Export), but not
+       after it: 100 -> dropped 0 -> 101 must not count 101 units. */
     db.query(
-      `WITH steps AS (
-         SELECT read_at, kwh_total,
-                LAG(kwh_total) OVER w AS prev_kwh,
-                LAG(read_at)   OVER w AS prev_at
+      `WITH reported AS (
+         SELECT read_at, register, value
            FROM energy_meter_readings
-          WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3 AND kwh_total > 0
-         WINDOW w AS (ORDER BY read_at)
+           CROSS JOIN LATERAL (VALUES
+             ('kwh', kwh_total), ('kwh_import', kwh_import), ('kwh_export', kwh_export),
+             ('kvarh', kvarh_total), ('kvah', kvah_total)
+           ) AS counter(register, value)
+          WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3
+            AND company_id = $5${plantSql('machine_id')}
+            AND value >= 0 AND value < 'Infinity'::float8
+       ), observed AS (
+         SELECT *, COUNT(*) FILTER (WHERE value > 0) OVER (
+                    PARTITION BY register ORDER BY read_at
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ) AS positive_before
+           FROM reported
+       ), counters AS (
+         SELECT read_at, register, value
+           FROM observed
+          WHERE value > 0 OR (register <> 'kwh' AND positive_before = 0)
+       ), steps AS (
+         SELECT read_at, register, value,
+                LAG(value) OVER w AS prev_value,
+                LAG(read_at)   OVER w AS prev_at
+           FROM counters
+         WINDOW w AS (PARTITION BY register ORDER BY read_at)
+       ), measured AS (
+         SELECT *, CASE
+                    WHEN prev_value IS NULL OR value < prev_value THEN NULL
+                    WHEN value - prev_value
+                         > ${MAX_KW} * GREATEST(EXTRACT(EPOCH FROM read_at - prev_at), ${MIN_WINDOW_SEC}) / 3600.0 THEN NULL
+                    ELSE value - prev_value
+                  END AS used
+           FROM steps
        )
        SELECT (EXTRACT(EPOCH FROM date_bin($4::interval, read_at, TIMESTAMPTZ '2000-01-01 00:00:00+00')) * 1000)::bigint AS t,
-              SUM(CASE
-                    WHEN prev_kwh IS NULL OR kwh_total <= prev_kwh THEN 0
-                    WHEN kwh_total - prev_kwh
-                         > ${MAX_KW} * GREATEST(EXTRACT(EPOCH FROM read_at - prev_at), ${MIN_WINDOW_SEC}) / 3600.0 THEN 0
-                    ELSE kwh_total - prev_kwh
-                  END)::float AS kwh
-         FROM steps
+              ${COUNTERS.map(key => `SUM(used) FILTER (WHERE register = '${key}')::float AS ${key}`).join(',\n              ')},
+              COUNT(*) FILTER (WHERE register = 'kwh' AND used IS NOT NULL)::int AS energy_intervals,
+              COUNT(*) FILTER (WHERE register = 'kwh' AND prev_value IS NOT NULL AND used IS NULL)::int AS energy_rejected_intervals
+         FROM measured
         GROUP BY 1
         ORDER BY 1`,
-      [machine.id, from, to, interval]),
+      [machine.id, from, to, interval, companyId]),
     db.query(
       `SELECT COUNT(*)::int                                   AS readings,
               MIN(read_at)                                    AS first_at,
@@ -201,18 +237,11 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
               AVG(v_ll_avg)::float AS v_ll_avg, MIN(LEAST(v12, v23, v31))::float AS v_ll_min, MAX(GREATEST(v12, v23, v31))::float AS v_ll_max,
               AVG(v_ln_avg)::float AS v_ln_avg, MIN(LEAST(v1n, v2n, v3n))::float AS v_ln_min, MAX(GREATEST(v1n, v2n, v3n))::float AS v_ln_max,
               AVG(pf_avg)::float AS pf_avg, MIN(pf_avg)::float AS pf_min,
-              AVG(frequency_hz)::float AS hz_avg, MIN(frequency_hz)::float AS hz_min, MAX(frequency_hz)::float AS hz_max,
-              (ARRAY_AGG(kwh_import   ORDER BY read_at)      FILTER (WHERE kwh_import   > 0))[1] AS kwh_import_first,
-              (ARRAY_AGG(kwh_import   ORDER BY read_at DESC) FILTER (WHERE kwh_import   > 0))[1] AS kwh_import_last,
-              (ARRAY_AGG(kwh_export   ORDER BY read_at)      FILTER (WHERE kwh_export   > 0))[1] AS kwh_export_first,
-              (ARRAY_AGG(kwh_export   ORDER BY read_at DESC) FILTER (WHERE kwh_export   > 0))[1] AS kwh_export_last,
-              (ARRAY_AGG(kvarh_total  ORDER BY read_at)      FILTER (WHERE kvarh_total  > 0))[1] AS kvarh_first,
-              (ARRAY_AGG(kvarh_total  ORDER BY read_at DESC) FILTER (WHERE kvarh_total  > 0))[1] AS kvarh_last,
-              (ARRAY_AGG(kvah_total   ORDER BY read_at)      FILTER (WHERE kvah_total   > 0))[1] AS kvah_first,
-              (ARRAY_AGG(kvah_total   ORDER BY read_at DESC) FILTER (WHERE kvah_total   > 0))[1] AS kvah_last
+              AVG(frequency_hz)::float AS hz_avg, MIN(frequency_hz)::float AS hz_min, MAX(frequency_hz)::float AS hz_max
          FROM energy_meter_readings
-        WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3`,
-      [machine.id, from, to])
+        WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3
+          AND company_id = $4${plantSql('machine_id')}`,
+      [machine.id, from, to, companyId])
   ]);
 
   let latest = null;
@@ -235,15 +264,16 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
   }));
 
   const s = summaryQ.rows[0] || {};
-  const kwhSteps = energyQ.rows.length ? energyQ.rows.reduce((a, e) => a + (num(e.kwh) || 0), 0) : null;
   const summary = {
     readings: s.readings || 0,
     first_at: ms(s.first_at), last_at: ms(s.last_at),
-    kwh_used:   kwhSteps,
-    kwh_import: rise(s.kwh_import_first, s.kwh_import_last),
-    kwh_export: rise(s.kwh_export_first, s.kwh_export_last),
-    kvarh:      rise(s.kvarh_first, s.kvarh_last),
-    kvah:       rise(s.kvah_first, s.kvah_last),
+    kwh_used:   measuredSum(energyQ.rows, 'kwh'),
+    kwh_import: measuredSum(energyQ.rows, 'kwh_import'),
+    kwh_export: measuredSum(energyQ.rows, 'kwh_export'),
+    kvarh:      measuredSum(energyQ.rows, 'kvarh'),
+    kvah:       measuredSum(energyQ.rows, 'kvah'),
+    energy_intervals: energyQ.rows.reduce((total, row) => total + (num(row.energy_intervals) || 0), 0),
+    energy_rejected_intervals: energyQ.rows.reduce((total, row) => total + (num(row.energy_rejected_intervals) || 0), 0),
     kw:   { avg: num(s.kw_avg), min: num(s.kw_min), max: num(s.kw_max), peak: num(s.kw_peak) },
     kva:  { avg: num(s.kva_avg), max: num(s.kva_max) },
     i:    { avg: num(s.i_avg), max: num(s.i_max) },

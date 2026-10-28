@@ -33,10 +33,10 @@ const company_id = 4;
  * The fixtures describe a machine as one row; these split it into what each
  * of the two queries answers.
  */
-const COUNTER = ['kwh', 'days', 'readings'];
+const COUNTER = ['kwh', 'days', 'readings', 'rejected_intervals'];
 const counterRows = (machines, extra = []) => [
   ...machines.filter(m => m.kwh !== null && m.kwh !== undefined)
-    .map(m => ({ kind: 'machine', machine_id: m.machine_id, kwh: m.kwh, readings: m.readings, n: m.days })),
+    .map(m => ({ kind: 'machine', machine_id: m.machine_id, kwh: m.kwh, readings: m.readings, n: m.days, rejected_intervals: m.rejected_intervals || 0 })),
   ...extra
 ];
 const machineOnly = machines => machines.map(m =>
@@ -81,11 +81,11 @@ describe('consumption comes from differences, not sums', () => {
     expect(sql).not.toMatch(/MAX\(energy\)\s*-\s*MIN\(energy\)/);
   });
 
-  test('a falling counter contributes nothing, never a negative', async () => {
+  test('a falling counter is an unknown gap, never negative consumption', async () => {
     queueAll();
     await svc.getEnergy({ company_id });
     // a machine cannot un-consume electricity
-    expect(executable(allSql())).toMatch(/WHEN energy <= prev_energy THEN 0/);
+    expect(executable(allSql())).toMatch(/WHEN energy < prev_energy THEN NULL/);
   });
 
   test('a 0 is a dropped read, so the climb back from it is not consumption', async () => {
@@ -94,15 +94,15 @@ describe('consumption comes from differences, not sums', () => {
     // VMC - 13 - M sent 0 in most messages; 0 → 107,615,280 is not 107 million kWh
     const sql = executable(allSql());
     expect(sql).toMatch(/AND t\.energy > 0/);
-    expect(sql).not.toMatch(/energy IS NOT NULL/);
+    expect(sql).not.toMatch(/t\.energy IS NOT NULL/);
   });
 
-  test('a rise no machine could draw is a misread and counts nothing', async () => {
+  test('a rise no machine could draw is an unknown gap', async () => {
     queueAll();
     await svc.getEnergy({ company_id });
     // over 2,000 kW since the last reading, measured over at least five minutes
     expect(executable(allSql())).toMatch(
-      /energy - prev_energy\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM received_at - prev_at\), 300\) \/ 3600\.0 THEN 0/);
+      /energy - prev_energy\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM received_at - prev_at\), 300\) \/ 3600\.0 THEN NULL/);
   });
 
   test('a rise below the smallest possible limit is kept without its own limit; the exact limit still decides every larger one', async () => {
@@ -141,10 +141,10 @@ describe('consumption comes from differences, not sums', () => {
     // it was three: one for the table and tiles, one for the trend, one for the months
     const passes = mockDb.calls().filter(c => /LAG\(t\.energy\)/.test(c.text));
     expect(passes).toHaveLength(1);
-    expect(passes[0].text).toMatch(/GROUPING SETS \(\(machine_id\), \(day\), \(date_trunc\('month', day\)::date\)\)/);
+    expect(passes[0].text).toMatch(/GROUPING SETS \(\(machine_id\), \(day\), \(date_trunc\('month', day\)::date\), \(machine_id, day\)\)/);
   });
 
-  test('the trend has every day of the range, a quiet day as zero, and the months add up the days', async () => {
+  test('the trend keeps missing days unknown and the months add up measured days', async () => {
     const d1 = new Date(2026, 9, 7), d2 = new Date(2026, 9, 8), d3 = new Date(2026, 9, 9);
     queueAll({
       machines: [machineRow({ kwh: '30' })],
@@ -156,8 +156,8 @@ describe('consumption comes from differences, not sums', () => {
     });
     const d = await svc.getEnergy({ company_id, from: '2026-10-07', to: '2026-10-09' });
 
-    expect(d.trend.map(t => [new Date(t.day).getDate(), t.kwh, t.machines])).toEqual([[7, 10, 2], [8, 0, 0], [9, 20, 1]]);
-    expect(d.by_month).toEqual([{ month: new Date(2026, 9, 1).toISOString(), kwh: 30 }]);
+    expect(d.trend.map(t => [new Date(t.day).getDate(), t.kwh, t.machines])).toEqual([[7, 10, 2], [8, null, 0], [9, 20, 1]]);
+    expect(d.by_month).toEqual([{ month: new Date(2026, 9, 1).toISOString(), kwh: 30, rejected_intervals: 0, cost: null, cost_complete: false }]);
     // the last day against the one before: the day before reported nothing, so no comparison
     expect(d.kpis.kwh_vs_yesterday_pct).toBeNull();
   });
@@ -197,10 +197,10 @@ describe('unknown is not zero', () => {
     expect(d.machines.data[0].kwh_per_part).toBeNull();
   });
 
-  test('the coverage note says plainly when no device reports energy', async () => {
+  test('the coverage note describes the selected period without claiming devices never report', async () => {
     queueAll({ machines: [machineRow({ kwh: null })] });
     const d = await svc.getEnergy({ company_id });
-    expect(d.coverage.note).toMatch(/No machine is reporting an energy counter/i);
+    expect(d.coverage.note).toMatch(/No accepted energy intervals were measured in the selected period/i);
   });
 });
 
@@ -254,7 +254,7 @@ describe('overload alerts', () => {
     // current transformers face the wrong way); MAX alone would never flag it
     queueAll();
     await svc.getEnergy({ company_id });
-    expect(allSql()).toMatch(/MAX\(ABS\(t\.power\)\) AS peak_kw/);
+    expect(allSql()).toMatch(/MAX\(ABS\(t\.power\)\) FILTER \(WHERE ABS\(t\.power\) < 'Infinity'::float8\) AS peak_kw/);
   });
 
   test('never flags when no threshold is configured', async () => {
@@ -355,5 +355,262 @@ describe('export', () => {
     expect(rows[0]['Energy (kWh)']).toBe('');
     expect(rows[0]['kWh per part']).toBe('');
     expect(rows[0]['Peak kW']).toBe('');
+  });
+});
+
+describe('measured energy, honest coverage and tariff estimates', () => {
+  const day = '2026-10-07';
+  const month = '2026-10-01';
+  const rate = (machine_id, cost_per_kwh, currency = 'INR') => ({ machine_id, cost_per_kwh, currency, overload_kw: null });
+  const pointRows = (machineDays) => [
+    ...machineDays.map(m => ({ kind: 'machine_day', day, ...m })),
+    { kind: 'calendar', day },
+    { kind: 'day', day, kwh: machineDays.reduce((n, m) => n + Number(m.kwh), 0), n: machineDays.length,
+      rejected_intervals: machineDays.reduce((n, m) => n + Number(m.rejected_intervals || 0), 0) },
+    { kind: 'month', month, kwh: machineDays.reduce((n, m) => n + Number(m.kwh), 0),
+      rejected_intervals: machineDays.reduce((n, m) => n + Number(m.rejected_intervals || 0), 0) }
+  ];
+
+  test('day/month costs use each machine tariff and identify estimates made at current tariffs', async () => {
+    queueAll({ machines: [machineRow({ machine_id: 1, kwh: '5' }), machineRow({ machine_id: 2, kwh: '3' })],
+      settings: [rate(null, '3'), rate(1, '2'), rate(2, '7')],
+      counters: pointRows([{ machine_id: 1, kwh: '5' }, { machine_id: 2, kwh: '3' }]) });
+    const d = await svc.getEnergy({ company_id, from: day, to: day });
+    expect(d.kpis.total_cost).toBe(31); // 5*2 + 3*7; company rate alone would falsely say 24
+    expect(d.trend[0]).toMatchObject({ kwh: 8, cost: 31, cost_complete: true });
+    expect(d.by_month[0]).toMatchObject({ kwh: 8, cost: 31, cost_complete: true });
+    expect(d.coverage).toMatchObject({ energy_complete: true, cost_complete: true, priced: 2 });
+    expect(d.cost_basis).toBe('current_tariff_estimate');
+    expect(d.energy_source).toBe('telemetry_counter_deltas');
+    expect(d.by_shift_source).toBe('production_hourly');
+  });
+
+  test('an unpriced machine prevents a partial sum being presented as the full fleet cost', async () => {
+    queueAll({ machines: [machineRow({ machine_id: 1, kwh: '5' }), machineRow({ machine_id: 2, kwh: '3' })],
+      settings: [rate(1, '2')], counters: pointRows([{ machine_id: 1, kwh: '5' }, { machine_id: 2, kwh: '3' }]) });
+    const d = await svc.getEnergy({ company_id, from: day, to: day });
+    expect(d.kpis.total_kwh).toBe(8);
+    expect(d.kpis.total_cost).toBeNull();
+    expect(d.trend[0].cost).toBeNull();
+    expect(d.by_month[0].cost).toBeNull();
+    expect(d.coverage).toMatchObject({ cost_complete: false, priced: 1, tariff_configured: true });
+  });
+
+  test('different currencies are never added or displayed as the company currency', async () => {
+    queueAll({ machines: [machineRow({ machine_id: 1 }), machineRow({ machine_id: 2 })],
+      settings: [rate(null, '2'), rate(2, '7', 'USD')],
+      counters: pointRows([{ machine_id: 1, kwh: '30' }, { machine_id: 2, kwh: '30' }]) });
+    const d = await svc.getEnergy({ company_id, from: day, to: day });
+    expect(d.kpis.total_cost).toBeNull();
+    expect(d.coverage).toMatchObject({ currency_consistent: false, cost_complete: false });
+    expect(d.machines.data.find(m => m.machine_id === 2)).toMatchObject({ cost: null, currency: 'USD' });
+    expect(d.trend[0].cost).toBeNull();
+  });
+
+  test('one common machine-only tariff currency remains correctly labeled', async () => {
+    queueAll({ machines: [machineRow()], settings: [rate(1, '2', 'EUR')] });
+    const d = await svc.getEnergy({ company_id });
+    expect(d.currency).toBe('EUR');
+    expect(d.kpis.total_cost).toBe(60);
+  });
+
+  test('partial energy is not divided by output from the entire fleet', async () => {
+    queueAll({ machines: [machineRow({ machine_id: 1, kwh: '5', produced: '100' }),
+      machineRow({ machine_id: 2, kwh: null, produced: '900' })], settings: [rate(null, '2')] });
+    const d = await svc.getEnergy({ company_id });
+    expect(d.kpis.total_kwh).toBe(5);
+    expect(d.kpis.total_produced).toBe(1000);
+    expect(d.kpis.kwh_per_part).toBeNull();
+    expect(d.kpis.total_cost).toBeNull();
+    expect(d.coverage.energy_complete).toBe(false);
+  });
+
+  test('reset or outlier gaps retain measured increments and suppress complete-period cost and efficiency', async () => {
+    queueAll({ machines: [machineRow({ kwh: '8', rejected_intervals: 1 })], settings: [rate(null, '2')],
+      counters: pointRows([{ machine_id: 1, kwh: '8', rejected_intervals: 1 }]) });
+    const d = await svc.getEnergy({ company_id, from: day, to: day });
+    expect(d.kpis.total_kwh).toBe(8);
+    expect(d.kpis.total_cost).toBeNull();
+    expect(d.kpis.kwh_per_part).toBeNull();
+    expect(d.machines.data[0]).toMatchObject({ cost: null, kwh_per_part: null, rejected_intervals: 1, energy_complete: false });
+    expect(d.coverage).toMatchObject({ energy_complete: false, cost_complete: false, rejected_intervals: 1 });
+    expect(d.trend[0]).toMatchObject({ kwh: 8, cost: null, cost_complete: false });
+  });
+
+  test('a real measured zero remains zero, including a zero configured tariff', async () => {
+    queueAll({ machines: [machineRow({ kwh: '0' })], settings: [rate(null, '0')],
+      counters: pointRows([{ machine_id: 1, kwh: '0' }]) });
+    const d = await svc.getEnergy({ company_id, from: day, to: day });
+    expect(d.kpis).toMatchObject({ total_kwh: 0, total_cost: 0, kwh_per_part: 0 });
+    expect(d.trend[0]).toMatchObject({ kwh: 0, cost: 0, cost_complete: true });
+    expect(d.coverage).toMatchObject({ energy_complete: true, cost_complete: true });
+  });
+
+  test('fleet sums use unrounded meter values', async () => {
+    queueAll({ machines: [machineRow({ machine_id: 1, kwh: '0.004' }), machineRow({ machine_id: 2, kwh: '0.004' })],
+      settings: [rate(null, '2')] });
+    const d = await svc.getEnergy({ company_id });
+    expect(d.machines.data.map(m => m.kwh)).toEqual([0, 0]);
+    expect(d.kpis.total_kwh).toBe(0.01);
+    expect(d.kpis.total_cost).toBe(0.02);
+  });
+
+  test('a missing calendar day is distinct from measured zero', async () => {
+    queueAll({ machines: [machineRow({ kwh: '0' })], settings: [rate(null, '2')], counters: [
+      ...pointRows([{ machine_id: 1, kwh: '0' }]), { kind: 'calendar', day: '2026-10-08' }
+    ] });
+    const d = await svc.getEnergy({ company_id, from: day, to: '2026-10-08' });
+    expect(d.trend[0]).toMatchObject({ kwh: 0, cost: 0 });
+    expect(d.trend[1]).toMatchObject({ kwh: null, machines: 0, cost: null, cost_complete: false });
+  });
+
+  test('an existing tariff remains configured while energy has not reported', async () => {
+    queueAll({ machines: [machineRow({ kwh: null })], settings: [rate(null, '2')] });
+    const d = await svc.getEnergy({ company_id });
+    expect(d.coverage).toMatchObject({ tariff_configured: true, energy_complete: false, cost_complete: false, priced: 0 });
+  });
+});
+
+describe('bounded, authorized Energy reads', () => {
+  test('search is bound into every source, including shared cached figures, not just the table', async () => {
+    const cache = require('../../src/dashboard/cache');
+    const remembered = jest.spyOn(cache, 'remember');
+    queueAll({ machines: [machineRow({ machine_serial_no: 'VMC-01' })] });
+    try {
+      await svc.getEnergy({ company_id, machine_id: 1, search: 'VMC-01', from: '2026-10-01', to: '2026-10-07' });
+      expect(remembered).toHaveBeenCalledWith('energy:figures', company_id,
+        expect.objectContaining({ machineId: 1, search: 'vmc-01' }), expect.any(Number), expect.any(Function));
+      const sources = mockDb.calls().filter(c => /FROM (?:telemetry_raw|production_hourly)/.test(c.text));
+      expect(sources).toHaveLength(3);
+      for (const call of sources) {
+        expect(call.params.slice(-2)).toEqual([1, 'vmc-01']);
+        expect(call.text).toMatch(/POSITION\(\$5 IN LOWER\(COALESCE\(m\.machine_serial_no/);
+        expect(call.text).toContain('m.is_active = TRUE');
+        expect(call.text).toContain('m.company_id = $1');
+      }
+    } finally { remembered.mockRestore(); }
+  });
+
+  test('telemetry and rollups cannot read future buckets or a foreign recorded company', async () => {
+    queueAll();
+    await svc.getEnergy({ company_id });
+    for (const c of mockDb.calls().filter(c => /FROM telemetry_raw/.test(c.text))) {
+      expect(c.text).toContain('t.company_id = $1');
+      expect(c.text).toContain('t.received_at <= NOW()');
+    }
+    for (const c of mockDb.calls().filter(c => /FROM production_hourly/.test(c.text))) {
+      expect(c.text).toContain('ph.company_id = $1');
+      expect(c.text).toContain('ph.hour_start < NOW()');
+    }
+    expect(allSql()).toContain('s.company_id = $1');
+  });
+
+  test('every data source follows the request authorization plant scope', async () => {
+    queueAll();
+    await require('../../src/lib/read-scope').run({ company_id, plant_id: 8, roles: ['USER'] },
+      () => svc.getEnergy({ company_id, machine_id: 1 }));
+    for (const c of mockDb.calls()) expect(c.text).toContain('authorized_machine.plant_id = 8');
+  });
+
+  test.each([['page', Infinity], ['page', '1.2'], ['page', 0], ['page', true], ['page', []],
+    ['limit', 'Infinity'], ['limit', -1], ['limit', 1.5], ['machine_id', [1]], ['machine_id', true],
+    ['machine_id', Number.MAX_SAFE_INTEGER + 1]])('rejects malformed %s=%p before reads', async (key, value) => {
+    await expect(svc.getEnergy({ company_id, [key]: value })).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('UI pages stay capped at 200 rows', async () => {
+    queueTable({ machines: Array.from({ length: 205 }, (_, i) => machineRow({ machine_id: i + 1 })) });
+    const d = await svc.getEnergy({ company_id, part: 'table', limit: 1000 });
+    expect(d.machines.data).toHaveLength(200);
+    expect(d.machines).toMatchObject({ total: 205, limit: 200, totalPages: 2 });
+  });
+
+  test('historical to-only ranges resolve seven plant days ending on the selected date', () => {
+    expect(svc.resolveRange({ to: '2020-01-07' })).toEqual({
+      start: '2020-01-01T00:00:00+05:30', end: '2020-01-07T23:59:59.999+05:30'
+    });
+  });
+
+  test('a leap-year window can contain 366 days; longer scans fail before reads', async () => {
+    expect(svc.resolveRange({ from: '2024-01-01', to: '2024-12-31' })).toBeTruthy();
+    await expect(svc.getEnergy({ company_id, from: '2024-01-01', to: '2025-01-01' })).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('stale machine ownership settings cannot reveal another company serial or be overwritten', async () => {
+    mockDb.queueResponse({ rows: [] });
+    await svc.getSettings(company_id);
+    expect(allSql()).toContain('m.id = es.machine_id AND m.company_id = $1');
+    expect(allSql()).toContain('es.machine_id IS NULL OR m.id IS NOT NULL');
+    resetDb();
+    mockDb.queueResponse({ rowCount: 1, rows: [{ '?column?': 1 }] }, { rowCount: 0, rows: [] });
+    await expect(svc.saveSettings({ company_id, machine_id: 1, cost_per_kwh: 2 })).rejects.toMatchObject({ status: 409 });
+    expect(allSql()).toContain('WHERE energy_settings.company_id = EXCLUDED.company_id');
+  });
+});
+
+describe('complete Energy exports', () => {
+  test('includes matched machines beyond the UI page ceiling without repeated raw scans', async () => {
+    queueTable({ machines: Array.from({ length: 205 }, (_, i) => machineRow({ machine_id: i + 1, machine_serial_no: `VMC-${i + 1}` })) });
+    const rows = await svc.getExportRows({ company_id });
+    expect(rows).toHaveLength(205);
+    expect(rows.some(r => r.Machine === 'VMC-205')).toBe(true);
+    expect(mockDb.calls().filter(c => /LAG\(t\.energy\)/.test(c.text))).toHaveLength(1);
+    expect(mockDb.calls()).toHaveLength(3);
+  });
+
+  test('discloses reset gaps and never exports their cost or full-period efficiency as complete', async () => {
+    queueTable({ machines: [machineRow({ kwh: '8', rejected_intervals: 1 })],
+      settings: [{ machine_id: null, cost_per_kwh: 2, currency: 'INR' }] });
+    const [r] = await svc.getExportRows({ company_id });
+    expect(r['Energy (kWh)']).toBe(8);
+    expect(r['Cost (INR)']).toBe('');
+    expect(r['kWh per part']).toBe('');
+    expect(r['Energy coverage']).toBe('Partial: meter gaps');
+  });
+});
+
+describe('no invented full-period figures or invalid tariff settings', () => {
+  const tariff = [{ machine_id: null, cost_per_kwh: 2, currency: 'INR' }];
+  test('a missing selected day makes period/month cost and efficiency partial while preserving daily measured cost', async () => {
+    queueAll({ machines: [machineRow({ kwh: '5', days: 1 })], settings: tariff, counters: [
+      { kind: 'calendar', day: '2026-10-01' }, { kind: 'calendar', day: '2026-10-02' },
+      { kind: 'machine_day', day: '2026-10-01', machine_id: 1, kwh: '5' },
+      { kind: 'day', day: '2026-10-01', kwh: '5', n: 1 },
+      { kind: 'month', month: '2026-10-01', kwh: '5' }
+    ] });
+    const d = await svc.getEnergy({ company_id, from: '2026-10-01', to: '2026-10-02' });
+    expect(d.kpis).toMatchObject({ total_kwh: 5, total_cost: null, kwh_per_part: null });
+    expect(d.coverage).toMatchObject({ energy_complete: false, cost_complete: false });
+    expect(d.machines.data[0]).toMatchObject({ kwh: 5, cost: null, kwh_per_part: null, energy_complete: false });
+    expect(d.trend[0]).toMatchObject({ kwh: 5, cost: 10, cost_complete: true });
+    expect(d.trend[1]).toMatchObject({ kwh: null, cost: null, cost_complete: false });
+    expect(d.by_month[0]).toMatchObject({ kwh: 5, cost: null, cost_complete: false });
+  });
+
+  test('legacy hourly zero allocations do not establish measured zero by shift', async () => {
+    queueAll({ shifts: [{ shift_id: 1, shift_name: 'Shift A', kwh: '0', run_seconds: 0, produced: 0 },
+      { shift_id: 2, shift_name: 'Shift B', kwh: null, run_seconds: 0, produced: 0 },
+      { shift_id: 3, shift_name: 'Shift C', kwh: '3', run_seconds: 30, produced: 1 }] });
+    const d = await svc.getEnergy({ company_id });
+    expect(d.by_shift.map(s => s.kwh)).toEqual([null, null, 3]);
+  });
+
+  test.each([['currency', 123], ['currency', true], ['currency', {}], ['currency', 'RUPEES'],
+    ['currency', 'IN'], ['currency', 'IN1'], ['cost_per_kwh', 1000000], ['overload_kw', 100000000],
+    ['cost_per_kwh', true], ['cost_per_kwh', [2]], ['overload_kw', {}]])('refuses invalid %s=%p before queries', async (key, value) => {
+    await expect(svc.saveSettings({ company_id, [key]: value })).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
+
+  test('accepts zero and the numeric column limits, normalizing a three-letter currency', async () => {
+    mockDb.queueResponse({ rows: [{ id: 1 }] });
+    await svc.saveSettings({ company_id, cost_per_kwh: 999999.9999, overload_kw: 99999999.99, currency: ' eur ' });
+    expect(mockDb.calls()[0].params.slice(2, 5)).toEqual([999999.9999, 'EUR', 99999999.99]);
+    resetDb();
+    mockDb.queueResponse({ rows: [{ id: 1 }] });
+    await svc.saveSettings({ company_id, cost_per_kwh: 0, overload_kw: 0, currency: 'inr' });
+    expect(mockDb.calls()[0].params.slice(2, 5)).toEqual([0, 'INR', 0]);
   });
 });
