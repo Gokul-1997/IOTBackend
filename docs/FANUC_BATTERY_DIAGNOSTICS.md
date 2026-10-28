@@ -41,7 +41,7 @@ The maintenance API returns `controller_type`, `battery_supported` and both diag
 
 ## Display and warning lifecycle
 
-The Maintenance Dashboard retains its existing layout and shows a Fanuc CNC warning card and an ACC axis card. Active warnings read **Check battery** and identify the axis and ABP/INP/EXP flag. False reads **No warning reported**; unknown reads **Not reported**. The icons do not claim charge percentage or battery voltage. Changing a machine/filter or receiving a failed new selection cannot display old battery values under that selection.
+The Maintenance Dashboard retains its existing layout and shows a Fanuc CNC warning card and an ACC axis card. ACC active warnings read **Battery issue** and identify the axis and ABP/INP/EXP flag; confirmed clear readings read **Healthy**. The ACC summary is Healthy only when every reported axis is explicitly clear. Missing or partially unknown diagnostics read **Not reported**. CNC retains **Check battery** for an active warning and **No warning reported** for an explicit false flag. The icons do not claim charge percentage or battery voltage. Changing a machine/filter or receiving a failed new selection cannot display old battery values under that selection.
 
 Warnings use the existing tenant-scoped `machine_alarms` history with application-generated codes:
 
