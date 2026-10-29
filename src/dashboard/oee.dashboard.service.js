@@ -32,7 +32,9 @@
  */
 
 const pool = require('../db');
-const { plantSql } = require('../lib/read-scope');
+const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
+const { parseRange } = require('./window');
+const { shiftDateWindow, shiftStartDay } = require('./production-window');
 const { costOf } = require('../machines/hour-rate');
 
 /* Classification bands, world-class OEE being 85%. Overridable per request
@@ -52,16 +54,19 @@ function parseId(v, label) {
   return n;
 }
 
-function resolveRange({ from, to }) {
-  const isDate = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v));
-  if (from && !isDate(from)) throw httpError('from must be a date in YYYY-MM-DD form', 400);
-  if (to && !isDate(to))     throw httpError('to must be a date in YYYY-MM-DD form', 400);
-
-  const end   = to   ? `${to} 23:59:59.999` : new Date().toISOString();
-  const start = from ? `${from} 00:00:00`
-                     : new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10) + ' 00:00:00';
-  if (new Date(start) > new Date(end)) throw httpError('from must not be after to', 400);
+function resolveRange(q = {}) {
+  const { start, end } = parseRange(q);
   return { start, end };
+}
+
+// Concrete-window callers (Factory/Maintenance) keep their exact interval.
+// Date-range pages use shift-start dates, shared with the Production report.
+function productionBounds(shiftDates) {
+  return shiftDates ? shiftDateWindow('ph', 'ps', {
+    from: "($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date",
+    to: "($3::timestamptz AT TIME ZONE 'Asia/Kolkata')::date"
+  }) : `ph.hour_start >= date_trunc('hour', $2::timestamptz AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata'
+          AND ph.hour_start < LEAST($3::timestamptz, NOW())`;
 }
 
 function resolveThresholds(q) {
@@ -86,10 +91,12 @@ function resolveThresholds(q) {
  * production_hourly, quality_entries, alarms and downtime together first
  * would multiply rows against one another and inflate every sum.
  */
-async function machineTotals({ companyId, machineId, shiftId, start, end }) {
+async function machineTotals({ companyId, machineId, shiftId, start, end, shiftDates = false, qualityDays }) {
   const params = [companyId, start, end];
   const mf = machineId ? (params.push(machineId), `$${params.length}`) : null;
   const sf = shiftId   ? (params.push(shiftId),   `$${params.length}`) : null;
+  const qualityFrom = qualityDays ? `$${params.push(qualityDays.from)}::date` : "($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date";
+  const qualityTo = qualityDays ? `$${params.push(qualityDays.to)}::date` : "($3::timestamptz AT TIME ZONE 'Asia/Kolkata')::date";
 
   const { rows } = await pool.query(
     `WITH prod AS (
@@ -99,8 +106,9 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               SUM(ph.produced_qty)::bigint AS produced,
               COUNT(*)::int                AS hours
          FROM production_hourly ph
-         JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
-        WHERE TRUE${plantSql('ph.machine_id')} AND ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
+         JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1 AND m.is_active = TRUE
+         LEFT JOIN shifts ps ON ps.id = ph.shift_id AND ps.company_id = $1${sharedEntityPlantSql('ps')}
+        WHERE ph.company_id = $1${plantSql('ph.machine_id')} AND ${productionBounds(shiftDates)}
           ${mf ? `AND ph.machine_id = ${mf}` : ''}
           ${sf ? `AND ph.shift_id = ${sf}` : ''}
         GROUP BY ph.machine_id
@@ -113,8 +121,9 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               MAX(EXTRACT(EPOCH FROM c.cycle_time))::numeric AS cycle_seconds,
               MAX(COALESCE(c.multiplication_factor, 1))::numeric AS mult
          FROM machine_current_job mcj
-         JOIN components c ON c.id = mcj.component_id
-        WHERE mcj.is_active = TRUE${plantSql('mcj.machine_id')}
+         JOIN machines cm ON cm.id = mcj.machine_id AND cm.company_id = $1 AND cm.is_active = TRUE
+         JOIN components c ON c.id = mcj.component_id AND c.company_id = $1
+        WHERE mcj.company_id = $1 AND mcj.is_active = TRUE${plantSql('mcj.machine_id')}
         GROUP BY mcj.machine_id
      ),
      qual AS (
@@ -125,7 +134,11 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               SUM(COALESCE(q.rework_qty,0))::bigint AS rework
          FROM quality_entries q
          JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
-        WHERE TRUE${plantSql('q.machine_id')} AND q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
+         LEFT JOIN shifts qs ON qs.id = q.shift_id AND qs.company_id = $1
+        WHERE TRUE${plantSql('q.machine_id')} AND q.shift_date >= ${qualityFrom}
+          AND q.shift_date <= ${qualityTo}
+          AND q.shift_date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND (qs.start_time IS NULL OR (q.shift_date + qs.start_time) AT TIME ZONE 'Asia/Kolkata' <= NOW())
           ${sf ? `AND q.shift_id = ${sf}` : ''}
         GROUP BY q.machine_id
      ),
@@ -133,22 +146,23 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
        SELECT a.machine_id, COUNT(*)::int AS alarm_count
          FROM machine_alarms a
         WHERE a.company_id = $1${plantSql('a.machine_id')}
-          AND a.started_at >= $2::timestamptz AND a.started_at <= $3::timestamptz
+          AND a.started_at >= $2::timestamptz AND a.started_at <= LEAST($3::timestamptz, NOW())
         GROUP BY a.machine_id
      ),
      downtime AS (
        SELECT d.machine_id,
               COALESCE(SUM(EXTRACT(EPOCH FROM (
-                LEAST(COALESCE(d.ended_at, NOW()), $3::timestamptz)
+                LEAST(COALESCE(d.ended_at, NOW()), $3::timestamptz, NOW())
               - GREATEST(d.started_at, $2::timestamptz)))), 0)::bigint AS downtime_seconds
          FROM downtime_events d
         WHERE d.company_id = $1${plantSql('d.machine_id')}
-          AND d.started_at <= $3::timestamptz
+          AND d.started_at <= LEAST($3::timestamptz, NOW())
           AND COALESCE(d.ended_at, NOW()) >= $2::timestamptz
         GROUP BY d.machine_id
      ),
      live AS (
-       /* Latest telemetry per machine, bounded to the last hour. Without
+       /* Latest telemetry per machine, bounded to the 60-second live cutoff.
+          This matches the Live and Factory dashboards. Without
           the bound this scans every chunk of the hypertable; with it the
           planner prunes to one. A machine silent for over an hour is
           offline, which is exactly what the absence of a row means. */
@@ -156,7 +170,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
               t.machine_id, t.machine_status, t.alarm
          FROM telemetry_raw t
         WHERE t.company_id = $1${plantSql('t.machine_id')}
-          AND t.received_at > NOW() - INTERVAL '1 hour'
+          AND t.received_at > NOW() - INTERVAL '60 seconds' AND t.received_at <= NOW()
         ORDER BY t.machine_id, t.received_at DESC
      )
      SELECT m.id AS machine_id, m.machine_serial_no, m.model, m.hour_rate,
@@ -187,7 +201,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end }) {
 
 /** Live status, in the four states the screen reports. */
 function statusOf(row) {
-  if (!row.machine_status) return 'OFFLINE';       // no telemetry in the last hour
+  if (!row.machine_status) return 'OFFLINE';       // no fresh telemetry in the last minute
   if (row.alarm) return 'ALARM';
   return String(row.machine_status).toUpperCase() === 'RUNNING' ? 'RUNNING' : 'IDLE';
 }
@@ -326,24 +340,26 @@ function fleetOee(machines, thresholds) {
  * carry availability alone, so the screen drew an "Availability Trend"
  * where the design has an OEE trend.
  */
-async function trend({ companyId, machineId, shiftId, start, end }) {
+async function trend({ companyId, machineId, shiftId, start, end, shiftDates = false }) {
   const params = [companyId, start, end];
   const mf = machineId ? (params.push(machineId), `$${params.length}`) : null;
   const sf = shiftId   ? (params.push(shiftId),   `$${params.length}`) : null;
 
   const { rows } = await pool.query(
     `WITH days AS (
-       SELECT generate_series($2::timestamptz::date, $3::timestamptz::date, INTERVAL '1 day')::date AS day
+       SELECT generate_series(($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date,
+         ($3::timestamptz AT TIME ZONE 'Asia/Kolkata')::date, INTERVAL '1 day')::date AS day
      ),
      per_day AS (
-       SELECT (ph.hour_start AT TIME ZONE 'Asia/Kolkata')::date AS day, ph.machine_id,
+       SELECT ${shiftDates ? shiftStartDay('ph', 'ps') : "(ph.hour_start AT TIME ZONE 'Asia/Kolkata')::date"} AS day, ph.machine_id,
               SUM(ph.run_seconds)::bigint  AS run_seconds,
               SUM(ph.idle_seconds)::bigint AS idle_seconds,
               SUM(ph.produced_qty)::bigint AS produced,
               COUNT(*)::int                AS hours
          FROM production_hourly ph
-         JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
-        WHERE TRUE${plantSql('ph.machine_id')} AND ph.hour_start >= $2::timestamptz AND ph.hour_start <= $3::timestamptz
+         JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1 AND m.is_active = TRUE
+         LEFT JOIN shifts ps ON ps.id = ph.shift_id AND ps.company_id = $1${sharedEntityPlantSql('ps')}
+        WHERE ph.company_id = $1${plantSql('ph.machine_id')} AND ${productionBounds(shiftDates)}
           ${mf ? `AND ph.machine_id = ${mf}` : ''}
           ${sf ? `AND ph.shift_id = ${sf}` : ''}
         GROUP BY 1, 2
@@ -353,8 +369,9 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
               MAX(EXTRACT(EPOCH FROM c.cycle_time))::numeric AS cycle_seconds,
               MAX(COALESCE(c.multiplication_factor, 1))::numeric AS mult
          FROM machine_current_job mcj
-         JOIN components c ON c.id = mcj.component_id
-        WHERE mcj.is_active = TRUE${plantSql('mcj.machine_id')}
+         JOIN machines cm ON cm.id = mcj.machine_id AND cm.company_id = $1 AND cm.is_active = TRUE
+         JOIN components c ON c.id = mcj.component_id AND c.company_id = $1
+        WHERE mcj.company_id = $1 AND mcj.is_active = TRUE${plantSql('mcj.machine_id')}
         GROUP BY mcj.machine_id
      ),
      qual AS (
@@ -362,7 +379,11 @@ async function trend({ companyId, machineId, shiftId, start, end }) {
               SUM(COALESCE(q.reject_qty,0) + COALESCE(q.rework_qty,0))::bigint AS rejected
          FROM quality_entries q
          JOIN machines qm ON qm.id = q.machine_id AND qm.company_id = $1
-        WHERE TRUE${plantSql('q.machine_id')} AND q.shift_date >= $2::timestamptz AND q.shift_date <= $3::timestamptz
+         LEFT JOIN shifts qs ON qs.id = q.shift_id AND qs.company_id = $1
+        WHERE TRUE${plantSql('q.machine_id')} AND q.shift_date >= ($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
+          AND q.shift_date <= ($3::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
+          AND q.shift_date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND (qs.start_time IS NULL OR (q.shift_date + qs.start_time) AT TIME ZONE 'Asia/Kolkata' <= NOW())
           ${sf ? `AND q.shift_id = ${sf}` : ''}
         GROUP BY 1, 2
      )
@@ -409,17 +430,21 @@ function vsYesterday(tr) {
   return { availability: d('availability_pct'), performance: d('performance_pct'), quality: d('quality_pct'), oee: d('oee_pct') };
 }
 
-exports.getOee = async (q = {}) => {
+async function getOee(q = {}, { exportAll = false } = {}) {
   const companyId = q.company_id;
   const { start, end } = resolveRange(q);
   const machineId = parseId(q.machine_id, 'machine_id');
   const shiftId   = parseId(q.shift_id, 'shift_id');
   const thresholds = resolveThresholds(q);
   const search = (q.search || '').trim().toLowerCase();
+  // The dashboard/report page locally pages a complete authorized fleet.
+  // Reusing this calculation avoids repeating both aggregate queries for
+  // every group of 200 machines; ordinary API paging remains the default.
+  const allMachines = exportAll || q.all_machines === true || q.all_machines === 'true' || q.all_machines === '1';
 
   const [rows, tr] = await Promise.all([
-    machineTotals({ companyId, machineId, shiftId, start, end }),
-    trend({ companyId, machineId, shiftId, start, end })
+    machineTotals({ companyId, machineId, shiftId, start, end, shiftDates: true }),
+    trend({ companyId, machineId, shiftId, start, end, shiftDates: true })
   ]);
 
   let machines = rows.map(r => deriveOee(r, thresholds));
@@ -474,18 +499,20 @@ exports.getOee = async (q = {}) => {
     bottom_machines: ranked.slice(Math.max(5, ranked.length - 5)).reverse(),
     trend: tr,
     machines: {
-      data: sorted.slice(offset, offset + limitNum),
+      data: allMachines ? sorted : sorted.slice(offset, offset + limitNum),
       total: sorted.length,
-      page: pageNum,
-      limit: limitNum,
-      totalPages: Math.max(1, Math.ceil(sorted.length / limitNum))
+      page: allMachines ? 1 : pageNum,
+      limit: allMachines ? Math.max(1, sorted.length) : limitNum,
+      totalPages: allMachines ? 1 : Math.max(1, Math.ceil(sorted.length / limitNum))
     },
     updated_at: new Date().toISOString()
   };
 };
 
+exports.getOee = getOee;
+
 exports.getExportRows = async (q = {}) => {
-  const d = await exports.getOee({ ...q, page: 1, limit: 200 });
+  const d = await getOee({ ...q, page: 1, limit: 200 }, { exportAll: true });
   const hhmm = s => `${Math.floor((Number(s) || 0) / 3600)}h ${String(Math.floor(((Number(s) || 0) % 3600) / 60)).padStart(2, '0')}m`;
   const pct = v => v === null || v === undefined ? '' : `${v}%`;
 

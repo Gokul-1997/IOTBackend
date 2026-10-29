@@ -57,6 +57,8 @@ test('a machine without a current job still contributes its recorded output', as
   const shift1 = d.shiftwise.find(s => s.shift_id === 1);
   expect(shift1.produced).toBe(232);                // machine 9 has no job now: recorded output still counts
   expect(shift1.actual).toBe(192);                  // only the machine with a target
+  expect(d.trend.reduce((total, hour) => total + hour.actual, 0)).toBe(192);
+  expect(d.trend.reduce((total, hour) => total + hour.produced, 0)).toBe(232);
 });
 
 

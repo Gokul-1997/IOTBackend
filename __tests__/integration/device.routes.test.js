@@ -140,7 +140,7 @@ test('program: no machine named, an unknown machine, nothing waiting — each a 
   expect(res.body.message).toBe('No machine 70 in Acme Gears. Use the machine_id GET /status lists.');
   expect(mockDb.calls().at(-1).params).toEqual([70, 5]);               // within the token's company
 
-  for (const bad of ['abc', '7.5', '-7', '0', '99999999999']) {
+  for (const bad of ['abc', '7.5', '-7', '0', '2147483648', '99999999999']) {
     authRow();
     res = await request(app).get(`/api/device/v1/program?machine_id=${bad}`).set(AUTH);
     expect([res.status, res.body.code]).toEqual([400, 'BAD_MACHINE_ID']);

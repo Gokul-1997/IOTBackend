@@ -31,7 +31,7 @@ function given({ alarm, open = [] }) {
   answers.push(
     [/FROM machines\s+WHERE id = \$1 AND company_id = \$2/, [{ id: 25, machine_serial_no: 'HMC - 7 - F', image_url: null }]],
     [/FROM machine_alarms\s+WHERE machine_id = \$1 AND ended_at IS NULL/, open],
-    [/FROM telemetry_raw\s+WHERE machine_id = \$1\s+ORDER BY received_at DESC/,
+    [/FROM telemetry_raw\s+WHERE machine_id = \$1\s+AND company_id = \$2/,
       [{ machine_status: 'IDLE', spindle_load: 0, feed_rate: 0, received_at: new Date(), alarm, mode: 'MEM', energy: null }]]
   );
 }

@@ -26,7 +26,7 @@ function httpError(message, status) {
  * error the controller then reported as 500.
  */
 function parseDate(date) {
-  if (!date) return new Date().toISOString().slice(0, 10);
+  if (!date) return plantToday();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     throw httpError('date must be in YYYY-MM-DD format', 400);
@@ -88,7 +88,7 @@ async function resolveWindow(companyId, { date, shift_id }) {
   if (rowCount === 0) throw httpError('Shift not found or access denied', 404);
 
   const shift = rows[0];
-  const overnight = String(shift.start_time) > String(shift.end_time);
+  const overnight = String(shift.start_time) >= String(shift.end_time);
 
   // an overnight shift dated the 5th runs 05→06
   const endDay = overnight

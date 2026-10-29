@@ -34,6 +34,7 @@ const fleetSql = (companyId, plantId) => `
           SELECT machine_status, alarm, received_at FROM telemetry_raw
            WHERE company_id = $1 AND machine_id = m.id
              AND received_at > NOW() - INTERVAL '1 hour'
+             AND received_at <= NOW()
            ORDER BY received_at DESC LIMIT 1
         ) t ON true
        WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}`;

@@ -44,14 +44,14 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
     FROM shifts
     WHERE company_id=$1${sharedEntityPlantSql('shifts', plant_id, company_id)}
       AND (
-        (start_time<=end_time AND
-         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time
-         BETWEEN start_time AND end_time)
+        (start_time<end_time AND
+         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time AND
+         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time < end_time)
         OR
-        (start_time>end_time AND (
+        (start_time>=end_time AND (
            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
            OR
-           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time <= end_time
+           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time < end_time
         ))
       )
       AND is_active=TRUE
@@ -74,7 +74,7 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
   const today = toDateStr(now);
   let shiftStart;
 
-  if (shift.start_time <= shift.end_time) {
+  if (shift.start_time < shift.end_time) {
     shiftStart = new Date(`${today}T${shift.start_time}+05:30`);
   } else {
     if (currentTime >= shift.start_time) {
@@ -179,10 +179,8 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
   `, [machineIds]);
 
   const componentMap  = {};
-  const multiFactorMap = {};
   componentRows.forEach(r => {
     componentMap[r.machine_id]   = Number(r.target || 0);
-    multiFactorMap[r.machine_id] = Number(r.multiplication_factor || 1);
   });
 
   /* ================= PRODUCTION ================= */
@@ -211,10 +209,12 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
     FROM production_hourly
     WHERE machine_id = ANY($1)
       AND shift_id   = $2
-      AND hour_start >= date_trunc('hour', $3::timestamptz)
-      AND hour_start <  $4
+      AND company_id = $5
+      AND hour_start >= $3::timestamptz - INTERVAL '1 hour'
+      AND hour_start + INTERVAL '1 hour' > $3::timestamptz
+      AND hour_start < LEAST($4::timestamptz, $6::timestamptz)
     GROUP BY machine_id
-  `, [machineIds, shift.id, shiftStart, shiftEnd]);
+  `, [machineIds, shift.id, shiftStart, shiftEnd, company_id, realNow]);
 
   const prodMap = {};
   prodRows.forEach(r => {
@@ -259,9 +259,11 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
       machine_id, machine_status, alarm, received_at
     FROM telemetry_raw
     WHERE machine_id = ANY($1)
+      AND company_id = $2
       AND received_at > NOW() - INTERVAL '1 hour'
+      AND received_at <= NOW()
     ORDER BY machine_id, received_at DESC
-  `, [machineIds]);
+  `, [machineIds, company_id]);
 
   const liveMap = {};
   liveRows.forEach(r => {
@@ -297,7 +299,7 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
     let status = 'OFFLINE';
 
     if (receivedAtSec) {
-      if (freshDiff > OFFLINE_THRESHOLD) {
+      if (freshDiff < 0 || freshDiff > OFFLINE_THRESHOLD) {
         status = 'OFFLINE';
       } else if (['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus)) {
         status = 'RUNNING';
@@ -371,8 +373,9 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
      * This matches what charts and reports show — one consistent value.
      */
 
-    const multFactor = multiFactorMap[m.id] || 1;
-    let achieved = Math.max(0, Number(prod.produced_qty || 0)) * multFactor;
+    // Recorded rollup quantities are already the production unit used by
+    // reports and charts. Editing today's component must not rewrite them.
+    const achieved = Math.max(0, Number(prod.produced_qty || 0));
 
     /* ================= UTILIZATION ================= */
 
@@ -454,15 +457,15 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       WHERE company_id = $1${sharedEntityPlantSql('shifts', plantId, companyId)}
       AND is_active = true
       AND (
-        (start_time <= end_time AND
-         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time
-         BETWEEN start_time AND end_time)
+        (start_time < end_time AND
+         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time AND
+         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time < end_time)
         OR
-        (start_time > end_time AND
+        (start_time >= end_time AND
          (
            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= start_time
            OR
-           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time <= end_time
+           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time < end_time
          ))
       )
       LIMIT 1
@@ -479,7 +482,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       const todayD       = toDateStr(nowD);
       const currentTimeD = nowD.toTimeString().slice(0, 8);
  
-      if (shift.start_time <= shift.end_time) {
+      if (shift.start_time < shift.end_time) {
         detailShiftStart = new Date(`${todayD}T${shift.start_time}+05:30`);
       } else {
         if (currentTimeD >= shift.start_time) {
@@ -543,7 +546,6 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     `, [machineId]);
 
     const component = jobDetailRows[0] || null;
-    const detailMultFactor = Number(component?.multiplication_factor || 1);
  
     /* ================= PRODUCTION ================= */
  
@@ -566,9 +568,11 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         FROM production_hourly
         WHERE machine_id = $1
           AND shift_id   = $2
-          AND hour_start >= date_trunc('hour', $3::timestamptz)
-          AND hour_start <  $4
-      `, [machineId, shift.id, detailShiftStart, detailShiftEnd]);
+          AND company_id = $5
+          AND hour_start >= $3::timestamptz - INTERVAL '1 hour'
+          AND hour_start + INTERVAL '1 hour' > $3::timestamptz
+          AND hour_start < LEAST($4::timestamptz, $6::timestamptz)
+      `, [machineId, shift.id, detailShiftStart, detailShiftEnd, companyId, new Date()]);
  
       const prod = prodRows[0] || {};
  
@@ -659,7 +663,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
           : 0;
 
         const totalRunO    = Number(runSeconds   || 0);
-        const totalQtyO    = Number(producedQty  || 0) * detailMultFactor;
+        const totalQtyO    = Number(producedQty  || 0);
         const acceptedO    = Math.max(0, totalQtyO - qualityRejected - qualityRework);
 
         const availability = plannedSecO > 0
@@ -690,9 +694,12 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       SELECT machine_status, spindle_load, feed_rate, received_at, alarm, mode, energy
       FROM telemetry_raw
       WHERE machine_id = $1
+        AND company_id = $2
+        AND received_at > NOW() - INTERVAL '1 hour'
+        AND received_at <= NOW()
       ORDER BY received_at DESC
       LIMIT 1
-    `, [machineId]);
+    `, [machineId, companyId]);
 
     const live = liveRows[0] || {};
 
@@ -741,14 +748,14 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const OFFLINE_THRESHOLD_RT = 60; // seconds — same as dashboard
 
     const rawStatus  = (live.machine_status || '').toUpperCase();
-    const isOnline   = receivedAtRT && freshDiffRT !== null && freshDiffRT <= OFFLINE_THRESHOLD_RT;
+    const isOnline   = receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT;
     const isRunning  = isOnline && ['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus);
     const isIdle     = isOnline && !isRunning && rawStatus !== '';
 
     /* Derived status — matches dashboard card logic */
     const detailStatus = !receivedAtRT
       ? 'OFFLINE'
-      : freshDiffRT > OFFLINE_THRESHOLD_RT
+      : freshDiffRT < 0 || freshDiffRT > OFFLINE_THRESHOLD_RT
         ? 'OFFLINE'
         : isRunning ? 'RUNNING' : 'IDLE';
 
@@ -759,7 +766,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     }
 
     // Use production_hourly as single source — same as dashboard
-    const achievedBase = Math.max(0, producedQty) * detailMultFactor;
+    const achievedBase = Math.max(0, producedQty);
     const qualityAccepted = Math.max(0, achievedBase - qualityRejected - qualityRework);
 
     if (receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT) {

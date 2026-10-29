@@ -1,6 +1,7 @@
 const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { ownedOrThrow } = require('../lib/tenant');
+const { parseDate } = require('../dashboard/window');
 
 /* ─────────────────────────────────────────────────────────────
    META  –  machines + shifts for filter dropdowns
@@ -42,58 +43,43 @@ exports.getChartData = async ({ plantId, companyId, machineId, shiftId, date }) 
   /* ── Hourly part count (line chart) ── */
   let hourlyRows = [];
 
-  if (machineId && shiftId && date) {
-    // Use the shift's actual start/end times to compute the exact window.
-    // For overnight shifts (start > end, e.g. 20:00–08:00):
-    //   date=2026-03-21 → window is 2026-03-21 20:00 IST → 2026-03-22 08:00 IST
-    // For day shifts (start <= end):
-    //   date=2026-03-21 → window is 2026-03-21 08:00 IST → 2026-03-21 20:00 IST
+  if (machineId && date) {
+    /* Same shift START date and recorded units as Factory and Production
+       Report, including a first partial hour and an overnight shift's next
+       morning. One bounded read supplies the chart and its total. */
+    const day = parseDate(date);
+    const params = [companyId, machineId, day, new Date().toISOString()];
+    const shiftFilter = shiftId ? `AND ph.shift_id = $${params.push(shiftId)}` : '';
     const hourlyRes = await db.query(`
       SELECT
         TO_CHAR(ph.hour_start AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hour,
         SUM(ph.produced_qty)::int AS produced
       FROM production_hourly ph
-      JOIN shifts s ON s.id = ph.shift_id
-      WHERE ph.machine_id = $1${plantSql('ph.machine_id', plantId, companyId)}
-        AND ph.shift_id   = $2
-        AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-        AND ph.hour_start <  (
-              CASE WHEN s.start_time > s.end_time
-                   THEN ($3::date + INTERVAL '1 day' + s.end_time)
-                   ELSE ($3::date + s.end_time)
-              END
-            ) AT TIME ZONE 'Asia/Kolkata'
-      GROUP BY ph.hour_start
-      ORDER BY ph.hour_start
-    `, [machineId, shiftId, date]);
-    hourlyRows = hourlyRes.rows;
-  } else if (machineId && date) {
-    /* no shift selected — sum across all shifts for that date,
-       but respect each shift's own window so night-shift carry-over
-       from the previous day is NOT counted against this date.
-       Each shift is scoped by its start/end on $3::date (same logic
-       as the single-shift query above). */
-    const hourlyRes = await db.query(`
-      SELECT
-        TO_CHAR(ph.hour_start AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hour,
-        SUM(ph.produced_qty)::int AS produced
-      FROM production_hourly ph
-      JOIN shifts s ON s.id = ph.shift_id
-      JOIN machines m ON m.id = ph.machine_id
+      JOIN machines m ON m.id = ph.machine_id AND m.company_id = $1
+      LEFT JOIN shifts s ON s.id = ph.shift_id AND s.company_id = $1
       WHERE m.company_id  = $1${plantSql('m.id', plantId, companyId)}
+        AND ph.company_id = $1
         AND ph.machine_id = $2
-        AND s.company_id  = $1
-        AND s.is_active   = TRUE
-        AND ph.hour_start >= ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-        AND ph.hour_start <  (
-              CASE WHEN s.start_time > s.end_time
-                   THEN ($3::date + INTERVAL '1 day' + s.end_time)
-                   ELSE ($3::date + s.end_time)
+        ${shiftFilter}
+        AND ph.hour_start >= ($3::date::timestamp AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour'
+        AND ph.hour_start < LEAST((($3::date + 2)::timestamp AT TIME ZONE 'Asia/Kolkata'), $4::timestamptz)
+        AND (
+          (s.id IS NULL
+            AND ph.hour_start >= $3::date::timestamp AT TIME ZONE 'Asia/Kolkata'
+            AND ph.hour_start < ($3::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+          OR (s.id IS NOT NULL
+            AND ph.hour_start + INTERVAL '1 hour' > ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
+            AND ph.hour_start < (
+              CASE WHEN s.start_time >= s.end_time
+                   THEN $3::date + INTERVAL '1 day' + s.end_time
+                   ELSE $3::date + s.end_time
               END
             ) AT TIME ZONE 'Asia/Kolkata'
+            AND ($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata' <= $4::timestamptz)
+        )
       GROUP BY ph.hour_start
       ORDER BY ph.hour_start
-    `, [companyId, machineId, date]);
+    `, params);
     hourlyRows = hourlyRes.rows;
   }
 
@@ -155,28 +141,48 @@ exports.getPartTiming = async ({ companyId, machineId, shiftStartEpoch, shiftEnd
         ) AS interval_sec
       FROM telemetry_raw
       WHERE machine_id  = $1${plantSql('machine_id')}
+        AND company_id = $4
         AND received_at >= to_timestamp($2)
         AND received_at <  to_timestamp($3)
+    ),
+    counter_epochs AS (
+      SELECT *, SUM(CASE WHEN parts_count <= 2 AND parts_count < prev_parts THEN 1 ELSE 0 END)
+        OVER (ORDER BY received_at ROWS UNBOUNDED PRECEDING) AS counter_epoch
+      FROM ordered
+    ),
+    counter_highs AS (
+      SELECT *, MAX(parts_count) OVER (PARTITION BY counter_epoch ORDER BY received_at
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS high_parts
+      FROM counter_epochs
+    ),
+    counter_baselines AS (
+      -- Match the collector: a 11 -> 5 -> 11 rebound is not six new parts.
+      -- A near-zero reset starts a new counter epoch; raw rows stay intact.
+      SELECT *, CASE WHEN high_parts IS NULL AND parts_count <= 2 AND parts_count < prev_parts
+        THEN 0 ELSE high_parts END AS counter_base
+      FROM counter_highs
     ),
     part_events AS (
       -- Each row where parts_count incremented = one telemetry event.
       -- increment = how many parts were actually produced in this interval
       -- (can be > 1 when telemetry has a gap and the counter jumped).
-      -- Guard: skip stale-counter recovery jumps (prev_parts<=2 AND jump>5).
-      -- This is the SAME guard the MQTT processor uses to avoid attributing
-      -- a machine's pre-shift counter value as parts produced during this shift.
+      -- Apply the collector's continuous-sample acceptance limits. Raw
+      -- counters are not shift output: a reset recovery, long telemetry gap
+      -- or a large baseline jump must never become thousands of chart rows.
       SELECT
         received_at                                                           AS completed_at,
         COALESCE(
           LAG(received_at) OVER (ORDER BY received_at),
           to_timestamp($2)
         )                                                                     AS started_at,
-        (parts_count - prev_parts)                                            AS increment
-      FROM ordered
-      WHERE prev_parts IS NOT NULL
-        AND parts_count > prev_parts
+        (parts_count - counter_base)                                          AS increment
+      FROM counter_baselines
+      WHERE counter_base IS NOT NULL
+        AND parts_count > counter_base
         AND parts_count > 0
-        AND NOT (prev_parts <= 2 AND (parts_count - prev_parts) > 5)
+        AND parts_count - counter_base <= 20
+        AND interval_sec > 0 AND interval_sec <= 60
+        AND NOT (counter_base <= 2 AND (parts_count - counter_base) >= 5)
     ),
     -- Extend the last part's window to shift end (or now for live shifts).
     -- Without this, any run/idle time AFTER the final part completion is
@@ -198,11 +204,11 @@ exports.getPartTiming = async ({ companyId, machineId, shiftStartEpoch, shiftEnd
       pe.started_at,
       pe.increment,
       GREATEST(0, SUM(
-        CASE WHEN UPPER(o.machine_status) IN ('RUN','RUNNING','CUTTING')
+        CASE WHEN o.interval_sec BETWEEN 1 AND 60 AND UPPER(o.machine_status) IN ('RUN','RUNNING','CUTTING')
              THEN COALESCE(o.interval_sec, 0) ELSE 0 END
       ))::int AS run_seconds,
       GREATEST(0, SUM(
-        CASE WHEN UPPER(o.machine_status) NOT IN ('RUN','RUNNING','CUTTING')
+        CASE WHEN o.interval_sec BETWEEN 1 AND 60 AND UPPER(o.machine_status) NOT IN ('RUN','RUNNING','CUTTING')
              THEN COALESCE(o.interval_sec, 0) ELSE 0 END
       ))::int AS idle_seconds
     FROM part_windows pe
@@ -211,7 +217,7 @@ exports.getPartTiming = async ({ companyId, machineId, shiftStartEpoch, shiftEnd
      AND o.received_at <= pe.completed_at
     GROUP BY pe.completed_at, pe.started_at, pe.increment
     ORDER BY pe.started_at
-  `, [machineId, shiftStartEpoch, effectiveEnd]);
+  `, [machineId, shiftStartEpoch, effectiveEnd, companyId]);
 
   // Expand multi-part jumps: if parts_count jumped by N in one interval,
   // split run/idle time equally across N parts.

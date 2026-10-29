@@ -49,6 +49,29 @@ describe('charts.service.getChartData', () => {
     expect(out.totalProduced).toBe(15);
     expect(out.hourlyCount).toHaveLength(3);
   });
+
+  test.each([null, 5])('shift %s uses the report shift-date window including partial hours, tenant and as-of guards', async shiftId => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-28T16:36:00Z'));
+    try {
+      await svc.getChartData({ companyId: 4, machineId: 7, shiftId, date: '2026-10-28' });
+      const { text, params } = mockDb.calls()[0];
+      expect(params).toEqual([4, 7, '2026-10-28', '2026-10-28T16:36:00.000Z', ...(shiftId ? [shiftId] : [])]);
+      expect(text).toContain('ph.company_id = $1');
+      expect(text).toContain('s.id = ph.shift_id AND s.company_id = $1');
+      expect(text).toContain("ph.hour_start + INTERVAL '1 hour' > ($3::date + s.start_time)");
+      expect(text).toContain('CASE WHEN s.start_time >= s.end_time');
+      expect(text).toContain('ph.hour_start < LEAST(');
+      expect(text).toContain("($3::date + s.start_time) AT TIME ZONE 'Asia/Kolkata' <= $4::timestamptz");
+      expect(text).toContain('s.id IS NULL');
+      expect(text).not.toMatch(/multiplication_factor|JOIN components/);
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('a malformed chart date fails before reaching the rollup query', async () => {
+    await expect(svc.getChartData({ companyId: 4, machineId: 7, date: '2026-02-31' }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls()).toHaveLength(0);
+  });
 });
 
 describe('charts.service.getPartTiming', () => {
@@ -90,5 +113,16 @@ describe('charts.service.getPartTiming', () => {
       companyId: 4, machineId: 1, shiftStartEpoch: 1, shiftEndEpoch: 2, maxParts: 10
     });
     expect(out.parts).toHaveLength(10);
+  });
+
+  test('raw counter recovery and long gaps cannot fabricate parts in timing charts', async () => {
+    await svc.getPartTiming({ companyId: 4, machineId: 1, shiftStartEpoch: 1700000000, shiftEndEpoch: 1700001000 });
+    const { text } = mockDb.calls()[0];
+    expect(text).toContain('parts_count - counter_base <= 20');
+    expect(text).toContain('interval_sec > 0 AND interval_sec <= 60');
+    expect(text).toContain('counter_base <= 2 AND (parts_count - counter_base) >= 5');
+    expect(text).toContain('PARTITION BY counter_epoch');
+    expect(text).toContain('AND company_id = $4');
+    expect(text).toContain('o.interval_sec BETWEEN 1 AND 60');
   });
 });

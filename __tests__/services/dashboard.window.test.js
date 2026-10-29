@@ -31,6 +31,12 @@ describe('parseDate', () => {
     expect(parseDate(undefined)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  test('defaults to the plant date before UTC midnight', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-27T20:00:00Z'));
+    try { expect(parseDate(undefined)).toBe('2026-10-28'); }
+    finally { jest.useRealTimers(); }
+  });
+
   test.each([
     ['not-a-date'],
     ['06-08-2026'],
@@ -94,6 +100,13 @@ describe('resolveWindow', () => {
 
     expect(w.from).toBe('2026-08-06T22:00:00+05:30');
     expect(w.to).toBe('2026-08-07T06:00:00+05:30');
+  });
+
+  test('equal start and end times represent a full 24 hour shift', async () => {
+    mockDb.queueResponse({ rows: [{ id: 12, shift_code: 'FULL', start_time: '08:00:00', end_time: '08:00:00' }], rowCount: 1 });
+    const w = await resolveWindow(company_id, { date: '2026-10-28', shift_id: 12 });
+    expect(w.from).toBe('2026-10-28T08:00:00+05:30');
+    expect(w.to).toBe('2026-10-29T08:00:00+05:30');
   });
 
   test('a missing shift is 404, not 500', async () => {

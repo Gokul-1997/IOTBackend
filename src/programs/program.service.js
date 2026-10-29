@@ -471,7 +471,7 @@ function machineIdOf(input = {}) {
   const raw = input.machine_id == null ? '' : String(input.machine_id).trim();
   if (!raw) return null;
   const id = /^\d{1,10}$/.test(raw) ? Number(raw) : NaN;
-  if (!Number.isSafeInteger(id) || id <= 0) throw fail('machine_id must be a whole number: machine_id from GET /status.', 'BAD_MACHINE_ID');
+  if (!Number.isSafeInteger(id) || id <= 0 || id > 2147483647) throw fail('machine_id must be a whole number: machine_id from GET /status.', 'BAD_MACHINE_ID');
   return id;
 }
 

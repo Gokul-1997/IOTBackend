@@ -75,3 +75,68 @@ test('two operators on one machine and shift: both pages pick the latest assignm
   expect(listQuery.text).toMatch(/ORDER BY oma\.machine_id, oma\.id DESC/);
   expect(pageQuery.text).toMatch(/ORDER BY a\.id DESC/);
 });
+
+test('recorded part counts agree on list and detail even when the component multiplier is edited', async () => {
+  given('PN-45-1002');
+  const component = { machine_id: 25, target: 60, multiplication_factor: 2 };
+  const pageJob = answers.find(([re]) => re === PAGE_JOB)[1][0];
+  pageJob.multiplication_factor = 2;
+  answers.push(
+    [/SELECT j\.machine_id, j\.target_qty AS target/, [component]],
+    [/FROM production_hourly/, [{ machine_id: 25, produced_qty: 7, run_seconds: 600, idle_seconds: 60 }]]
+  );
+  const before = await bothPages();
+  expect(before.card.produced_qty).toBe(7);
+  expect(before.card.achieved_qty).toBe(7);
+  expect(before.page.job.achieved_qty).toBe(7);
+  expect(before.page.quality.accepted).toBe(7);
+  component.multiplication_factor = pageJob.multiplication_factor = 20;
+  const after = await bothPages();
+  expect(after.card.achieved_qty).toBe(7);
+  expect(after.page.job.achieved_qty).toBe(7);
+  expect(after.page.quality.accepted).toBe(7);
+});
+
+test('list and detail include the first overlapping hour, reject future buckets and enforce source company', async () => {
+  given('PN-45-1002');
+  await bothPages();
+  const rollups = calls.filter(c => /FROM production_hourly/.test(c.text));
+  expect(rollups).toHaveLength(2);
+  for (const q of rollups) {
+    expect(q.text).toContain('AND company_id = $5');
+    expect(q.text).toContain("hour_start + INTERVAL '1 hour' > $3::timestamptz");
+    expect(q.text).toContain('hour_start < LEAST($4::timestamptz, $6::timestamptz)');
+    expect(q.params[4]).toBe(4);
+    expect(q.params[5]).toBeInstanceOf(Date);
+  }
+});
+
+test('live shifts use an exclusive end so adjacent shifts cannot both match the boundary', async () => {
+  given('PN-45-1002');
+  await bothPages();
+  const shifts = calls.filter(c => /FROM shifts/.test(c.text));
+  for (const q of shifts) {
+    expect(q.text).not.toContain('BETWEEN start_time AND end_time');
+    expect(q.text).not.toMatch(/::time <= end_time/);
+    expect(q.text).toMatch(/::time < end_time/);
+  }
+});
+
+test.each([
+  ['2026-10-28T07:30:00+05:30','2026-10-27T02:30:00.000Z'],
+  ['2026-10-28T08:00:00+05:30','2026-10-28T02:30:00.000Z'],
+  ['2026-10-28T23:59:59+05:30','2026-10-28T02:30:00.000Z']
+])('a 24 hour live shift at %s starts at %s on both pages', async (clock,start) => {
+  jest.useFakeTimers().setSystemTime(new Date(clock));
+  try {
+    given('PN-45-1002');
+    Object.assign(answers[0][1][0],{ start_time:'08:00:00',end_time:'08:00:00' });
+    await bothPages();
+    const rollups = calls.filter(c => /FROM production_hourly/.test(c.text));
+    expect(rollups).toHaveLength(2);
+    for (const q of rollups) {
+      expect(q.params[2].toISOString()).toBe(start);
+      expect(q.params[3]-q.params[2]).toBe(86400000);
+    }
+  } finally { jest.useRealTimers(); }
+});

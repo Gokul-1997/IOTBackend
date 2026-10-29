@@ -59,16 +59,8 @@ function parseId(v, label) {
 }
 
 /** Defaults to the last 7 days; production_hourly grows every hour. */
-function resolveRange({ from, to }) {
-  const isDate = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v));
-  if (from && !isDate(from)) throw httpError('from must be a date in YYYY-MM-DD form', 400);
-  if (to && !isDate(to))     throw httpError('to must be a date in YYYY-MM-DD form', 400);
-
-  const end   = to   ? `${to} 23:59:59.999` : new Date().toISOString();
-  const start = from ? `${from} 00:00:00`
-                     : new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10) + ' 00:00:00';
-  if (new Date(start) > new Date(end)) throw httpError('from must not be after to', 400);
-  return { start, end };
+function resolveRange(q = {}) {
+  return oeeSvc.resolveRange(q);
 }
 
 /**
@@ -290,7 +282,7 @@ exports.getOperators = async (q = {}) => {
     { start, end, machineId, shiftId, operatorId, search }, cache.ttlFor(q), async () => {
       const [links, machineRows, operator_list] = await Promise.all([
         assignments({ companyId, start, end, machineId, operatorId, search }),
-        oeeSvc.machineTotals({ companyId, machineId, shiftId, start, end }),
+        oeeSvc.machineTotals({ companyId, machineId, shiftId, start, end, shiftDates: true }),
         operatorOptions(companyId)
       ]);
       return { links, machineRows, operator_list };

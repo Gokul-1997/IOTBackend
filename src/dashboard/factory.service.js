@@ -71,8 +71,9 @@ exports.getFactoryDashboard = async (req) => {
                t.machine_id, t.machine_status, t.alarm, t.received_at
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
-        WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
+        WHERE m.company_id = $1 AND t.company_id = $1 AND m.is_active${plantSql('m.id')}
           AND t.received_at > NOW() - INTERVAL '1 hour'
+          AND t.received_at <= NOW()
           ${machineId ? 'AND t.machine_id = $2' : ''}
         ORDER BY t.machine_id, t.received_at DESC
       ),
@@ -163,7 +164,7 @@ exports.getFactoryDashboard = async (req) => {
       SELECT j.machine_id, j.target_qty::numeric AS target
         FROM machine_current_job j
         JOIN machines m ON m.id = j.machine_id AND m.company_id = $1 AND m.is_active
-       WHERE j.is_active = TRUE${plantSql('j.machine_id')}
+       WHERE j.company_id = $1 AND j.is_active = TRUE${plantSql('j.machine_id')}
          ${machineId ? 'AND j.machine_id = $2' : ''}`,
       machineId ? [companyId, machineId] : [companyId]
     ),
@@ -237,22 +238,23 @@ exports.getFactoryDashboard = async (req) => {
   /* month-to-date energy, for the monthly cost figure, and the same days
      of last month for the "vs last month" comparison */
   const monthRequest = db.query(`
-    SELECT COALESCE(SUM(energy_kwh) FILTER (
-             WHERE hour_start >= date_trunc('month', $2::date)
-               AND hour_start <  (date_trunc('month', $2::date) + INTERVAL '1 month')), 0)::float AS kwh,
-           COALESCE(SUM(energy_kwh) FILTER (
-             WHERE hour_start >= date_trunc('month', $2::date) - INTERVAL '1 month'
-               AND hour_start <  ($2::date - INTERVAL '1 month' + INTERVAL '1 day')), 0)::float AS prev_kwh
-    FROM production_hourly
-    WHERE company_id = $1${plantSql('machine_id')}
-      AND hour_start >= date_trunc('month', $2::date) - INTERVAL '1 month'
-      AND hour_start <  (date_trunc('month', $2::date) + INTERVAL '1 month')
-      ${machineId ? 'AND machine_id = $3' : ''}`,
-    machineId ? [companyId, win.day, machineId] : [companyId, win.day]
+    SELECT COALESCE(SUM(p.energy_kwh) FILTER (
+             WHERE p.hour_start >= date_trunc('month', $2::date)::timestamp AT TIME ZONE 'Asia/Kolkata'), 0)::float AS kwh,
+           COALESCE(SUM(p.energy_kwh) FILTER (
+             WHERE p.hour_start >= (date_trunc('month', $2::date) - INTERVAL '1 month')::timestamp AT TIME ZONE 'Asia/Kolkata'
+               AND p.hour_start < ($2::date - INTERVAL '1 month' + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata'), 0)::float AS prev_kwh
+    FROM production_hourly p
+    JOIN machines owned ON owned.id = p.machine_id AND owned.company_id = $1
+    WHERE p.company_id = $1${plantSql('p.machine_id')}
+      AND p.hour_start >= (date_trunc('month', $2::date) - INTERVAL '1 month')::timestamp AT TIME ZONE 'Asia/Kolkata'
+      AND p.hour_start < LEAST((($2::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'), $3::timestamptz)
+      ${machineId ? 'AND p.machine_id = $4' : ''}`,
+    [companyId, win.day, asOf.toISOString(), ...(machineId ? [machineId] : [])]
   );
 
   const [machineTotals, downtimeRes, alarmRes, monthRes] = await Promise.all([
-    oeeSvc.machineTotals({ companyId, machineId, shiftId: win.shift?.id || null, start: eventStart, end: eventEnd }),
+    oeeSvc.machineTotals({ companyId, machineId, shiftId: win.shift?.id || null, start: eventStart, end: eventEnd,
+      qualityDays: { from: win.day, to: win.day } }),
     db.query(`
       SELECT COALESCE(r.name,'Unclassified') AS reason,
              COALESCE(r.category,'UNPLANNED') AS category,
@@ -338,9 +340,10 @@ exports.getFactoryDashboard = async (req) => {
     const t = new Date(r.hour_start).getTime();
     const bucket = new Date(Math.floor((t + IST) / HOUR) * HOUR - IST);
     const key = bucket.toISOString();
-    const e = byHour.get(key) || { hour: bucket, kwh: 0, produced: 0, shift_id: r.shift_id };
+    const e = byHour.get(key) || { hour: bucket, kwh: 0, produced: 0, actual: 0, shift_id: r.shift_id };
     e.kwh += Number(r.kwh || 0);
     e.produced += Number(r.produced || 0);
+    if (targetMachineIds.has(r.machine_id)) e.actual += Number(r.produced || 0);
     byHour.set(key, e);
   }
   const trend = [...byHour.values()].sort((a, b) => a.hour.getTime() - b.hour.getTime()).map(e => {
@@ -349,6 +352,7 @@ exports.getFactoryDashboard = async (req) => {
       hour: e.hour,
       kwh: Number(e.kwh.toFixed(3)),
       produced: e.produced,
+      actual: e.actual,
       target: shiftTarget && hrs ? Math.round(shiftTarget / hrs) : null
     };
   });
@@ -415,7 +419,9 @@ exports.getFactoryDashboard = async (req) => {
       cost_per_part_vs_yesterday_pct: pctChange(perPart(prod.energy_kwh, producedParts) || 0, perPart(yday.kwh, yday.produced) || 0)
     },
 
-    shiftwise,
+    // The comparison obeys the same selected shift as its headline and
+    // trend. All shifts remain visible only when the filter is All.
+    shiftwise: inScope,
 
     downtime: {
       total_seconds:     dtTotal,

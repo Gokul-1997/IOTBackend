@@ -109,8 +109,22 @@ test('selecting the night shift preserves the shared overnight window for calend
   expect(out.energy.kwh).toBe(0);
   expect(out.time.run_seconds).toBe(0);
   expect(out.trend).toEqual([]);
+  expect(out.shiftwise.map(row => row.shift_id)).toEqual([2]);
   expect(oee.machineTotals).toHaveBeenCalledWith(expect.objectContaining({ shiftId: 2, start: '2026-10-27T14:30:00.000Z', end: '2026-10-27T14:30:00.000Z' }));
   expect(shiftQuery()[1][1]).toBe('2026-10-27');
+});
+
+test('a selected shift keeps comparison bars, headline and hourly trend in one scope', async () => {
+  const answer = db.query.getMockImplementation();
+  db.query.mockImplementation(async (sql, params) => /FROM shifts sh/.test(sql)
+    ? { rows: [...shifts.slice(0,2), { ...shifts[2], machine_id:7, hour_start:'2026-10-27T20:00:00+05:30', produced:60 }] }
+    : answer(sql, params));
+  jest.setSystemTime(new Date('2026-10-27T22:36:00+05:30'));
+  const out = await svc.getFactoryDashboard(request({ shift_id:'2' }));
+  expect(out.shiftwise.map(row => row.shift_id)).toEqual([2]);
+  expect(out.production.produced).toBe(60);
+  expect(out.shiftwise.reduce((sum,row) => sum+row.produced,0)).toBe(out.production.produced);
+  expect(out.trend.reduce((sum,row) => sum+row.produced,0)).toBe(out.production.produced);
 });
 
 test('machines without a target remain in pieces but do not inflate the target actual', async () => {
@@ -160,4 +174,23 @@ test('trend remains chronological even when shift-code order differs from clock 
   jest.setSystemTime(new Date('2026-10-28T09:00:00+05:30'));
   const out = await svc.getFactoryDashboard(request());
   expect(out.trend.map(row => row.hour.toISOString())).toEqual(['2026-10-27T02:30:00.000Z', '2026-10-27T15:30:00.000Z']);
+});
+
+test('monthly energy stops at the selected plant day and request clock, and checks the recorded machine owner', async () => {
+  await svc.getFactoryDashboard(request({ machine_id: '7' }));
+  const [sql, params] = db.query.mock.calls.find(([text]) => /date_trunc\('month'/.test(text));
+  expect(params).toEqual([4, '2026-10-27', '2026-10-27T07:04:00.000Z', 7]);
+  expect(sql).toContain('JOIN machines owned ON owned.id = p.machine_id AND owned.company_id = $1');
+  expect(sql).toContain('WHERE p.company_id = $1');
+  expect(sql).toContain("p.hour_start < LEAST((($2::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'), $3::timestamptz)");
+  expect(sql).toContain('p.machine_id = $4');
+});
+
+test('live machine state and job target cannot use another company or future telemetry row', async () => {
+  await svc.getFactoryDashboard(request());
+  const live = db.query.mock.calls.find(([text]) => /FROM counted c/.test(text))[0];
+  const target = db.query.mock.calls.find(([text]) => /j\.target_qty::numeric AS target/.test(text))[0];
+  expect(live).toContain('t.company_id = $1');
+  expect(live).toContain('t.received_at <= NOW()');
+  expect(target).toContain('WHERE j.company_id = $1');
 });

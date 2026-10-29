@@ -1,5 +1,6 @@
 const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
+const { shiftDateWindow } = require('../dashboard/production-window');
 
 /* ─── helpers ─── */
 
@@ -158,9 +159,10 @@ exports.oeeHourlyData = async (company_id, date_from, date_to, machine_id, shift
   if (operator_id) { params.push(operator_id); conds.push(`op.operator_id = $${params.length}`); }
 
   const extra = conds.length ? 'AND ' + conds.join(' AND ') : '';
+  const asOf = `$${params.push(new Date().toISOString())}::timestamptz`;
 
   const { rows } = await db.query(`
-    WITH ${OPERATOR_CTE}
+    WITH ${OPERATOR_CTE}, report_clock AS (SELECT ${asOf} AS as_of)
     SELECT
       m.machine_serial_no                                                         AS machine,
       COALESCE(op.operator_name, '--')                                            AS operator,
@@ -170,22 +172,15 @@ exports.oeeHourlyData = async (company_id, date_from, date_to, machine_id, shift
       ROUND(o.quality::numeric,      2)                                           AS quality,
       ROUND(o.oee::numeric,          2)                                           AS oee
     FROM oee_hourly o
-    JOIN machines m ON m.id = o.machine_id
-    LEFT JOIN shifts s ON s.id = o.shift_id
+    JOIN machines m ON m.id = o.machine_id AND m.is_active = TRUE
+    CROSS JOIN report_clock clock
+    LEFT JOIN shifts s ON s.id = o.shift_id AND s.company_id = $1
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1${plantSql('m.id')}
-      AND (
-        s.start_time IS NULL
-        OR (
-          o.hour_start >= ($2::date + s.start_time) AT TIME ZONE 'Asia/Kolkata'
-          AND o.hour_start < (
-                CASE WHEN s.start_time > s.end_time
-                     THEN ($3::date + INTERVAL '1 day' + s.end_time)
-                     ELSE ($3::date + s.end_time)
-                END
-              ) AT TIME ZONE 'Asia/Kolkata'
-        )
-      )
+    WHERE m.company_id = $1${plantSql('m.id')}${sharedEntityPlantSql('s')}
+      /* Historical OEE rows predate company_id; keep NULL legacy owners,
+         while refusing any explicit owner that differs from the machine. */
+      AND (o.company_id IS NULL OR o.company_id = $1)
+      AND ${shiftDateWindow('o', 's', { asOf: 'clock.as_of' })}
       ${extra}
     ORDER BY m.machine_serial_no, o.hour_start
   `, params);
@@ -231,11 +226,14 @@ exports.shiftOeeData = async (company_id, date_from, date_to, machine_id, shift_
       ROUND(o.quality::numeric,      2)          AS quality,
       ROUND(o.oee::numeric,          2)          AS oee
     FROM oee_shift_summary o
-    JOIN machines m ON m.id = o.machine_id
-    JOIN shifts   s ON s.id = o.shift_id
+    JOIN machines m ON m.id = o.machine_id AND m.is_active = TRUE
+    JOIN shifts   s ON s.id = o.shift_id AND s.company_id = $1
     LEFT JOIN op_map op ON op.machine_id = o.machine_id
-    WHERE m.company_id = $1${plantSql('m.id')}
-      AND o.shift_date BETWEEN $2 AND $3
+    WHERE m.company_id = $1${plantSql('m.id')}${sharedEntityPlantSql('s')}
+      AND o.shift_date BETWEEN $2::date AND $3::date
+      AND (CASE WHEN s.start_time >= s.end_time
+          THEN (o.shift_date + INTERVAL '1 day' + s.end_time)
+          ELSE (o.shift_date + s.end_time) END) AT TIME ZONE 'Asia/Kolkata' <= NOW()
       ${extra}
     ORDER BY o.shift_date DESC, s.shift_code, m.machine_serial_no
   `, params);

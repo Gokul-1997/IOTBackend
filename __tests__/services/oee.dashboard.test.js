@@ -206,7 +206,7 @@ describe('the aggregate query', () => {
     await svc.getOee({ company_id: 4 });
     // telemetry_raw is a hypertable with ~183 chunks; without a
     // received_at predicate the planner cannot prune any of them
-    expect(mockDb.calls()[0].text).toMatch(/t\.received_at > NOW\(\) - INTERVAL '1 hour'/);
+    expect(mockDb.calls()[0].text).toMatch(/t\.received_at > NOW\(\) - INTERVAL '60 seconds'/);
   });
 
   test('scopes quality through the machine, since the table has no company_id', async () => {

@@ -42,7 +42,7 @@ describe('maintenance dashboard — query safety', () => {
     telemetry.forEach(c => {
       // without this the planner cannot prune chunks and the query is unusable
       // either the live freshness window or the dashboard's own date window
-      expect(c.text).toMatch(/received_at > NOW\(\) - INTERVAL '1 hour'|received_at >= \$2 AND t\.received_at < \$3/);
+      expect(c.text).toMatch(/received_at > NOW\(\) - INTERVAL '(?:1 hour|60 seconds)'|received_at >= \$2 AND t\.received_at < \$3/);
     });
   });
 

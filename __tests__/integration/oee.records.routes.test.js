@@ -80,7 +80,10 @@ describe('the page of records', () => {
     await request(app).get('/api/oee/reports').query({ ...RANGE, line_id: '3', machine_id: '7', shift_id: '9', page: 2, limit: 15 });
     const [count, page] = mockDb.calls();
     expect(count.params).toEqual([5, 3, 7, 9, '2026-10-15', '2026-10-21']);
-    expect(count.text).toMatch(/m\.company_id = \$1 AND m\.line_id = \$2 AND os\.machine_id = \$3 AND os\.shift_id = \$4 AND os\.shift_date BETWEEN \$5::date AND \$6::date/);
+    expect(count.text).toContain('m.company_id = $1');
+    expect(count.text).toContain('s.company_id = $1');
+    expect(count.text).toContain("AT TIME ZONE 'Asia/Kolkata' <= NOW()");
+    expect(count.text).toMatch(/m\.line_id = \$2 AND os\.machine_id = \$3 AND os\.shift_id = \$4 AND os\.shift_date BETWEEN \$5::date AND \$6::date/);
     expect(page.params).toEqual([5, 3, 7, 9, '2026-10-15', '2026-10-21', 15, 15]);   // limit, offset
   });
 

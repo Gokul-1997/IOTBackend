@@ -141,7 +141,14 @@ function id(query, name) {
  */
 function filtersOf(query, plantId, companyId, { rangeRequired = false } = {}) {
   const params = [companyId];
-  const where = ['m.company_id = $1'];
+  const where = [
+    'm.company_id = $1', 'm.is_active = TRUE', 's.company_id = $1',
+    // Both OEE Records and Shift OEE describe completed shifts. A future
+    // or unfinished cached summary cannot become a measured result.
+    `(CASE WHEN s.start_time >= s.end_time
+      THEN (os.shift_date + INTERVAL '1 day' + s.end_time)
+      ELSE (os.shift_date + s.end_time) END) AT TIME ZONE 'Asia/Kolkata' <= NOW()`
+  ];
 
   const line = id(query, 'line_id'), machine = id(query, 'machine_id'), shift = id(query, 'shift_id');
   if (line)    where.push(`m.line_id = $${params.push(line)}`);
