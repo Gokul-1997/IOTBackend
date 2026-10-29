@@ -21,6 +21,7 @@
  */
 const db = require('../db');
 const { plantSql } = require('../lib/read-scope');
+const { machineOrder } = require('../lib/machine-order');
 
 const RANGES = {
   '1h':  { seconds: 3600,       bucket: 60 },
@@ -88,7 +89,7 @@ async function meters(companyId, nowMs) {
           ORDER BY r.read_at DESC LIMIT 1
        ) latest ON TRUE
       WHERE m.company_id = $1${plantSql('m.id')}
-      ORDER BY m.machine_serial_no`,
+      ORDER BY ${machineOrder('m.machine_serial_no')}`,
     [companyId, new Date(nowMs - LOOKBACK_MS), new Date(nowMs)]
   );
   return rows.map(r => ({ id: r.id, serial: r.machine_serial_no, last_read_at: ms(r.last_read_at) }));

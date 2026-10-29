@@ -14,6 +14,7 @@ const { OPERATOR_CTE } = require('../reports/operator-map');
 const { shapeRows } = require('../reports/report.columns');
 const { createExcel } = require('../reports/excel.util');
 const { toCsv } = require('../utils/export.util');
+const { machineOrder } = require('../lib/machine-order');
 
 const CONTENT_TYPES = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -53,7 +54,7 @@ exports.getMeta = async (plantId, companyId) => {
       FROM machines m
       LEFT JOIN line l ON l.id = m.line_id
       WHERE m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id', plantId, companyId)}
-      ORDER BY m.machine_serial_no ASC
+      ORDER BY ${machineOrder('m.machine_serial_no')}
     `, [filterVal]);
 
     // Get SHIFTS
@@ -181,7 +182,9 @@ function filtersOf(query, plantId, companyId, { rangeRequired = false } = {}) {
 function orderOf(query) {
   const column = Object.prototype.hasOwnProperty.call(SORTS, query.sort_by) ? SORTS[query.sort_by] : SORTS.shift_date;
   const dir = String(query.sort_order || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-  return `ORDER BY ${column} ${dir} NULLS LAST, os.shift_date DESC, m.machine_serial_no ASC, s.start_time ASC, os.machine_id, os.shift_id`;
+  // the machine column sorts its names as people read them (VMC - 2 before VMC - 10)
+  const first = column === SORTS.machine_serial_no ? machineOrder(column, dir) : `${column} ${dir} NULLS LAST`;
+  return `ORDER BY ${first}, os.shift_date DESC, ${machineOrder('m.machine_serial_no')}, s.start_time ASC, os.machine_id, os.shift_id`;
 }
 
 /** One row per machine and shift: the date as YYYY-MM-DD (no time zone to shift it), figures to 2 places. */

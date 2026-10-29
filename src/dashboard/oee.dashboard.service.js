@@ -36,6 +36,7 @@ const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { parseRange } = require('./window');
 const { shiftDateWindow, shiftStartDay } = require('./production-window');
 const { costOf } = require('../machines/hour-rate');
+const { machineOrder } = require('../lib/machine-order');
 
 /* Classification bands, world-class OEE being 85%. Overridable per request
    so a plant can set its own bar without a schema change. */
@@ -193,7 +194,7 @@ async function machineTotals({ companyId, machineId, shiftId, start, end, shiftD
        LEFT JOIN live lv     ON lv.machine_id = m.id
       WHERE m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id')}
         ${mf ? `AND m.id = ${mf}` : ''}
-      ORDER BY m.machine_serial_no`,
+      ORDER BY ${machineOrder('m.machine_serial_no')}`,
     params
   );
   return rows;

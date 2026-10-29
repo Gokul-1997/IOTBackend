@@ -1,5 +1,6 @@
 const db = require('../db');
 const { plantSql } = require('../lib/read-scope');
+const { machineOrder } = require('../lib/machine-order');
 
 function parseFleetPage(query = {}) {
   if (query.paged === undefined) return null; // legacy app contract
@@ -58,8 +59,8 @@ async function fleetPage(companyId, options, plantId = null) {
              'offline', count(*) FILTER (WHERE status = 'OFFLINE'),
              'alarm', count(*) FILTER (WHERE alarm)) FROM fleet) AS summary,
            (SELECT count(*)::int FROM filtered) AS total,
-           COALESCE((SELECT json_agg(p ORDER BY p.id) FROM
-             (SELECT * FROM filtered ORDER BY id LIMIT $2 OFFSET $3) p), '[]'::json) AS machines
+           COALESCE((SELECT json_agg(p ORDER BY ${machineOrder('p.machine_serial_no')}, p.id) FROM
+             (SELECT * FROM filtered ORDER BY ${machineOrder('machine_serial_no')}, id LIMIT $2 OFFSET $3) p), '[]'::json) AS machines
   `, [companyId, perPage, (page - 1) * perPage, status, search]);
   const result = rows[0];
   return {
@@ -79,7 +80,7 @@ async function fleetMachines(companyId, plantId = null) {
     SELECT id AS machine_id, machine_serial_no, status, alarm
       FROM (${fleetSql(companyId, plantId)}
       ) fleet
-     ORDER BY id
+     ORDER BY ${machineOrder('machine_serial_no')}, id
   `, [companyId]);
   return rows;
 }

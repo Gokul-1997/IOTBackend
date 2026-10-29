@@ -36,6 +36,7 @@ const pool = require('../db');
 const { plantSql, nullablePlantSql, current } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 const cache = require('./cache');
+const { machineOrder } = require('../lib/machine-order');
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -238,7 +239,7 @@ async function machineFigures({ companyId, machineId, search, start, end }) {
        LEFT JOIN peak pk        ON pk.machine_id = m.id
       WHERE m.company_id = $1 AND m.is_active = TRUE${plantSql('m.id')}
         ${mf}
-      ORDER BY m.machine_serial_no`,
+      ORDER BY ${machineOrder('m.machine_serial_no')}`,
     params
   );
   return rows;

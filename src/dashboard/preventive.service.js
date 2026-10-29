@@ -13,6 +13,7 @@ const { plantSql, nullablePlantSql, current } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 const { severityClass } = require('./severity');
 const { parseRange, parseMachineId, httpError } = require('./window');
+const { machineOrder } = require('../lib/machine-order');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
 const SEVERITY_CLASS = severityClass('severity');
@@ -187,7 +188,7 @@ exports.getPreventiveDashboard = async (req) => {
       WHERE a.company_id = $1${plantSql('a.machine_id')} AND a.started_at >= $2 AND a.started_at < $3
         AND a.severity = 'CRITICAL' ${alarmScope}
       GROUP BY m.machine_serial_no
-      ORDER BY critical DESC, m.machine_serial_no
+      ORDER BY critical DESC, ${machineOrder('m.machine_serial_no')}
       LIMIT 15`, alarmParams
     )),
 

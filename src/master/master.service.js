@@ -1,5 +1,6 @@
 const db = require("../db");
 const { sharedEntityPlantSql } = require("../lib/read-scope");
+const { machineOrder } = require('../lib/machine-order');
 
 const getMachineListService = async (plant_id, company_id) => {
   // line_id lets a list of every machine be grouped by line (Quality's "All lines")
@@ -9,7 +10,7 @@ const getMachineListService = async (plant_id, company_id) => {
     WHERE company_id = $1
       AND is_active = true
       AND ($2::int IS NULL OR plant_id = $2)
-    ORDER BY machine_serial_no
+    ORDER BY ${machineOrder('machine_serial_no')}
   `;
   const result = await db.query(query, [company_id, plant_id]);
   return result.rows;
@@ -39,7 +40,7 @@ const getMachinesByLineService = async (line_id, plant_id, company_id) => {
        AND line_id = $2
        AND ($3::int IS NULL OR plant_id = $3)
        AND is_active = true
-     ORDER BY machine_serial_no`,
+     ORDER BY ${machineOrder('machine_serial_no')}`,
     [company_id, line_id, plant_id]
   );
 

@@ -26,6 +26,7 @@ const { severityClass } = require('./severity');
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
 const { LIMITS: METER_LIMITS } = require('./energy-meter.service');
+const { machineOrder } = require('../lib/machine-order');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
 const SEVERITY_CLASS = severityClass('severity');
@@ -243,7 +244,7 @@ exports.getMaintenanceDashboard = async (req) => {
       ) op ON TRUE
       WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
         ${machineId ? 'AND m.id = $4' : ''}
-      ORDER BY m.machine_serial_no`,
+      ORDER BY ${machineOrder('m.machine_serial_no')}`,
       machineId
         ? [companyId, win.from, win.to, machineId]
         : [companyId, win.from, win.to]

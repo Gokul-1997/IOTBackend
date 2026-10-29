@@ -2,6 +2,7 @@ const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { ownedOrThrow } = require('../lib/tenant');
 const { parseDate } = require('../dashboard/window');
+const { machineOrder } = require('../lib/machine-order');
 
 /* ─────────────────────────────────────────────────────────────
    META  –  machines + shifts for filter dropdowns
@@ -12,7 +13,7 @@ exports.getMeta = async (plantId, companyId) => {
       SELECT id, machine_serial_no
       FROM machines
       WHERE company_id = $1 AND is_active = TRUE${plantSql('id', plantId, companyId)}
-      ORDER BY machine_serial_no
+      ORDER BY ${machineOrder('machine_serial_no')}
     `, [companyId]),
     db.query(`
       SELECT id, shift_code, shift_name, start_time, end_time

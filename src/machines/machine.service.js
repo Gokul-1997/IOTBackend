@@ -6,6 +6,7 @@ const { pagination } = require('../lib/pagination');
 const { idOrNull, resolvePlantId } = require('../lib/plant-scope');
 const placements = require('../lib/machine-placement');
 const { validateImageReference } = require('../files/media.service');
+const { machineOrder } = require('../lib/machine-order');
 
 const EDITABLE = ['machine_serial_no', 'line_id', 'plant_id', 'x_axis', 'y_axis', 'z_axis',
   'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table', 'atc_tool_capacity', 'model',
@@ -91,8 +92,8 @@ exports.getMachines = async (req) => {
     search = '',
     page = 1,
     limit = 10,
-    sortBy = 'm.id',
-    sortDir = 'desc'
+    sortBy = 'm.machine_serial_no',
+    sortDir = 'asc'
   } = req.query;
 
   const companyId = req.user.company_id;
@@ -114,6 +115,10 @@ exports.getMachines = async (req) => {
 
   const orderDirection =
     String(sortDir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  // by name unless asked otherwise, its numbers read as numbers (29 Oct 2026); the id breaks ties
+  const orderSql = orderColumn === 'm.machine_serial_no'
+    ? `${machineOrder('m.machine_serial_no', orderDirection)}, m.id`
+    : `${orderColumn} ${orderDirection}, m.id`;
 
   let whereSQL = `WHERE m.company_id = $1`;
   const values = [companyId];
@@ -164,7 +169,7 @@ exports.getMachines = async (req) => {
     FROM machines m
     LEFT JOIN line l ON l.id = m.line_id
     ${whereSQL}
-    ORDER BY ${orderColumn} ${orderDirection}
+    ORDER BY ${orderSql}
     LIMIT $${values.length + 1}
     OFFSET $${values.length + 2}
   `;

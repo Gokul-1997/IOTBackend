@@ -1,5 +1,6 @@
 const db = require('../db');
 const { pagination } = require('../lib/pagination');
+const { machineOrder } = require('../lib/machine-order');
 
 function id(value, label) {
   const n = Number(value);
@@ -94,7 +95,7 @@ exports.getAvailableMachines = async (company_id, plant_id = null) => {
         SELECT 1 FROM machine_current_job j
         WHERE j.machine_id = m.id AND j.is_active = TRUE
       )
-    ORDER BY m.machine_serial_no
+    ORDER BY ${machineOrder('m.machine_serial_no')}
   `, [company_id, plant_id]);
   return rows;
 };

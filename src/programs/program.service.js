@@ -46,6 +46,7 @@ const { announceUnread } = require('../notifications/notification.service');
 const { programLink } = require('../notifications/links');
 const { plantSql } = require('../lib/read-scope');
 const { effectivePlantId } = require('../lib/plant-scope');
+const { machineOrder } = require('../lib/machine-order');
 
 /** A gateway is "online" when it called within this long. */
 const ONLINE_WINDOW_SEC = 60;
@@ -255,7 +256,7 @@ exports.listMachines = async (req) => {
                  WHERE machine_id = m.id
                  ORDER BY id DESC LIMIT 1) lr ON true
         WHERE m.company_id = $1 AND m.is_active = true${plantSql('m.id', plantId, companyId)}
-        ORDER BY m.machine_serial_no`,
+        ORDER BY ${machineOrder('m.machine_serial_no')}`,
       [companyId, BACKUP_WAIT_MIN, REPORT_WAIT_MIN]
     ),
     liveGateway(companyId)
@@ -549,7 +550,7 @@ exports.gatewayStatus = async (gateway) => {
        LEFT JOIN program_backup_requests r
               ON r.machine_id = m.id AND r.closed_at IS NULL AND r.requested_at > NOW() - make_interval(mins => $2)
       WHERE m.company_id = $1 AND m.is_active = true
-      ORDER BY m.machine_serial_no, m.id`,
+      ORDER BY ${machineOrder('m.machine_serial_no')}, m.id`,
     [gateway.company_id, BACKUP_WAIT_MIN]
   );
   return {

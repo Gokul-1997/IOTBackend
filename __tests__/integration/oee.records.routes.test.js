@@ -22,6 +22,7 @@ jest.mock('../../src/middleware/auth.middleware', () => (req, res, next) => {
   next();
 });
 
+const { machineOrder } = require('../../src/lib/machine-order');
 const express = require('express');
 const request = require('supertest');
 const ExcelJS = require('exceljs');
@@ -90,14 +91,15 @@ describe('the page of records', () => {
   test.each([
     ['shift_code', 'ASC', 's.shift_code ASC NULLS LAST'],
     ['oee', 'DESC', 'os.oee DESC NULLS LAST'],
-    ['machine_serial_no', 'ASC', 'm.machine_serial_no ASC NULLS LAST'],
+    // the machine column reads its names' numbers as numbers (29 Oct 2026)
+    ['machine_serial_no', 'ASC', machineOrder('m.machine_serial_no', 'ASC')],
     ['__proto__', 'ASC', 'os.shift_date ASC NULLS LAST'],
     ['oee; DROP TABLE x', 'DESC', 'os.shift_date DESC NULLS LAST']
   ])('sort_by=%s %s → ORDER BY %s, then a fixed order', async (sort_by, sort_order, first) => {
     mockDb.queueResponse(rows([{ total: '0' }]), rows([]));
     await request(app).get('/api/oee/reports').query({ ...RANGE, sort_by, sort_order });
     const sql = mockDb.calls()[1].text;
-    expect(sql).toContain(`ORDER BY ${first}, os.shift_date DESC, m.machine_serial_no ASC, s.start_time ASC, os.machine_id, os.shift_id`);
+    expect(sql).toContain(`ORDER BY ${first}, os.shift_date DESC, ${machineOrder('m.machine_serial_no')}, s.start_time ASC, os.machine_id, os.shift_id`);
     expect(sql).not.toMatch(/DROP TABLE/);
   });
 

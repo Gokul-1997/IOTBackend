@@ -5,6 +5,7 @@
  * order; on the machine page's own permission, for the caller's company and
  * plant only, and nothing of the shift is worked out for it.
  */
+const { machineOrder } = require('../../src/lib/machine-order');
 const request = require('supertest');
 const express = require('express');
 
@@ -54,7 +55,8 @@ test('every machine of the company by name, with its status now, in the Live Das
   const [q] = mockDb.calls();
   expect(q.params).toEqual([4]);
   expect(q.text).toMatch(/m\.company_id = \$1 AND m\.is_active = true/);
-  expect(q.text).toMatch(/ORDER BY id\s*$/);                   // the Live Dashboard's order
+  // the Live Dashboard's order: by name, its numbers read as numbers (29 Oct 2026), the id breaking ties
+  expect(q.text).toContain(`ORDER BY ${machineOrder('machine_serial_no')}, id`);
   expect(q.text).toMatch(/INTERVAL '60 seconds' THEN 'OFFLINE'/); // the Live Dashboard's status rule
   expect(q.text).not.toMatch(/production_hourly|operator|job/i);
 });

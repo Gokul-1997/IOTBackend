@@ -27,6 +27,7 @@ const energySvc = require('../dashboard/energy.service');
 const ticketsSvc = require('../tickets/ticket.service');
 const programsSvc = require('../programs/program.service');
 const { helpFor } = require('./assistant.help');
+const { machineOrder } = require('../lib/machine-order');
 
 /** Pages whose figures a tool shows; the person needs one of them. */
 const ACCESS = {
@@ -82,7 +83,7 @@ async function machinesOf(user) {
   const { rows } = await db.query(
     `SELECT id, machine_serial_no FROM machines
       WHERE company_id = $1 AND is_active = TRUE${plantSql('id')}
-      ORDER BY machine_serial_no`, [user.company_id]);
+      ORDER BY ${machineOrder('machine_serial_no')}`, [user.company_id]);
   return rows.map(r => ({ id: r.id, name: r.machine_serial_no, keys: [r.machine_serial_no] }));
 }
 
@@ -289,7 +290,7 @@ const TOOLS = {
           FROM machines m
           LEFT JOIN latest l ON l.machine_id = m.id
          WHERE m.company_id = $1 AND m.is_active${plantSql('m.id')}
-         ORDER BY m.machine_serial_no`, [user.company_id]);
+         ORDER BY ${machineOrder('m.machine_serial_no')}`, [user.company_id]);
       const counts = { running: 0, idle: 0, alarm: 0, offline: 0, unknown: 0 };
       for (const r of rows) counts[r.state] += 1;
       return {

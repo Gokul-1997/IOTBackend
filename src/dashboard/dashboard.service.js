@@ -1,6 +1,7 @@
 const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { fleetPage } = require('./fleet-page');
+const { machineOrder } = require('../lib/machine-order');
 
 /** Return a Date whose .getFullYear/.getHours/… reflect IST, regardless of server TZ */
 function nowIST() {
@@ -110,7 +111,7 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
     FROM machines
     WHERE company_id=$1${plantSql('id', plant_id, company_id)}
     AND is_active=TRUE
-    ORDER BY id
+    ORDER BY ${machineOrder('machine_serial_no')}, id
   `, [company_id]);
 
   const machineIds = machines.map(m => m.id);

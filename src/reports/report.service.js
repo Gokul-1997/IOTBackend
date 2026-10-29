@@ -13,6 +13,7 @@ function secToHHMM(sec) {
 
 /* ─── the operator a row names: one rule for every report (operator-map.js) ─── */
 const { OPERATOR_CTE } = require('./operator-map');
+const { machineOrder } = require('../lib/machine-order');
 
 /* ─────────────────────────────────────────────────────────
    DROPDOWNS
@@ -23,7 +24,7 @@ exports.getMachines = async (company_id) => {
     `SELECT id, machine_serial_no AS name
      FROM machines
      WHERE company_id = $1 AND is_active = TRUE${plantSql('id')}
-     ORDER BY machine_serial_no`,
+     ORDER BY ${machineOrder('machine_serial_no')}`,
     [company_id]
   );
   return rows;
@@ -120,7 +121,7 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
         )
       )
       ${extra}
-    ORDER BY m.machine_serial_no, p.hour_start
+    ORDER BY ${machineOrder('m.machine_serial_no')}, p.hour_start
   `, params);
 
   const totalParts  = rows.reduce((a, r) => a + Number(r.produced_qty || 0), 0);
@@ -182,7 +183,7 @@ exports.oeeHourlyData = async (company_id, date_from, date_to, machine_id, shift
       AND (o.company_id IS NULL OR o.company_id = $1)
       AND ${shiftDateWindow('o', 's', { asOf: 'clock.as_of' })}
       ${extra}
-    ORDER BY m.machine_serial_no, o.hour_start
+    ORDER BY ${machineOrder('m.machine_serial_no')}, o.hour_start
   `, params);
 
   const avg = (field) => rows.length
@@ -235,7 +236,7 @@ exports.shiftOeeData = async (company_id, date_from, date_to, machine_id, shift_
           THEN (o.shift_date + INTERVAL '1 day' + s.end_time)
           ELSE (o.shift_date + s.end_time) END) AT TIME ZONE 'Asia/Kolkata' <= NOW()
       ${extra}
-    ORDER BY o.shift_date DESC, s.shift_code, m.machine_serial_no
+    ORDER BY o.shift_date DESC, s.shift_code, ${machineOrder('m.machine_serial_no')}
   `, params);
 
   const avg = (field) => rows.length

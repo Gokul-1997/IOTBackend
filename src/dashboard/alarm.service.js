@@ -16,6 +16,7 @@
 const pool = require('../db');
 const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
+const { machineOrder } = require('../lib/machine-order');
 
 /* The severities the screen groups by. Anything a controller sends that is
    not CRITICAL is reported as Normal rather than silently dropped — an
@@ -139,7 +140,7 @@ async function byMachine(filter) {
        LEFT JOIN machines m ON m.id = a.machine_id
        ${filter.sql}
       GROUP BY m.machine_serial_no, a.machine_id
-      ORDER BY total DESC, machine_serial_no
+      ORDER BY total DESC, ${machineOrder('m.machine_serial_no')}
       LIMIT 5  -- the chart is "Top 5 Alarms By Machine"
     `,
     filter.params
