@@ -47,6 +47,7 @@ const { programLink } = require('../notifications/links');
 const { plantSql } = require('../lib/read-scope');
 const { effectivePlantId } = require('../lib/plant-scope');
 const { machineOrder } = require('../lib/machine-order');
+const { tableQuery } = require('../lib/table-query');
 
 /** A gateway is "online" when it called within this long. */
 const ONLINE_WINDOW_SEC = 60;
@@ -289,12 +290,23 @@ exports.listMachines = async (req) => {
 };
 
 /** One machine's files, newest first; an upload in line says its place (1 = next). kind: uploads | backups (default: both). */
+/* The Files table's header (lib/table-query.js, 29 Oct 2026): sort any
+   column; filter where an upload is (delivery: __blank__ = still in line);
+   search the program name. */
+const FILE_TABLE = {
+  sort: { program: 'f.program_name', type: 'f.kind', delivery: 'f.delivery_status', size: 'f.size_bytes', saved: 'f.created_at', by: 'u.username' },
+  filter: { delivery: 'f.delivery_status', type: 'f.kind' },
+  search: { program: 'f.program_name' }
+};
+
 exports.listFiles = async (req) => {
   const machine = await getMachine(req, req.query.machine_id);
   const { limit, page, offset } = pageOf(req.query, 20);
   const kinds = { uploads: ['NEW'], backups: ['BACKUP', 'FETCHED'] }[String(req.query.kind || '')] || ['NEW', 'BACKUP', 'FETCHED'];
-  const where = `f.machine_id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL AND f.kind = ANY($3)`;
   const values = [machine.id, machine.company_id, kinds];
+  const table = tableQuery(req.query, FILE_TABLE, values);
+  const where = [`f.machine_id = $1 AND f.company_id = $2 AND f.deleted_at IS NULL AND f.kind = ANY($3)`, ...table.where].join(' AND ');
+  const n = values.length;
   const [data, count] = await Promise.all([
     pool.query(
       `SELECT ${FILE_COLUMNS}, u.username AS uploaded_by_name, line.position AS queue_position
@@ -304,11 +316,11 @@ exports.listFiles = async (req) => {
                       FROM program_files f
                      WHERE f.machine_id = $1 AND ${WAITING}) line ON line.id = f.id
         WHERE ${where}
-        ORDER BY f.created_at DESC, f.id DESC
-        LIMIT $4 OFFSET $5`,
+        ORDER BY ${table.orderBy ? `${table.orderBy}, ` : ''}f.created_at DESC, f.id DESC
+        LIMIT $${n + 1} OFFSET $${n + 2}`,
       [...values, limit, offset]
     ),
-    pool.query(`SELECT COUNT(*)::int AS total FROM program_files f WHERE ${where}`, values)
+    pool.query(`SELECT COUNT(*)::int AS total FROM program_files f LEFT JOIN users u ON u.id = f.uploaded_by WHERE ${where}`, values)
   ]);
   const total = count.rows[0].total;
   return {

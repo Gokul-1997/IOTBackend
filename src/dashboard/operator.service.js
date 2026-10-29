@@ -41,6 +41,7 @@ const { plantSql, entityPlantSql } = require('../lib/read-scope');
 const { parsePart } = require('./parts');
 const oeeSvc = require('./oee.dashboard.service');
 const cache = require('./cache');
+const { tableRows } = require('../lib/table-query');
 
 /** Score bands, lowest bound of each. Below `average` needs help. */
 const SCORE_BANDS = { excellent: 75, good: 60, average: 45 };
@@ -308,7 +309,11 @@ exports.getOperators = async (q = {}) => {
   }
 
   const all = [...byOperator.values()].map(e => derive(e.op, e.machines));
-  const sorted = want.table ? sortRows(showBand ? all.filter(r => r.band === showBand) : all, sort, dir) : [];
+  /* the table's header filters (lib/table-query.js, 29 Oct 2026): the shift and the band */
+  const headed = want.table
+    ? tableRows(showBand ? all.filter(r => r.band === showBand) : all, q, { filter: { shift_name: r => r.shift_name, band: r => r.band } }).rows
+    : [];
+  const sorted = want.table ? sortRows(headed, sort, dir) : [];
 
   // Fleet figures over the machines these operators hold, each counted once.
   const held = [...new Set(links.map(l => l.machine_id))].map(id => machinesById.get(id)).filter(Boolean);

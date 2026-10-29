@@ -24,6 +24,22 @@
 const pool = require('../db');
 const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
+
+/* The Events table's header (lib/table-query.js, 29 Oct 2026): sort any
+   column; filter shift, reason, category, operator, open or closed. */
+const HEAD = {
+  sort: {
+    started: 'e.started_at', ended: 'e.ended_at', duration: 'EXTRACT(EPOCH FROM (COALESCE(e.ended_at, NOW()) - e.started_at))',
+    machine: dir => machineOrder('m.machine_serial_no', dir), shift: 's.shift_name', reason: 'r.name', category: 'r.category',
+    operator: 'o.operator_name', status: '(e.ended_at IS NULL)'
+  },
+  filter: {
+    shift: `COALESCE(s.shift_name, 'Unassigned')`, reason: `COALESCE(r.name, 'Unspecified')`, category: `COALESCE(r.category, 'UNKNOWN')`,
+    operator: 'o.operator_name', status: `CASE WHEN e.ended_at IS NULL THEN 'open' ELSE 'closed' END`
+  }
+};
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -288,10 +304,14 @@ async function hourlyTrend(filter) {
  * Ordered by (started_at, id) — several machines can stop in the same
  * second, and pagination without a total order repeats rows.
  */
-async function list(filter, { page = 1, limit = 20 }) {
+async function list(base, q = {}) {
+  const { page = 1, limit = 20 } = q;
   const pageNum  = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(200, Math.max(1, Number(limit) || 20));
   const offset   = (pageNum - 1) * limitNum;
+  const params = [...base.params];
+  const head = tableQuery(q, HEAD, params);
+  const filter = { sql: `${base.sql}${head.where.map(w => ` AND ${w}`).join('')}`, params };
 
   const limitIdx  = filter.params.length + 1;
   const offsetIdx = filter.params.length + 2;
@@ -313,7 +333,7 @@ async function list(filter, { page = 1, limit = 20 }) {
          LEFT JOIN shifts s           ON s.id = e.shift_id
          LEFT JOIN operators o        ON o.id = e.operator_id
          ${filter.sql}
-        ORDER BY e.started_at DESC, e.id DESC
+        ORDER BY ${head.orderBy ? `${head.orderBy}, ` : ''}e.started_at DESC, e.id DESC
         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       [...filter.params, limitNum, offset]
     ),
@@ -322,6 +342,8 @@ async function list(filter, { page = 1, limit = 20 }) {
          FROM downtime_events e
          LEFT JOIN downtime_reasons r ON r.id = e.downtime_reason_id
          LEFT JOIN machines m         ON m.id = e.machine_id
+         LEFT JOIN shifts s           ON s.id = e.shift_id
+         LEFT JOIN operators o        ON o.id = e.operator_id
          ${filter.sql}`,
       filter.params
     )
@@ -428,7 +450,7 @@ exports.getExportRows = async (q = {}) => {
     category: q.category, search: (q.search || '').trim(), start, end
   });
 
-  const rows = await list(filter, { page: 1, limit: 200 });
+  const rows = await list(filter, { ...q, page: 1, limit: 200 });
   const hhmm = s => {
     const n = Number(s) || 0;
     return `${Math.floor(n / 3600)}h ${String(Math.floor((n % 3600) / 60)).padStart(2, '0')}m`;

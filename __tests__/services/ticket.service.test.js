@@ -276,6 +276,17 @@ describe('ticket.service.getTickets', () => {
     expect(result.pagination).toEqual({ page: 1, limit: 20, total: 2, totalPages: 1 });
   });
 
+  test('the header: priority sorts in its working order; filters and the title search are bound', async () => {
+    mockDb.queueResponse({ rows: [{ count: '0' }] }, { rows: [] });
+    await svc.getTickets({ company_id, sort: 'priority', dir: 'desc', f_status: 'OPEN,ASSIGNED', f_assigned: '__blank__', q_title: '41' });
+    const [countCall, dataCall] = mockDb.calls();
+    expect(dataCall.text).toMatch(/ORDER BY CASE t\.priority WHEN 'CRITICAL' THEN 4 .* END DESC NULLS LAST, t\.created_at DESC, t\.id DESC/s);
+    expect(countCall.text).toMatch(/JOIN machines m ON m\.id = t\.machine_id LEFT JOIN users u ON u\.id = t\.assigned_to/);
+    expect(countCall.text).toMatch(/\(t\.status\)::text = ANY\(\$2::text\[\]\)/);
+    expect(countCall.text).toMatch(/NULLIF\(btrim\(\(u\.username\)::text\), ''\) IS NULL/);
+    expect(countCall.params).toEqual([company_id, ['OPEN', 'ASSIGNED'], '%41%']);
+  });
+
   test('open=true: every ticket not yet resolved or closed, counted and paged by the database', async () => {
     mockDb.queueResponse({ rows: [{ count: '0' }] }, { rows: [] });
     await svc.getTickets({ company_id, open: 'true', limit: 100 });

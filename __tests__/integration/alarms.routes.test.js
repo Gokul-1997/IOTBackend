@@ -157,6 +157,26 @@ describe('the list', () => {
     expect(summary.params).toEqual(count.params);
   });
 
+  test('the header: sort any column (machines in natural order), filter severity and status, search the text', async () => {
+    const { count, page } = await run({ sort: 'machine', dir: 'desc', f_severity: 'CRITICAL', f_status: 'on,cleared', q_alarm: 'atc' });
+    expect(page.text).toMatch(/ORDER BY CASE WHEN upper\(btrim\(coalesce\(m\.machine_serial_no/);
+    expect(page.text).toMatch(/a\.started_at DESC, a\.id DESC\s+LIMIT/);
+    expect(count.text).toMatch(/CASE WHEN a\.is_resolved THEN 'resolved' WHEN a\.ended_at IS NULL THEN 'on' ELSE 'cleared' END\)::text = ANY\(\$2::text\[\]\)/);
+    expect(count.text).toMatch(/ILIKE \$3/);
+    expect(count.text).toMatch(/CASE WHEN UPPER\(a\.severity\) = 'CRITICAL' THEN 'CRITICAL' ELSE 'NORMAL' END\)::text = ANY\(\$4::text\[\]\)/);
+    expect(count.params.slice(1)).toEqual([['on', 'cleared'], '%atc%', ['CRITICAL']]);
+    // the switch's counts: the header's filters, but not severity — and no parameter it does not use
+    const summary = mockDb.calls().find(c => /AS still_on/.test(c.text));
+    expect(summary.text).toMatch(/ILIKE \$3/);
+    expect(summary.text.split('FROM machine_alarms a')[1]).not.toMatch(/ELSE 'NORMAL' END\)::text = ANY/);
+    expect(summary.params).toEqual(count.params.slice(0, 3));
+  });
+
+  test('a sort that is not a column is ignored: the usual order', async () => {
+    const { page } = await run({ sort: 'password', dir: 'asc' });
+    expect(page.text).toMatch(/ORDER BY \(a\.ended_at IS NULL\) DESC, a\.started_at DESC, a\.id DESC/);
+  });
+
   test('an old database answer without a summary row gives zeros, not an error', async () => {
     const { res } = await run({});
     expect(res.body.summary).toEqual({ total: 0, critical: 0, still_on: 0, machines: 0 });

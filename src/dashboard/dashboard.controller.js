@@ -419,7 +419,8 @@ exports.periodic = async (req, res) => {
       due:        req.query.due,
       page:       req.query.page,
       limit:      req.query.limit,
-      part:       req.query.part
+      part:       req.query.part,
+      head:       req.query          // the table's sort and filters (lib/table-query.js)
     }), { live: true });
   } catch (err) {
     console.error('Periodic dashboard error:', err);
@@ -488,7 +489,8 @@ exports.exportPeriodic = async (req, res) => {
       search:     req.query.search,
       status:     req.query.status,
       // the export must honour the same filter the screen is showing
-      due:        req.query.due
+      due:        req.query.due,
+      head:       req.query
     });
 
     if (!rows.length) {

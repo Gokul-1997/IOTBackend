@@ -2,6 +2,8 @@ const db = require('../db');
 const { sendBulkEmails } = require('../utils/nodemailer');
 const { announceUnread } = require('../notifications/notification.service');
 const readScope = require('../lib/read-scope');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
 
 exports.createAlarm = async ({ company_id, machine_id, alarm_type, severity, message }) => {
   // Check if there's already an open alarm for this machine+type
@@ -159,7 +161,26 @@ exports.resolveAlarm = async ({ alarm_id, resolved_by, resolution_note, company_
  * after a reload instead of offering a second one. `summary` counts the same alarms without the severity filter
  * (total, critical, still on the machine, machines), for the page's
  * All | Critical | Non-critical switch (29 Oct 2026).
+ *
+ * The table's header (lib/table-query.js): sort by any column; filter
+ * severity (f_severity=CRITICAL,NORMAL — the switch is a shortcut for it),
+ * status (on = still on the machine, cleared, resolved) and code; search the
+ * alarm text and the machine.
  */
+const SEVERITY_SQL = `CASE WHEN UPPER(a.severity) = 'CRITICAL' THEN 'CRITICAL' ELSE 'NORMAL' END`;
+const STATE_SQL = `CASE WHEN a.is_resolved THEN 'resolved' WHEN a.ended_at IS NULL THEN 'on' ELSE 'cleared' END`;
+const ALARM_TABLE = {
+  sort: {
+    machine: dir => machineOrder('m.machine_serial_no', dir),
+    alarm: `COALESCE(NULLIF(btrim(a.message), ''), a.alarm_type)`,
+    code: 'a.alarm_code',
+    severity: dir => `(${SEVERITY_SQL}) ${dir}`,
+    started: 'a.started_at',
+    status: dir => `(CASE WHEN a.is_resolved THEN 2 WHEN a.ended_at IS NULL THEN 0 ELSE 1 END) ${dir}`
+  },
+  filter: { status: STATE_SQL, code: 'a.alarm_code' },
+  search: { alarm: `COALESCE(a.message, '') || ' ' || COALESCE(a.alarm_type, '')`, machine: 'm.machine_serial_no', code: 'a.alarm_code' }
+};
 const badRequest = message => ({ status: 400, message });
 const positiveInt = (v, label) => {
   if (v === undefined || v === null || v === '') return null;
@@ -174,7 +195,8 @@ const flag = (v, label) => {
   throw badRequest(`${label} must be true or false`);
 };
 
-exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, active, severity, page = 1, limit = 20 }) => {
+exports.getAlarms = async (q) => {
+  const { company_id, is_snt_super, machine_id, is_resolved, active, severity, page = 1, limit = 20 } = q;
   const machineId = positiveInt(machine_id, 'machine_id');
   const resolved = flag(is_resolved, 'is_resolved');
   const isActive = flag(active, 'active');
@@ -191,40 +213,45 @@ exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, 
   if (machineId)     { conditions.push(`a.machine_id = $${i++}`); params.push(machineId); }
   if (resolved !== null) { conditions.push(`a.is_resolved = $${i++}`); params.push(resolved); }
   if (isActive !== null) conditions.push(isActive ? 'a.ended_at IS NULL' : 'a.ended_at IS NOT NULL');
+  const table = tableQuery(q, ALARM_TABLE, params);
+  conditions.push(...table.where);
+  // the summary counts these: everything but severity, whose parameter comes last
   const base = [...conditions];
+  const baseParams = [...params];
+  conditions.push(...tableQuery(q, { filter: { severity: SEVERITY_SQL } }, params).where);
   if (sev === 'CRITICAL') conditions.push(`UPPER(a.severity) = 'CRITICAL'`);
   if (sev === 'NORMAL')   conditions.push(`UPPER(a.severity) <> 'CRITICAL'`);
+  i = params.length + 1;
 
   const whereOf = list => (list.length ? `WHERE ${list.join(' AND ')}` : 'WHERE TRUE') + readScope.plantSql('a.machine_id');
   const where = whereOf(conditions);
   const offset = (pageNum - 1) * limitNum;
+  const FROM = 'FROM machine_alarms a JOIN machines m ON m.id = a.machine_id';
 
-  const countRes = await db.query(`SELECT COUNT(*) FROM machine_alarms a ${where}`, params);
+  const countRes = await db.query(`SELECT COUNT(*) ${FROM} ${where}`, params);
   const total = parseInt(countRes.rows[0].count);
 
   const [dataRes, sumRes] = await Promise.all([
     db.query(
       `SELECT a.*, m.machine_serial_no, u.username as resolved_by_name,
               tk.id AS ticket_id, tk.status AS ticket_status
-       FROM machine_alarms a
-       JOIN machines m ON m.id = a.machine_id
+       ${FROM}
        LEFT JOIN users u ON u.id = a.resolved_by
        LEFT JOIN LATERAL (SELECT t.id, t.status FROM maintenance_tickets t
                            WHERE t.alarm_id = a.id AND t.company_id = a.company_id
                            ORDER BY t.id DESC LIMIT 1) tk ON TRUE
        ${where}
-       ORDER BY (a.ended_at IS NULL) DESC, a.started_at DESC, a.id DESC
+       ORDER BY ${table.orderBy ? `${table.orderBy}, a.started_at DESC` : '(a.ended_at IS NULL) DESC, a.started_at DESC'}, a.id DESC
        LIMIT $${i++} OFFSET $${i++}`,
       [...params, limitNum, offset]
     ),
-    // the severity filter adds no parameter, so the same ones bind here
     db.query(
       `SELECT COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE UPPER(a.severity) = 'CRITICAL')::int AS critical,
               COUNT(*) FILTER (WHERE a.ended_at IS NULL)::int AS still_on,
               COUNT(DISTINCT a.machine_id)::int AS machines
-       FROM machine_alarms a ${whereOf(base)}`,
-      params
+       ${FROM} ${whereOf(base)}`,
+      baseParams
     )
   ]);
   const sum = sumRes.rows[0] || {};

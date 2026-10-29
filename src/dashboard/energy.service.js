@@ -37,6 +37,18 @@ const { plantSql, nullablePlantSql, current } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 const cache = require('./cache');
 const { machineOrder } = require('../lib/machine-order');
+const { tableRows } = require('../lib/table-query');
+
+/* The Machine Detail table's header (lib/table-query.js, 29 Oct 2026): sort
+   any column, filter overload; built here, so read from each row. */
+const HEAD = {
+  sort: {
+    machine: r => r.machine_serial_no, model: r => r.model, energy: r => r.kwh, run: r => r.run_seconds, produced: r => r.produced,
+    kwh_per_part: r => r.kwh_per_part, cost: r => r.cost, peak: r => r.peak_kw, status: r => (r.is_overloaded ? 1 : 0)
+  },
+  filter: { model: r => r.model, status: r => (r.is_overloaded ? 'overload' : 'normal') },
+  search: { machine: r => r.machine_serial_no }
+};
 
 function httpError(message, status) {
   const e = new Error(message);
@@ -492,7 +504,8 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
 
   const offset   = (pageNum - 1) * limitNum;
   const listed = show === 'overload' ? machines.filter(m => m.is_overloaded) : machines;
-  const sorted = want.table ? [...listed].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1)) : [];
+  const head = want.table ? tableRows(listed, q, HEAD) : null;
+  const sorted = !want.table ? [] : head.sort ? head.rows : [...head.rows].sort((a, b) => (b.kwh ?? -1) - (a.kwh ?? -1));
 
   /* Volts and amps averaged over the readings, each machine weighted by how
      many readings it sent; null when no machine sends them. */

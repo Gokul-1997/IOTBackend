@@ -1,5 +1,6 @@
 const db = require('../db');
 const { pagination } = require('../lib/pagination');
+const { tableQuery } = require('../lib/table-query');
 const { machineOrder } = require('../lib/machine-order');
 
 function id(value, label) {
@@ -166,7 +167,16 @@ exports.getCurrentJobs = async (company_id, { page, limit, plant_id = null } = {
  *
  * History is always bounded; clients send page/limit to navigate older work.
  */
-exports.getJobHistory = async (company_id, { page, limit, plant_id = null } = {}) => {
+/* The Job History table's header (lib/table-query.js, 29 Oct 2026): sort any
+   column; filter the machine and the state; search the part. */
+const JOB_TABLE = {
+  sort: { machine: dir => machineOrder('m.machine_serial_no', dir), part: 'j.part_name', target: 'j.target_qty',
+          started_at: 'j.started_at', ended_at: 'j.ended_at', status: 'j.is_active' },
+  filter: { machine: 'm.machine_serial_no', status: 'j.is_active' },
+  search: { part: 'j.part_name', machine: 'm.machine_serial_no' }
+};
+
+exports.getJobHistory = async (company_id, { page, limit, plant_id = null, query = {} } = {}) => {
 
   const paginated = true;
 
@@ -175,8 +185,9 @@ exports.getJobHistory = async (company_id, { page, limit, plant_id = null } = {}
   const { limitNum: lim, pageNum: pg, offset } = pagination(page, limit, 200);
   const scoped = plant_id != null;
   const scopeParams = scoped ? [company_id, plant_id] : [company_id];
+  const table = tableQuery(query, JOB_TABLE, scopeParams);
 
-  const where  = `WHERE m.company_id = $1 AND j.company_id = $1 ${scoped ? 'AND m.plant_id = $2' : ''}`;
+  const where  = `WHERE m.company_id = $1 AND j.company_id = $1 ${scoped ? 'AND m.plant_id = $2' : ''}${table.where.map(w => ` AND ${w}`).join('')}`;
   const select = `
     SELECT
       j.id AS job_id,
@@ -190,7 +201,7 @@ exports.getJobHistory = async (company_id, { page, limit, plant_id = null } = {}
     FROM machine_current_job j
     JOIN machines m ON m.id = j.machine_id
     ${where}
-    ORDER BY j.started_at DESC, j.id DESC`;
+    ORDER BY ${table.orderBy ? `${table.orderBy}, ` : ''}j.started_at DESC, j.id DESC`;
 
   const countSql = `
     SELECT COUNT(*)::int AS total

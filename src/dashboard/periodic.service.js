@@ -17,6 +17,19 @@ const pool = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { idOrNull } = require('../lib/plant-scope');
 const { parsePart, when } = require('./parts');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
+
+/* The Tickets table's header (lib/table-query.js, 29 Oct 2026). */
+const HEAD = {
+  sort: {
+    ticket: 't.id', assignee: 'u.username', machine: dir => machineOrder('m.machine_serial_no', dir), title: 't.title',
+    priority: `CASE t.priority WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 END`, frequency: 's.frequency', due: 't.due_date', status: `CASE t.status WHEN 'OPEN' THEN 1 WHEN 'ASSIGNED' THEN 2 WHEN 'IN_PROGRESS' THEN 3 WHEN 'RESOLVED' THEN 4 WHEN 'CLOSED' THEN 5 END`,
+    completed: 'COALESCE(t.resolved_at, t.closed_at)'
+  },
+  filter: { assignee: 'u.username', machine: 'm.machine_serial_no', priority: 't.priority', frequency: 's.frequency', status: 't.status' },
+  search: { title: 't.title' }
+};
 
 /* Statuses that mean the work has not been done yet. */
 const LIVE_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS'];
@@ -246,7 +259,7 @@ async function upcoming(companyId, machineId, limit = 50) {   // enough for the 
  * raises many occurrences at the same instant — and pagination without a
  * total order repeats rows across page boundaries.
  */
-async function tickets(companyId, machineId, { search = '', status = '', due = '', page = 1, limit = 10 }) {
+async function tickets(companyId, machineId, { search = '', status = '', due = '', page = 1, limit = 10, head: q = {} }) {
   const pageNum  = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(100, Math.max(1, Number(limit) || 10));
   const offset   = (pageNum - 1) * limitNum;
@@ -298,6 +311,9 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
               = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`;
   }
 
+  const head = tableQuery(q, HEAD, values);
+  for (const w of head.where) where += ` AND ${w}`;
+
   const liveIdx   = values.length + 1;
   const limitIdx  = values.length + 2;
   const offsetIdx = values.length + 3;
@@ -315,7 +331,7 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
       JOIN machines m ON m.id = t.machine_id
       LEFT JOIN users u ON u.id = t.assigned_to
       ${where}
-     ORDER BY t.due_date DESC, t.id DESC
+     ORDER BY ${head.orderBy ? `${head.orderBy}, ` : ''}t.due_date DESC, t.id DESC
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
 
   const countQuery = `
@@ -323,6 +339,7 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
       FROM maintenance_tickets t
       JOIN maintenance_schedules s ON s.id = t.schedule_id
       JOIN machines m ON m.id = t.machine_id
+      LEFT JOIN users u ON u.id = t.assigned_to
       ${where}`;
 
   const [dataRes, countRes] = await Promise.all([
@@ -348,7 +365,7 @@ async function tickets(companyId, machineId, { search = '', status = '', due = '
  * tickets. The workload also gives the Overdue tile its "across N
  * technicians", so it comes with kpis or charts.
  */
-exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page, limit, part }) => {
+exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page, limit, part, head }) => {
   const want = parsePart(part);
   const machineId = parseMachineId(machine_id);
 
@@ -358,7 +375,7 @@ exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page
     when(want.table, () => byFrequency(company_id, machineId)),
     when(want.kpis || want.charts, () => technicianWorkload(company_id, machineId)),
     when(want.table, () => upcoming(company_id, machineId)),
-    when(want.table, () => tickets(company_id, machineId, { search, status, due, page, limit }))
+    when(want.table, () => tickets(company_id, machineId, { search, status, due, page, limit, head }))
   ]);
 
   return {
@@ -376,11 +393,11 @@ exports.getPeriodic = async ({ company_id, machine_id, search, status, due, page
 };
 
 /** Flat rows for Excel / CSV export. */
-exports.getExportRows = async ({ company_id, machine_id, search, status, due }) => {
+exports.getExportRows = async ({ company_id, machine_id, search, status, due, head }) => {
   const machineId = parseMachineId(machine_id);
   // Bounded: an unbounded export on a plant with years of history is a
   // request that never returns and a spreadsheet nobody can open.
-  const list = await tickets(company_id, machineId, { search, status, due, page: 1, limit: 100 });
+  const list = await tickets(company_id, machineId, { search, status, due, page: 1, limit: 100, head });
 
   return list.data.map(r => ({
     'Ticket':       r.id,

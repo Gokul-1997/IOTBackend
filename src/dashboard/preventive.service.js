@@ -10,6 +10,17 @@
  */
 const db = require('../db');
 const { plantSql, nullablePlantSql, current } = require('../lib/read-scope');
+const { tableQuery } = require('../lib/table-query');
+
+/* The PM Tickets table's header (lib/table-query.js, 29 Oct 2026). */
+const HEAD = {
+  sort: {
+    ticket: 't.id', machine: dir => machineOrder('m.machine_serial_no', dir), alarm: 'al.alarm_type',
+    priority: `CASE t.priority WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 END`, triggered: 't.created_at', due: 't.due_date', status: `CASE t.status WHEN 'OPEN' THEN 1 WHEN 'ASSIGNED' THEN 2 WHEN 'IN_PROGRESS' THEN 3 WHEN 'RESOLVED' THEN 4 WHEN 'CLOSED' THEN 5 END`,
+    age: 'EXTRACT(EPOCH FROM (NOW() - t.created_at))'
+  },
+  filter: { machine: 'm.machine_serial_no', alarm: 'al.alarm_type', priority: 't.priority', status: 't.status' }
+};
 const { parsePart, when } = require('./parts');
 const { severityClass } = require('./severity');
 const { parseRange, parseMachineId, httpError } = require('./window');
@@ -107,6 +118,8 @@ exports.getPreventiveDashboard = async (req) => {
     listWhere += ` AND t.created_at >= $${listParams.length - 1} AND t.created_at <= $${listParams.length}
                    AND ${PM_SHOW[show]}`;
   }
+  const head = tableQuery(req.query, HEAD, listParams);
+  for (const w of head.where) listWhere += ` AND ${w}`;
 
   const [
     alarmKpiRes, ticketKpiRes, resolutionRes, trendRes,
@@ -238,7 +251,7 @@ exports.getPreventiveDashboard = async (req) => {
       LEFT JOIN alarm_thresholds th ON th.id = t.threshold_id
       LEFT JOIN users u             ON u.id  = t.assigned_to
       WHERE ${listWhere}
-      ORDER BY (t.due_date IS NULL), t.due_date ASC, t.created_at DESC
+      ORDER BY ${head.orderBy ? `${head.orderBy}, ` : '(t.due_date IS NULL), t.due_date ASC, '}t.created_at DESC, t.id DESC
       LIMIT $${listParams.length + 2} OFFSET $${listParams.length + 3}`,
       [...listParams, ['RESOLVED', 'CLOSED'], limit, offset]
     )),

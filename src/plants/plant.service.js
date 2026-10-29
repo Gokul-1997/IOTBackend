@@ -1,24 +1,31 @@
 const db = require('../db');
 const { pagination } = require('../lib/pagination');
+const { tableQuery } = require('../lib/table-query');
 
-exports.getPlants = async (companyId, { search = '', page = 1, limit = 10 }) => {
+/* The Plants table's header (lib/table-query.js, 29 Oct 2026): sort any
+   column; filter the status; search code, name and location. */
+const PLANT_TABLE = {
+  sort: { code: 'plant_code', name: 'plant_name', location: 'location', status: 'is_active' },
+  filter: { status: 'is_active' },
+  search: { code: 'plant_code', name: 'plant_name', location: 'location' }
+};
+
+exports.getPlants = async (companyId, query = {}) => {
+  const { search = '', page = 1, limit = 10 } = query;
   const { limitNum, offset } = pagination(page, limit);
+  const params = [companyId, `%${search}%`];
+  const table = tableQuery(query, PLANT_TABLE, params);
+  const where = `WHERE company_id = $1 AND (plant_name ILIKE $2 OR plant_code ILIKE $2)${table.where.map(w => ` AND ${w}`).join('')}`;
 
   const data = await db.query(
     `SELECT * FROM plants
-     WHERE company_id = $1
-       AND (plant_name ILIKE $2 OR plant_code ILIKE $2)
-     ORDER BY id DESC
-     LIMIT $3 OFFSET $4`,
-    [companyId, `%${search}%`, limitNum, offset]
+     ${where}
+     ORDER BY ${table.orderBy ? `${table.orderBy}, id DESC` : 'id DESC'}
+     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, limitNum, offset]
   );
 
-  const total = await db.query(
-    `SELECT COUNT(*) FROM plants
-     WHERE company_id = $1
-       AND (plant_name ILIKE $2 OR plant_code ILIKE $2)`,
-    [companyId, `%${search}%`]
-  );
+  const total = await db.query(`SELECT COUNT(*) FROM plants ${where}`, params);
 
   return {
     data: data.rows,

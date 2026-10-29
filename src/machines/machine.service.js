@@ -7,6 +7,26 @@ const { idOrNull, resolvePlantId } = require('../lib/plant-scope');
 const placements = require('../lib/machine-placement');
 const { validateImageReference } = require('../files/media.service');
 const { machineOrder } = require('../lib/machine-order');
+const { tableQuery } = require('../lib/table-query');
+
+/* The Machines table's header (lib/table-query.js, 29 Oct 2026): sort any
+   column (?sort=&dir=; the older ?sortBy=&sortDir= still works); filter
+   model, controller, status and the twin options; search the machine. No
+   Line filter: machines are picked by name (the user, 21 Oct 2026). */
+const MACHINE_TABLE = {
+  sort: {
+    machine: dir => `${machineOrder('m.machine_serial_no', dir)}, m.id`, line: 'l.name', model: 'm.model', controller: 'm.controller',
+    ip: 'COALESCE(m.controller_ip, m.ip_address)', rpm: 'm.spindle_rpm', x: 'm.x_axis', y: 'm.y_axis', z: 'm.z_axis',
+    fourth: 'm.fourth_axis', fifth: 'm.fifth_axis', twin_spindle: 'm.twin_spindle', twin_table: 'm.twin_table',
+    atc: 'm.atc_tool_capacity', serial: 'm.mmc_no', status: 'm.is_active'
+  },
+  filter: { model: 'm.model', controller: 'm.controller', status: 'm.is_active', twin_spindle: 'm.twin_spindle', twin_table: 'm.twin_table' },
+  search: {
+    machine: 'm.machine_serial_no', serial: 'm.mmc_no', model: 'm.model',
+    controller: "COALESCE(m.controller, '') || ' ' || COALESCE(m.controller_type, '')",
+    ip: "COALESCE(m.controller_ip, '') || ' ' || COALESCE(m.ip_address, '')"
+  }
+};
 
 const EDITABLE = ['machine_serial_no', 'line_id', 'plant_id', 'x_axis', 'y_axis', 'z_axis',
   'fourth_axis', 'fifth_axis', 'twin_spindle', 'twin_table', 'atc_tool_capacity', 'model',
@@ -124,6 +144,8 @@ exports.getMachines = async (req) => {
   const values = [companyId];
   const plantId = req.user.plant_id || idOrNull(req.query.plant_id, 'Plant');
   if (plantId) { values.push(plantId); whereSQL += ` AND m.plant_id = $${values.length}`; }
+  const table = tableQuery(req.query, MACHINE_TABLE, values);
+  for (const w of table.where) whereSQL += ` AND ${w}`;
 
   if (search) {
     values.push(`%${search}%`);
@@ -169,7 +191,7 @@ exports.getMachines = async (req) => {
     FROM machines m
     LEFT JOIN line l ON l.id = m.line_id
     ${whereSQL}
-    ORDER BY ${orderSql}
+    ORDER BY ${table.orderBy ? `${table.orderBy}, m.id` : orderSql}
     LIMIT $${values.length + 1}
     OFFSET $${values.length + 2}
   `;

@@ -1,5 +1,6 @@
 const db = require('../db');
 const { ownedOrThrow } = require('../lib/tenant');
+const { tableQuery } = require('../lib/table-query');
 const { validateCreate } = require('../helpers/validators/operator.validator');
 
 exports.create = async (data, plant_id, company_id) => {
@@ -71,6 +72,14 @@ exports.list = async (plant_id, query, company_id) => {
 
   const values = [company_id];
   let where = `WHERE o.company_id = $1`;
+  /* The Operators table's header (lib/table-query.js, 29 Oct 2026): sort any
+     column; filter the shift and status; search the code and the name. */
+  const table = tableQuery(query, {
+    sort: { code: 'o.operator_code', name: 'o.operator_name', shift: 's.shift_name', machines: 'COUNT(om.machine_id)', status: 'o.is_active' },
+    filter: { shift: 's.shift_name', status: 'o.is_active' },
+    search: { code: 'o.operator_code', name: 'o.operator_name', shift: 's.shift_name' }
+  }, values);
+  for (const w of table.where) where += ` AND ${w}`;
 
   if (search) {
     values.push(`%${search}%`);
@@ -115,7 +124,7 @@ exports.list = async (plant_id, query, company_id) => {
 
     ${where}
     GROUP BY o.id, s.shift_name, s.start_time, s.end_time
-    ORDER BY ${sortBy} ${order}
+    ORDER BY ${table.orderBy ? `${table.orderBy}, o.id` : `${sortBy} ${order}`}
     LIMIT ${limit} OFFSET ${offset}
   `;
 

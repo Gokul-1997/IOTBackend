@@ -85,7 +85,8 @@ exports.getJobHistory = async (req, res, next) => {
     const result = await service.getJobHistory(companyId, {
       page:  req.query.page,
       limit: req.query.limit,
-      plant_id: req.user.plant_id
+      plant_id: req.user.plant_id,
+      query: req.query
     });
 
     res.json({

@@ -27,6 +27,19 @@
 const db = require('../db');
 const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
+
+/* The Tickets table's header (lib/table-query.js, 29 Oct 2026). */
+const HEAD = {
+  sort: {
+    ticket: 't.id', machine: dir => machineOrder('m.machine_serial_no', dir), title: 't.title', type: 't.issue_type::text',
+    priority: `CASE t.priority WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 END`, raised: 't.created_at', repair: 'EXTRACT(EPOCH FROM (t.resolved_at - t.created_at))',
+    downtime: 't.downtime_minutes', assigned: 'a.username', status: `CASE t.status WHEN 'OPEN' THEN 1 WHEN 'ASSIGNED' THEN 2 WHEN 'IN_PROGRESS' THEN 3 WHEN 'RESOLVED' THEN 4 WHEN 'CLOSED' THEN 5 END`
+  },
+  filter: { machine: 'm.machine_serial_no', type: 't.issue_type', priority: 't.priority', assigned: 'a.username', status: 't.status' },
+  search: { title: 't.title' }
+};
 
 const STATUSES   = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
 const ISSUES     = ['BREAKDOWN', 'ALARM', 'INSPECTION', 'OTHER'];
@@ -126,16 +139,21 @@ function narrow(f, show) {
    KPI and the per-machine table can never drift apart. */
 const REPAIR_HOURS = `EXTRACT(EPOCH FROM (t.resolved_at - t.created_at)) / 3600.0`;
 
-async function listTickets(f, { page, limit }) {
+async function listTickets(base, q = {}) {
+  const { page, limit } = q;
   const pageNum  = Math.max(1, parseInt(page, 10) || 1);
   const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 25));
   const offset   = (pageNum - 1) * limitNum;
+  const params = [...base.params];
+  const head = tableQuery(q, HEAD, params);
+  const f = { ...base, sql: `${base.sql}${head.where.map(w => ` AND ${w}`).join('')}`, params, next: params.length + 1 };
 
   const [countRes, rowsRes] = await Promise.all([
     db.query(
       `SELECT COUNT(*)::int AS n
          FROM maintenance_tickets t
          JOIN machines m ON m.id = t.machine_id
+         LEFT JOIN users a ON a.id = t.assigned_to
         WHERE ${f.sql}`, f.params),
     db.query(
       `SELECT t.id, t.title, t.issue_type, t.priority, t.status,
@@ -150,7 +168,7 @@ async function listTickets(f, { page, limit }) {
          LEFT JOIN users a ON a.id = t.assigned_to
          LEFT JOIN users c ON c.id = t.created_by
         WHERE ${f.sql}
-        ORDER BY t.created_at DESC
+        ORDER BY ${head.orderBy ? `${head.orderBy}, ` : ''}t.created_at DESC, t.id DESC
         LIMIT $${f.next} OFFSET $${f.next + 1}`,
       [...f.params, limitNum, offset])
   ]);
@@ -228,7 +246,7 @@ exports.getReport = async (q = {}) => {
         WHERE ${f.sql}
         GROUP BY 1 ORDER BY 1`, f.params)),
 
-    when(want.table, () => listTickets(tableFilter, { page: q.page, limit: q.limit }))
+    when(want.table, () => listTickets(tableFilter, q))
   ]);
 
   const kpis = want.kpis ? kpiRes.rows[0] : null;
@@ -269,7 +287,7 @@ exports.getReport = async (q = {}) => {
 exports.getExportRows = async (q = {}) => {
   // the file matches the table on screen, a tile's narrowing included
   const f = narrow(buildFilter(q), q.show);
-  const rows = await listTickets(f, { page: 1, limit: 200 });
+  const rows = await listTickets(f, { ...q, page: 1, limit: 200 });
   const stamp = d => (d ? new Date(d).toISOString().replace('T', ' ').slice(0, 19) : '');
 
   return rows.data.map(r => ({

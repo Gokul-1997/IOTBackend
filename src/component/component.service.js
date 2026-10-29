@@ -1,6 +1,8 @@
 const db = require('../db');
 const { pagination } = require('../lib/pagination');
 const { ownedOrThrow } = require('../lib/tenant');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
 
 async function lockMachine(client, machineId, companyId, plantId) {
   const { rows } = await client.query(
@@ -85,6 +87,16 @@ exports.list = async (plant_id, query, company_id) => {
     `;
   }
 
+  /* The Components table's header (lib/table-query.js, 29 Oct 2026): sort
+     any column; filter the machine; search part name, part number, operation. */
+  const table = tableQuery(query, {
+    sort: { machine: dir => `${machineOrder('m.machine_serial_no', dir)}, c.id`, part_name: 'c.part_name', part_number: 'c.part_number',
+            operation: 'c.operation_number', cycle_time: 'c.cycle_time', target: 'c.target', factor: 'c.multiplication_factor' },
+    filter: { machine: 'm.machine_serial_no' },
+    search: { part_name: 'c.part_name', part_number: 'c.part_number', operation: 'c.operation_number' }
+  }, values);
+  for (const w of table.where) where += ` AND ${w}`;
+
   const totalQuery = `
     SELECT COUNT(*) AS total
     FROM components c
@@ -97,7 +109,7 @@ exports.list = async (plant_id, query, company_id) => {
     FROM components c
     JOIN machines m ON m.id = c.machine_id
     ${where}
-    ORDER BY c.id DESC
+    ORDER BY ${table.orderBy ? `${table.orderBy}, c.id DESC` : 'c.id DESC'}
     LIMIT ${limit} OFFSET ${offset}
   `;
 

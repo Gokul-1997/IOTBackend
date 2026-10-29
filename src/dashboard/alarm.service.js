@@ -17,6 +17,7 @@ const pool = require('../db');
 const { plantSql } = require('../lib/read-scope');
 const { parsePart, when } = require('./parts');
 const { machineOrder } = require('../lib/machine-order');
+const { tableQuery } = require('../lib/table-query');
 
 /* The severities the screen groups by. Anything a controller sends that is
    not CRITICAL is reported as Normal rather than silently dropped — an
@@ -272,10 +273,32 @@ async function hourlyTrend(filter, day) {
 /* Columns the table can be sorted on. Anything else falls back to newest
    first; the value never reaches the SQL, only its mapped column does. */
 const SORT_COLUMNS = {
-  machine_serial_no: 'machine_serial_no', shift_name: 'shift_name', alarm_code: 'a.alarm_code',
+  machine_serial_no: dir => machineOrder('m.machine_serial_no', dir), shift_name: 'shift_name', alarm_code: 'a.alarm_code',
   message: 'a.message', severity: 'a.severity', status: 'is_open', duration_seconds: 'duration_seconds',
   started_at: 'a.started_at', ended_at: 'a.ended_at'
 };
+const sortSql = (sort, dir) => {
+  if (!sort || !Object.prototype.hasOwnProperty.call(SORT_COLUMNS, sort)) return '';
+  const c = SORT_COLUMNS[sort], d = dir === 'asc' ? 'ASC' : 'DESC';
+  return typeof c === 'function' ? `${c(d)}, ` : `${c} ${d} NULLS LAST, `;
+};
+
+/* The table's header filters (lib/table-query.js, 29 Oct 2026): severity,
+   open or closed, the shift; search the alarm, its code and the machine.
+   The table only — the tiles and charts keep the page's own filters. */
+const HEAD = {
+  filter: {
+    severity: `CASE WHEN UPPER(a.severity) = 'CRITICAL' THEN 'CRITICAL' ELSE 'NORMAL' END`,
+    status: `CASE WHEN a.ended_at IS NULL THEN 'open' ELSE 'closed' END`,
+    shift_name: `COALESCE(s.shift_name, 'Unassigned')`
+  },
+  search: { message: `COALESCE(a.message, '') || ' ' || COALESCE(a.alarm_type, '')`, alarm_code: 'a.alarm_code', machine_serial_no: 'm.machine_serial_no' }
+};
+function withHead(filter, q = {}) {
+  const params = [...filter.params];
+  const t = tableQuery(q, HEAD, params);
+  return t.where.length ? { ...filter, sql: `${filter.sql}${t.where.map(w => ` AND ${w}`).join('')}`, params } : filter;
+}
 
 async function list(filter, { page = 1, limit = 20, sort, dir }) {
   const pageNum  = Math.max(1, Number(page) || 1);
@@ -298,7 +321,7 @@ async function list(filter, { page = 1, limit = 20, sort, dir }) {
          LEFT JOIN machines m ON m.id = a.machine_id
          LEFT JOIN shifts   s ON s.id = a.shift_id
          ${filter.sql}
-        ORDER BY ${SORT_COLUMNS[sort] ? `${SORT_COLUMNS[sort]} ${dir === 'asc' ? 'ASC' : 'DESC'} NULLS LAST, ` : ''}a.started_at DESC, a.id DESC
+        ORDER BY ${sortSql(sort, dir)}a.started_at DESC, a.id DESC
         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       [...filter.params, limitNum, offset]
     ),
@@ -306,6 +329,7 @@ async function list(filter, { page = 1, limit = 20, sort, dir }) {
       `SELECT COUNT(*)::int AS total
          FROM machine_alarms a
          LEFT JOIN machines m ON m.id = a.machine_id
+         LEFT JOIN shifts   s ON s.id = a.shift_id
          ${filter.sql}`,
       filter.params
     )
@@ -358,7 +382,7 @@ exports.getAlarms = async (q = {}) => {
   });
 
   // checked before any query is sent: a bad value must cost nothing
-  const tableFilter = narrow(filter, q.show);
+  const tableFilter = withHead(narrow(filter, q.show), q);
 
   // one day selected: the trend goes hour by hour, as the design draws it
   const oneDay = q.from && q.to && q.from === q.to;
@@ -409,7 +433,7 @@ exports.getExportRows = async (q = {}) => {
   // Bounded: an unbounded export on a year of alarms is a request that
   // never returns and a spreadsheet nobody can open. Narrowed by the card
   // the user clicked, and sorted as the table is, so the file matches it.
-  const rows = await list(narrow(filter, q.show), { page: 1, limit: 200, sort: q.sort, dir: q.dir });
+  const rows = await list(withHead(narrow(filter, q.show), q), { page: 1, limit: 200, sort: q.sort, dir: q.dir });
 
   const hhmm = s => {
     const n = Number(s) || 0;

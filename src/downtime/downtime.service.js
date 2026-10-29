@@ -3,6 +3,8 @@ const { pagination } = require('../lib/pagination');
 const valid = require('../lib/work-validation');
 const { ownedOrThrow } = require('../lib/tenant');
 const { addMachinePlantScope } = require('../lib/plant-scope');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
 
 // One row per code per owner. The built-in codes (no company) are in the
 // table twice — migration 007 ran twice, and its unique index treats every
@@ -60,7 +62,17 @@ exports.logEvent = async ({ company_id, machine_id, shift_id, downtime_reason_id
   return res.rows[0];
 };
 
-exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 1, limit = 20, plant_id = null }) => {
+/* The Events table's header (lib/table-query.js, 29 Oct 2026): sort any
+   column; filter machine, reason, category and who entered it. */
+const EVENT_TABLE = {
+  sort: { machine: dir => machineOrder('m.machine_serial_no', dir), reason: 'dr.name', category: 'dr.category',
+          started: 'e.started_at', duration: 'e.duration_seconds', by: 'u.username' },
+  filter: { machine: 'm.machine_serial_no', reason: 'dr.name', category: 'dr.category', by: 'u.username' },
+  search: { machine: 'm.machine_serial_no', by: 'u.username' }
+};
+
+exports.getEvents = async (q) => {
+  const { company_id, machine_id, from_date, to_date, page = 1, limit = 20, plant_id = null } = q;
   const conditions = [`e.company_id = $1`];
   const params = [company_id];
   let i = 2;
@@ -69,13 +81,16 @@ exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 
   if (from_date)  { conditions.push(`e.started_at >= $${i++}`); params.push(from_date); }
   if (to_date)    { conditions.push(`e.started_at <= $${i++}`); params.push(to_date); }
   addMachinePlantScope(conditions, params, 'e', plant_id);
+  const table = tableQuery(q, EVENT_TABLE, params);
+  conditions.push(...table.where);
   i = params.length + 1;
 
   const where = `WHERE ${conditions.join(' AND ')}`;
   const { pageNum, limitNum, offset } = pagination(page, limit);
 
   const [countRes, dataRes] = await Promise.all([
-    db.query(`SELECT COUNT(*) FROM downtime_events e ${where}`, params),
+    db.query(`SELECT COUNT(*) FROM downtime_events e JOIN machines m ON m.id = e.machine_id
+               LEFT JOIN downtime_reasons dr ON dr.id = e.downtime_reason_id LEFT JOIN users u ON u.id = e.entered_by ${where}`, params),
     db.query(
       `SELECT e.*, m.machine_serial_no, dr.name as reason_name, dr.category,
               u.username as entered_by_name
@@ -84,7 +99,7 @@ exports.getEvents = async ({ company_id, machine_id, from_date, to_date, page = 
        LEFT JOIN downtime_reasons dr ON dr.id = e.downtime_reason_id
        LEFT JOIN users u ON u.id = e.entered_by
        ${where}
-       ORDER BY e.started_at DESC
+       ORDER BY ${table.orderBy ? `${table.orderBy}, ` : ''}e.started_at DESC, e.id DESC
        LIMIT $${i++} OFFSET $${i++}`,
       [...params, limitNum, offset]
     )

@@ -3,6 +3,8 @@ const { pagination } = require('../lib/pagination');
 const valid = require('../lib/work-validation');
 const { ownedOrThrow } = require('../lib/tenant');
 const { addMachinePlantScope } = require('../lib/plant-scope');
+const { tableQuery } = require('../lib/table-query');
+const { machineOrder } = require('../lib/machine-order');
 
 const VALID_STATUSES = ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
 const VALID_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -45,7 +47,23 @@ exports.toPriority = toPriority;
 /* open=true: every ticket not yet resolved or closed. The Maintenance page
    asked for the newest 20 of any status and hid the finished ones itself, so
    an open ticket older than the 20 newest never showed (29 Oct 2026). */
-exports.getTickets = async ({ company_id, machine_id, status, priority, assigned_to, open, page = 1, limit = 20, plant_id = null }) => {
+/* The Tickets table's header (lib/table-query.js): sort any column —
+   priority and status in their working order, not A–Z — filter machine,
+   issue, priority, assignee (__blank__: unassigned) and status, search the
+   title or the ticket number. */
+const PRIORITY_RANK = `CASE t.priority WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 END`;
+const STATUS_RANK = `CASE t.status WHEN 'OPEN' THEN 1 WHEN 'ASSIGNED' THEN 2 WHEN 'IN_PROGRESS' THEN 3 WHEN 'RESOLVED' THEN 4 WHEN 'CLOSED' THEN 5 END`;
+const TICKET_TABLE = {
+  sort: {
+    machine: dir => machineOrder('m.machine_serial_no', dir), title: 't.title', issue: 't.issue_type::text',
+    priority: PRIORITY_RANK, assigned: 'u.username', status: STATUS_RANK, created: 't.created_at'
+  },
+  filter: { machine: 'm.machine_serial_no', issue: 't.issue_type', priority: 't.priority', assigned: 'u.username', status: 't.status' },
+  search: { title: `'#' || t.id || ' ' || t.title` }
+};
+
+exports.getTickets = async (q) => {
+  const { company_id, machine_id, status, priority, assigned_to, open, page = 1, limit = 20, plant_id = null } = q;
   const conditions = [`t.company_id = $1`];
   const params = [company_id];
   let i = 2;
@@ -56,13 +74,16 @@ exports.getTickets = async ({ company_id, machine_id, status, priority, assigned
   if (priority)     { conditions.push(`t.priority = $${i++}`);     params.push(priority); }
   if (assigned_to)  { conditions.push(`t.assigned_to = $${i++}`);  params.push(assigned_to); }
   addMachinePlantScope(conditions, params, 't', plant_id);
+  const table = tableQuery(q, TICKET_TABLE, params);
+  conditions.push(...table.where);
   i = params.length + 1;
 
   const where = `WHERE ${conditions.join(' AND ')}`;
   const { pageNum, limitNum, offset } = pagination(page, limit);
 
   const [countRes, dataRes] = await Promise.all([
-    db.query(`SELECT COUNT(*) FROM maintenance_tickets t ${where}`, params),
+    db.query(`SELECT COUNT(*) FROM maintenance_tickets t
+               JOIN machines m ON m.id = t.machine_id LEFT JOIN users u ON u.id = t.assigned_to ${where}`, params),
     db.query(
       `SELECT t.*, m.machine_serial_no,
               u.username AS assigned_to_name,
@@ -74,7 +95,7 @@ exports.getTickets = async ({ company_id, machine_id, status, priority, assigned
        LEFT JOIN users c ON c.id = t.created_by
        LEFT JOIN machine_alarms a ON a.id = t.alarm_id
        ${where}
-       ORDER BY t.created_at DESC
+       ORDER BY ${table.orderBy ? `${table.orderBy}, ` : ''}t.created_at DESC, t.id DESC
        LIMIT $${i++} OFFSET $${i++}`,
       [...params, limitNum, offset]
     )
