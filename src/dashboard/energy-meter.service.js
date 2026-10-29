@@ -31,7 +31,8 @@ const RANGES = {
   '7d':  { seconds: 7 * 86400,  bucket: 3 * 3600 }
 };
 
-/* Rows are written every 15 s, so two minutes without one is not "now". */
+/* A channel not observed for two minutes is not a current measurement,
+   even when a different channel has just arrived in a sparse packet. */
 const STALE_MS = 120e3;
 /* How far back a meter and its latest reading are looked for: bounded so
    the hypertable prunes chunks. */
@@ -77,6 +78,62 @@ exports.RANGES = RANGES;
 exports.LIMITS = LIMITS;
 exports.READING_COLUMNS = READING_COLUMNS;
 
+/**
+ * A sparse packet updates only the channels it actually reports. Find each
+ * channel's last real observation in one bounded scan, then fetch those
+ * exact rows by (machine_id, read_at). This avoids sorting/expanding a month
+ * of full readings once for every channel. SQL identifiers and placeholders
+ * here are internal constants, never request input.
+ */
+function latestMeterFieldsSQL(columns, {
+  machine = '$1', company = '$4', from = '$2', to = '$3',
+  activeOnly = false, upperExclusive = false
+} = {}) {
+  const bound = `r.machine_id = ${machine} AND r.read_at >= ${from} AND r.read_at ${upperExclusive ? '<' : '<='} ${to}
+          AND r.read_at <= NOW() AND r.company_id = ${company}${plantSql('r.machine_id')}`;
+  const owned = activeOnly ? `JOIN machines m ON m.id = r.machine_id AND m.company_id = ${company} AND m.is_active` : '';
+  return `WITH latest_at AS MATERIALIZED (
+    SELECT ${columns.map(c => `MAX(r.read_at) FILTER (WHERE r.${c} IS NOT NULL AND ABS(r.${c}::float8) < 'Infinity'::float8) AS ${c}_at`).join(',\n           ')}
+      FROM energy_meter_readings r
+      ${owned}
+     WHERE ${bound}
+  )
+  SELECT MAX(r.read_at) AS read_at,
+         jsonb_object_agg(field.name, to_jsonb(r) -> field.name) AS field_values,
+         jsonb_object_agg(field.name, EXTRACT(EPOCH FROM r.read_at) * 1000) AS field_observed_at
+    FROM latest_at
+    CROSS JOIN LATERAL (VALUES ${columns.map(c => `('${c}', latest_at.${c}_at)`).join(',\n                              ')}) AS field(name, at)
+    JOIN energy_meter_readings r ON r.machine_id = ${machine} AND r.read_at = field.at
+    ${owned}
+   WHERE ${bound}
+   HAVING COUNT(*) > 0`;
+}
+
+function latestMeterSnapshot(row, columns, nowMs, staleMs = STALE_MS) {
+  if (!row) return null;
+  const values = row.field_values || row;
+  const observed = row.field_observed_at;
+  const latest = { at: null, stale: false };
+  const times = {};
+  const stale = {};
+  for (const column of columns) {
+    const value = num(values[column]);
+    latest[column] = value;
+    const candidate = observed ? num(observed[column]) : ms(row.read_at);
+    const at = value !== null && Number.isFinite(candidate) && candidate <= nowMs ? candidate : null;
+    times[column] = at;
+    stale[column] = value === null ? null : at === null || nowMs - at > staleMs;
+    if (at !== null) latest.at = latest.at === null ? at : Math.max(latest.at, at);
+    if (stale[column]) latest.stale = true;
+  }
+  latest.field_observed_at = times;
+  latest.field_stale = stale;
+  return latest;
+}
+
+exports.latestMeterFieldsSQL = latestMeterFieldsSQL;
+exports.latestMeterSnapshot = latestMeterSnapshot;
+
 /** Machines of this company that have sent meter readings in the last 30 days. */
 async function meters(companyId, nowMs) {
   const { rows } = await db.query(
@@ -98,9 +155,11 @@ async function meters(companyId, nowMs) {
 /** Does the meter look wired the wrong way round? Negative kW and power factor, and more Export than Import. */
 function checksFor(latest) {
   if (!latest) return { ct_reversed: false };
+  const current = key => latest.field_stale?.[key] !== true;
   const exportOutruns = latest.kwh_export != null && latest.kwh_import != null && latest.kwh_export > latest.kwh_import;
-  const negative = (latest.kw_total != null && latest.kw_total < 0) || (latest.pf_avg != null && latest.pf_avg < 0);
-  return { ct_reversed: exportOutruns && negative };
+  const negative = (current('kw_total') && latest.kw_total != null && latest.kw_total < 0)
+    || (current('pf_avg') && latest.pf_avg != null && latest.pf_avg < 0);
+  return { ct_reversed: current('kwh_export') && current('kwh_import') && exportOutruns && negative };
 }
 
 /**
@@ -151,10 +210,7 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
   const interval = `${r.bucket} seconds`;
   const [latestQ, pointsQ, energyQ, summaryQ] = await Promise.all([
     db.query(
-      `SELECT * FROM energy_meter_readings
-        WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3
-          AND company_id = $4${plantSql('machine_id')}
-        ORDER BY read_at DESC LIMIT 1`,
+      latestMeterFieldsSQL(READING_COLUMNS),
       [machine.id, new Date(nowMs - LOOKBACK_MS), to, companyId]),
     db.query(
       `SELECT (EXTRACT(EPOCH FROM date_bin($4::interval, read_at, TIMESTAMPTZ '2000-01-01 00:00:00+00')) * 1000)::bigint AS t,
@@ -245,12 +301,7 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
       [machine.id, from, to, companyId])
   ]);
 
-  let latest = null;
-  const l = latestQ.rows[0];
-  if (l) {
-    latest = { at: ms(l.read_at), stale: nowMs - ms(l.read_at) > STALE_MS };
-    for (const c of READING_COLUMNS) latest[c] = num(l[c]);
-  }
+  const latest = latestMeterSnapshot(latestQ.rows[0], READING_COLUMNS, nowMs);
 
   const kwhByT = new Map(energyQ.rows.map(e => [Number(e.t), num(e.kwh)]));
   const points = pointsQ.rows.map(p => ({
@@ -266,6 +317,9 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
 
   const s = summaryQ.rows[0] || {};
   const summary = {
+    // AVG above is the mean of reported samples, not a time-weighted
+    // reconstruction of values omitted from change-only packets.
+    average_basis: 'reported_samples',
     readings: s.readings || 0,
     first_at: ms(s.first_at), last_at: ms(s.last_at),
     kwh_used:   measuredSum(energyQ.rows, 'kwh'),

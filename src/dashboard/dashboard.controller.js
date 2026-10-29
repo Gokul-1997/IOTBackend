@@ -109,7 +109,9 @@ exports.machineSpindle = async (req, res) => {
    company that has a meter) and on the machine page (that machine). */
 async function sendMeter(res, args) {
   try {
-    const data = await meterSvc.meterReadings(args);
+    const data = await dashCache.remember('energy:meter', args.companyId,
+      { machineId: args.machineId, range: args.range }, dashCache.LIVE_TTL,
+      () => meterSvc.meterReadings(args));
     if (!data) return res.status(404).json({ status: 'error', message: 'Machine not found' });
     return res.json({ status: 'success', data });
   } catch (err) {

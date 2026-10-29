@@ -113,8 +113,9 @@ const MIN_WINDOW_SEC = 300;
  * Per-machine-per-day consumption from the cumulative counter.
  *
  * The window is bounded on received_at so the planner can prune the
- * telemetry hypertable's chunks; without that predicate this reads all 185
- * of them and gets slower every day.
+ * telemetry hypertable's chunks. The five-minute admission allowance keeps
+ * delayed packets near a range boundary, while observed_at determines the
+ * exact requested period and ordering across both message formats.
  */
 const DAILY_ENERGY_CTE = `
   readings AS (
@@ -123,17 +124,19 @@ const DAILY_ENERGY_CTE = `
      * counting the climb back from 0 would book the whole meter total as
      * one interval.
      */
-    SELECT t.machine_id, t.received_at, t.energy,
+    SELECT t.machine_id, t.observed_at, t.energy,
            LAG(t.energy)      OVER w AS prev_energy,
-           LAG(t.received_at) OVER w AS prev_at
-      FROM telemetry_raw t
+           LAG(t.observed_at) OVER w AS prev_at
+      FROM energy_observations t
       JOIN machines m ON m.id = t.machine_id AND m.company_id = $1 AND m.is_active = TRUE
      WHERE t.company_id = $1
-       AND t.received_at >= $2::timestamptz
-       AND t.received_at <= $3::timestamptz AND t.received_at <= NOW()
+       AND t.received_at >= $2::timestamptz - INTERVAL '5 minutes'
+       AND t.received_at <= $3::timestamptz + INTERVAL '5 minutes' AND t.received_at <= NOW()
+       AND t.observed_at >= $2::timestamptz
+       AND t.observed_at <= $3::timestamptz AND t.observed_at <= NOW()
        AND t.energy > 0 AND t.energy < 'Infinity'::float8
        %MACHINE%
-    WINDOW w AS (PARTITION BY t.machine_id ORDER BY t.received_at)
+    WINDOW w AS (PARTITION BY t.machine_id ORDER BY t.observed_at, t.received_at)
   ),
   deltas AS (
     /*
@@ -159,13 +162,13 @@ const DAILY_ENERGY_CTE = `
      * decimal arithmetic on every one of millions of readings.
      */
     SELECT machine_id, prev_energy IS NOT NULL AS has_previous,
-           (received_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
+           (observed_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
            CASE
              WHEN prev_energy IS NULL THEN NULL
              WHEN energy < prev_energy THEN NULL
              WHEN energy - prev_energy <= (${MAX_KW} * ${MIN_WINDOW_SEC} / 3600.0)::float8 THEN energy - prev_energy
              WHEN energy - prev_energy
-                  > ${MAX_KW} * GREATEST(EXTRACT(EPOCH FROM received_at - prev_at), ${MIN_WINDOW_SEC}) / 3600.0 THEN NULL
+                  > ${MAX_KW} * GREATEST(EXTRACT(EPOCH FROM observed_at - prev_at), ${MIN_WINDOW_SEC}) / 3600.0 THEN NULL
              ELSE energy - prev_energy
            END AS delta
       FROM readings
@@ -234,10 +237,12 @@ async function machineFigures({ companyId, machineId, search, start, end }) {
               AVG(t.current) FILTER (WHERE ABS(t.current) < 'Infinity'::float8) AS avg_current,
               COUNT(t.voltage) FILTER (WHERE ABS(t.voltage) < 'Infinity'::float8)::bigint AS voltage_readings,
               COUNT(t.current) FILTER (WHERE ABS(t.current) < 'Infinity'::float8)::bigint AS current_readings
-         FROM telemetry_raw t
+         FROM energy_observations t
          JOIN machines m ON m.id = t.machine_id AND m.company_id = $1 AND m.is_active = TRUE
         WHERE t.company_id = $1${plantSql('t.machine_id')}
-          AND t.received_at >= $2::timestamptz AND t.received_at <= $3::timestamptz AND t.received_at <= NOW()
+          AND t.received_at >= $2::timestamptz - INTERVAL '5 minutes'
+          AND t.received_at <= $3::timestamptz + INTERVAL '5 minutes' AND t.received_at <= NOW()
+          AND t.observed_at >= $2::timestamptz AND t.observed_at <= $3::timestamptz AND t.observed_at <= NOW()
           AND (t.power IS NOT NULL OR t.voltage IS NOT NULL OR t.current IS NOT NULL)
           ${mf}
         GROUP BY t.machine_id

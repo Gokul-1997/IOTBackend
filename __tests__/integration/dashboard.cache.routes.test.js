@@ -91,3 +91,14 @@ test('a refused request is not kept', async () => {
   const again = await request(a).get('/api/dashboard/alarms?part=graphs');
   expect(again.status).toBe(400);
 });
+
+test('meter readers share bounded sparse-channel work only within their company and filters', async () => {
+  const a=app();const url='/api/dashboard/energy/meter?range=24h';
+  const first=await request(a).get(url);expect(first.status).toBe(200);
+  const worked=mockDb.calls().length;expect(worked).toBeGreaterThan(0);
+  const second=await request(a).get(url);expect(second.body).toEqual(first.body);
+  expect(mockDb.calls()).toHaveLength(worked);
+  await request(a).get(url).set('x-company','5');expect(mockDb.calls().length).toBeGreaterThan(worked);
+  const foreign=mockDb.calls().length;
+  await request(a).get('/api/dashboard/energy/meter?range=4h');expect(mockDb.calls().length).toBeGreaterThan(foreign);
+});

@@ -109,7 +109,7 @@ describe('meterReadings — the window', () => {
     given({ machine: [{ id: 15, machine_serial_no: 'VMC - 1 - F' }] });
     const d = await svc.meterReadings({ companyId: 4, machineId: 15, range: '4h', nowMs: NOW });
     expect(d.range).toEqual({ key: '4h', from: NOW - 4 * 3600e3, to: NOW, bucket_seconds: 300 });
-    const latest = callMatching(/ORDER BY read_at DESC LIMIT 1/);
+    const latest = callMatching(/WITH latest_at AS MATERIALIZED/);
     expect(latest.params).toEqual([15, new Date(NOW - 30 * 86400e3), new Date(NOW), 4]);
     const points = callMatching(/AS kw_avg,\s+MIN\(kw_total\)/);
     expect(points.params).toEqual([15, new Date(NOW - 4 * 3600e3), new Date(NOW), '300 seconds', 4]);
@@ -186,7 +186,9 @@ describe('meterReadings — the latest reading', () => {
     given();
     const d = await svc.meterReadings({ companyId: 4, nowMs: NOW });
     expect(d.latest).toMatchObject({ at: NOW - 10e3, stale: false, v_ll_avg: 416.73, kw_total: -0.73, pf_avg: -0.836, kwh_total: 110.8, aux_interrupts: 5 });
-    expect(Object.keys(d.latest)).toEqual(['at', 'stale', ...svc.READING_COLUMNS]);
+    expect(Object.keys(d.latest)).toEqual(['at', 'stale', ...svc.READING_COLUMNS, 'field_observed_at', 'field_stale']);
+    expect(d.latest.field_observed_at.v_ll_avg).toBe(NOW - 10e3);
+    expect(d.latest.field_stale.v_ll_avg).toBe(false);
   });
 
   test('a reading over two minutes old is not "now"', async () => {
@@ -209,6 +211,47 @@ describe('meterReadings — the latest reading', () => {
     expect(d.points[0].kw_avg).toBeNull();
     expect(d.points[0].kwh).toBeNull();
     expect(d.summary.kwh_used).toBeNull();
+  });
+
+  test('a new energy-only packet retains each older channel with its actual observation time', async () => {
+    given({ latest: [{
+      read_at: new Date(NOW - 1000),
+      field_values: { kwh_total: 3104, v_ll_avg: 217.12, kw_total: -0.955, i_avg: 0 },
+      field_observed_at: { kwh_total: NOW - 1000, v_ll_avg: NOW - 300000, kw_total: NOW - 300000, i_avg: NOW - 10000 }
+    }] });
+    const { latest } = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    expect(latest).toMatchObject({ at: NOW - 1000, stale: true, kwh_total: 3104, v_ll_avg: 217.12, kw_total: -0.955, i_avg: 0 });
+    expect(latest.field_observed_at).toMatchObject({ kwh_total: NOW - 1000, v_ll_avg: NOW - 300000, frequency_hz: null });
+    expect(latest.field_stale).toMatchObject({ kwh_total: false, v_ll_avg: true, i_avg: false, frequency_hz: null });
+    expect(latest.frequency_hz).toBeNull();
+  });
+
+  test('latest-channel SQL scans only the owned bounded interval, ignores absent/nonfinite channels, then fetches exact rows', async () => {
+    given();
+    await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    const { text, params } = callMatching(/WITH latest_at AS MATERIALIZED/);
+    expect(text).toContain("MAX(r.read_at) FILTER (WHERE r.kw_total IS NOT NULL AND ABS(r.kw_total::float8) < 'Infinity'::float8) AS kw_total_at");
+    expect(text.match(/r\.machine_id = \$1 AND r\.read_at >= \$2 AND r\.read_at <= \$3/g)).toHaveLength(2);
+    expect(text.match(/r\.company_id = \$4/g)).toHaveLength(2);
+    expect(text).toContain('r.read_at = field.at');
+    expect(text).toContain('jsonb_object_agg(field.name, EXTRACT(EPOCH FROM r.read_at) * 1000) AS field_observed_at');
+    expect(params).toEqual([15, new Date(NOW - 30 * 86400e3), new Date(NOW), 4]);
+  });
+
+  test('stale negative power cannot turn fresh energy registers into a current wiring warning', async () => {
+    given({ latest: [{
+      read_at: new Date(NOW - 1000),
+      field_values: { kwh_import: 1102.4, kwh_export: 2000.3, kw_total: -0.955 },
+      field_observed_at: { kwh_import: NOW - 1000, kwh_export: NOW - 1000, kw_total: NOW - 300000 }
+    }] });
+    expect((await svc.meterReadings({ companyId: 4, nowMs: NOW })).checks.ct_reversed).toBe(false);
+  });
+
+  test('reported sample averages are identified without filling sparse chart observations', async () => {
+    given({ points: [{ t: NOW, samples: 1, kw_avg: null }], summary: { readings: 1 } });
+    const result = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+    expect(result.summary.average_basis).toBe('reported_samples');
+    expect(result.points[0].kw_avg).toBeNull();
   });
 });
 

@@ -76,7 +76,7 @@ describe('consumption comes from differences, not sums', () => {
 
     const sql = executable(allSql());
     expect(sql).toMatch(/LAG\(t\.energy\)\s+OVER w/);
-    expect(sql).toMatch(/WINDOW w AS \(PARTITION BY t\.machine_id ORDER BY t\.received_at\)/);
+    expect(sql).toMatch(/WINDOW w AS \(PARTITION BY t\.machine_id ORDER BY t\.observed_at, t\.received_at\)/);
     // MAX-MIN cannot see a reset inside the period
     expect(sql).not.toMatch(/MAX\(energy\)\s*-\s*MIN\(energy\)/);
   });
@@ -102,7 +102,7 @@ describe('consumption comes from differences, not sums', () => {
     await svc.getEnergy({ company_id });
     // over 2,000 kW since the last reading, measured over at least five minutes
     expect(executable(allSql())).toMatch(
-      /energy - prev_energy\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM received_at - prev_at\), 300\) \/ 3600\.0 THEN NULL/);
+      /energy - prev_energy\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM observed_at - prev_at\), 300\) \/ 3600\.0 THEN NULL/);
   });
 
   test('a rise below the smallest possible limit is kept without its own limit; the exact limit still decides every larger one', async () => {
@@ -127,11 +127,15 @@ describe('consumption comes from differences, not sums', () => {
   test('the telemetry read is bounded so the hypertable can be pruned', async () => {
     queueAll();
     await svc.getEnergy({ company_id });
-    const reads = mockDb.calls().map(c => c.text).filter(t => /FROM telemetry_raw/.test(t));
-    expect(reads.length).toBeGreaterThan(0);
+    const reads = mockDb.calls().map(c => c.text).filter(t => /FROM energy_observations/.test(t));
+    expect(reads).toHaveLength(2);
+    expect(allSql()).not.toMatch(/FROM telemetry_raw/);
     for (const sql of reads) {
-      expect(sql).toMatch(/t\.received_at >= \$2/);
-      expect(sql).toMatch(/t\.received_at <= \$3/);
+      expect(sql).toContain("t.received_at >= $2::timestamptz - INTERVAL '5 minutes'");
+      expect(sql).toContain("t.received_at <= $3::timestamptz + INTERVAL '5 minutes'");
+      expect(sql).toContain('t.observed_at >= $2::timestamptz');
+      expect(sql).toContain('t.observed_at <= $3::timestamptz');
+      expect(sql).toContain('t.observed_at <= NOW()');
     }
   });
 
@@ -142,6 +146,16 @@ describe('consumption comes from differences, not sums', () => {
     const passes = mockDb.calls().filter(c => /LAG\(t\.energy\)/.test(c.text));
     expect(passes).toHaveLength(1);
     expect(passes[0].text).toMatch(/GROUPING SETS \(\(machine_id\), \(day\), \(date_trunc\('month', day\)::date\), \(machine_id, day\)\)/);
+  });
+
+  test('delayed full packets use device observation time for sequence, day and power-rate validation', async () => {
+    queueAll();
+    await svc.getEnergy({ company_id });
+    const sql = executable(allSql());
+    expect(sql).toContain('LAG(t.observed_at) OVER w AS prev_at');
+    expect(sql).toContain("(observed_at AT TIME ZONE 'Asia/Kolkata')::date AS day");
+    expect(sql).not.toContain("(received_at AT TIME ZONE 'Asia/Kolkata')::date AS day");
+    expect(sql).not.toContain('EXTRACT(EPOCH FROM received_at - prev_at)');
   });
 
   test('the trend keeps missing days unknown and the months add up measured days', async () => {
@@ -480,7 +494,7 @@ describe('bounded, authorized Energy reads', () => {
       await svc.getEnergy({ company_id, machine_id: 1, search: 'VMC-01', from: '2026-10-01', to: '2026-10-07' });
       expect(remembered).toHaveBeenCalledWith('energy:figures', company_id,
         expect.objectContaining({ machineId: 1, search: 'vmc-01' }), expect.any(Number), expect.any(Function));
-      const sources = mockDb.calls().filter(c => /FROM (?:telemetry_raw|production_hourly)/.test(c.text));
+      const sources = mockDb.calls().filter(c => /FROM (?:energy_observations|production_hourly)/.test(c.text));
       expect(sources).toHaveLength(3);
       for (const call of sources) {
         expect(call.params.slice(-2)).toEqual([1, 'vmc-01']);
@@ -494,7 +508,7 @@ describe('bounded, authorized Energy reads', () => {
   test('telemetry and rollups cannot read future buckets or a foreign recorded company', async () => {
     queueAll();
     await svc.getEnergy({ company_id });
-    for (const c of mockDb.calls().filter(c => /FROM telemetry_raw/.test(c.text))) {
+    for (const c of mockDb.calls().filter(c => /FROM energy_observations/.test(c.text))) {
       expect(c.text).toContain('t.company_id = $1');
       expect(c.text).toContain('t.received_at <= NOW()');
     }

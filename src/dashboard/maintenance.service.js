@@ -25,7 +25,7 @@ const { plantSql } = require('../lib/read-scope');
 const { severityClass } = require('./severity');
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
-const { LIMITS: METER_LIMITS } = require('./energy-meter.service');
+const { LIMITS: METER_LIMITS, latestMeterFieldsSQL, latestMeterSnapshot } = require('./energy-meter.service');
 const { machineOrder } = require('../lib/machine-order');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
@@ -60,16 +60,12 @@ const OWNED_ACTIVE_MACHINE = 'AND machine_id IN (SELECT id FROM machines WHERE c
  * has a reading; before 029 there is no table and so no meter yet.
  */
 const SUPPLY_STALE_MS = 120e3;   // the meter writes at most every 15 s
+const SUPPLY_COLUMNS = ['v1n', 'v2n', 'v3n', 'v_ln_avg', 'v12', 'v23', 'v31', 'v_ll_avg'];
 async function latestSupply(companyId, machineId, from, to) {
   try {
-    return await db.query(`
-      SELECT r.read_at, r.v1n, r.v2n, r.v3n, r.v_ln_avg, r.v12, r.v23, r.v31, r.v_ll_avg
-        FROM energy_meter_readings r
-        JOIN machines m ON m.id = r.machine_id AND m.company_id = $1 AND m.is_active
-       WHERE r.company_id = $1 AND r.machine_id = $4${plantSql('r.machine_id')} AND r.read_at >= $2 AND r.read_at < $3
-         AND r.read_at <= NOW()
-       ORDER BY r.read_at DESC
-       LIMIT 1`, [companyId, from, to, machineId]);
+    return await db.query(latestMeterFieldsSQL(SUPPLY_COLUMNS, {
+      machine: '$4', company: '$1', from: '$2', to: '$3', activeOnly: true, upperExclusive: true
+    }), [companyId, from, to, machineId]);
   } catch (err) {
     if (err?.code === '42P01') return { rows: [] };
     throw err;
@@ -79,13 +75,14 @@ async function latestSupply(companyId, machineId, from, to) {
 /** The latest meter reading as the screen shows it: two groups of three phases, their averages, and the limits they are judged by. */
 function supplyOf(r, nowMs = Date.now()) {
   if (!r) return null;
-  const n = v => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
-  const at = new Date(r.read_at).getTime();
+  const values = latestMeterSnapshot(r, SUPPLY_COLUMNS, nowMs, SUPPLY_STALE_MS);
   return {
-    read_at: r.read_at,
-    stale: !Number.isFinite(at) || at > nowMs || nowMs - at > SUPPLY_STALE_MS,
-    ln: { v1n: n(r.v1n), v2n: n(r.v2n), v3n: n(r.v3n), avg: n(r.v_ln_avg) },
-    ll: { v12: n(r.v12), v23: n(r.v23), v31: n(r.v31), avg: n(r.v_ll_avg) },
+    read_at: values.at === null ? null : new Date(values.at).toISOString(),
+    stale: values.stale || values.at === null,
+    field_observed_at: values.field_observed_at,
+    field_stale: values.field_stale,
+    ln: { v1n: values.v1n, v2n: values.v2n, v3n: values.v3n, avg: values.v_ln_avg },
+    ll: { v12: values.v12, v23: values.v23, v31: values.v31, avg: values.v_ll_avg },
     limits: {
       ll_nominal: METER_LIMITS.v_ll_nominal,
       // phase to neutral on the same supply: 415 / √3

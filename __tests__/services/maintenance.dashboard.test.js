@@ -335,7 +335,9 @@ describe('maintenance dashboard — supply voltage', () => {
     const call = supplyCall();
     expect(call.text).toMatch(/m\.company_id = \$1/);
     expect(call.text).toMatch(/r\.machine_id = \$4 AND r\.read_at >= \$2 AND r\.read_at < \$3/);
-    expect(call.text).toMatch(/ORDER BY r\.read_at DESC\s+LIMIT 1/);
+    expect(call.text).toMatch(/WITH latest_at AS MATERIALIZED/);
+    expect(call.text).toMatch(/MAX\(r\.read_at\) FILTER \(WHERE r\.v1n IS NOT NULL/);
+    expect(call.text).toMatch(/r\.read_at = field\.at/);
     const highest = Math.max(...[...call.text.matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
     expect(call.params.length).toBe(highest);
     expect(call.params[0]).toBe(company_id);
@@ -365,6 +367,21 @@ describe('maintenance dashboard — supply voltage', () => {
     expect(svc.supplyOf(reading, Date.parse('2026-10-09T06:31:00Z')).stale).toBe(false);
     expect(svc.supplyOf({ ...reading, v2n: null }, now).ln.v2n).toBeNull();
     expect(svc.supplyOf(undefined)).toBeNull();
+  });
+
+  test('independent voltage updates keep older phases and their original timestamps', () => {
+    const now = Date.parse('2026-10-09T06:40:00Z');
+    const supply = svc.supplyOf({
+      read_at: new Date(now - 1000),
+      field_values: { v1n: 242.3, v2n: 243.79, v12: 421.2, v_ll_avg: 420.49 },
+      field_observed_at: { v1n: now - 1000, v2n: now - 300000, v12: now - 1000, v_ll_avg: now - 300000 }
+    }, now);
+    expect(supply).toMatchObject({
+      read_at: new Date(now - 1000).toISOString(), stale: true,
+      ln: { v1n: 242.3, v2n: 243.79, v3n: null }, ll: { v12: 421.2, avg: 420.49 },
+      field_observed_at: { v1n: now - 1000, v2n: now - 300000, v3n: null },
+      field_stale: { v1n: false, v2n: true, v3n: null }
+    });
   });
 });
 

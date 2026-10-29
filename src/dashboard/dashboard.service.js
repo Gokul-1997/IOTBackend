@@ -554,8 +554,6 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     let idleSeconds         = 0;
     let manualSeconds       = 0;
     let producedQty         = 0;
-    let shiftEnergyKwh      = 0;
-    let energyAtShiftStart  = null;
 
     if (shift) {
  
@@ -582,29 +580,56 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       manualSeconds  = Number(prod.manual_seconds || 0);
       producedQty    = Number(prod.produced_qty   || 0);
 
-      // shift_kwh = current_energy − first energy reading of this shift
-      // More reliable than summing deltas (unaffected by missed MQTT messages)
-      /* energy > 0 and the company: that is the partial index
-         idx_telemetry_energy_readings (company_id, received_at) WHERE energy > 0,
-         which holds meter readings only. As "machine and energy IS NOT NULL"
-         the planner walked every machine's readings of the shift looking for
-         one, and found none for the many machines without a meter: 0.3–0.7 s
-         per machine page with 140 machines at 1 Hz, 0.1 ms now. A 0 is a
-         dropped read, not a meter value (the collector's energy-step). */
-      const { rows: energyRows } = await db.query(`
-        SELECT energy
-        FROM telemetry_raw
-        WHERE company_id  = $4
-          AND machine_id  = $1
-          AND received_at >= $2
-          AND received_at <  $3
-          AND energy > 0
-        ORDER BY received_at ASC
-        LIMIT 1
-      `, [machineId, detailShiftStart, detailShiftEnd, companyId]);
-
-      energyAtShiftStart = energyRows[0]?.energy ?? null;
     }
+
+    /* Energy can arrive separately from machine status, and an unchanged
+       counter may stay quiet for hours. Read it independently. Consumption
+       uses accepted consecutive intervals, with the Energy dashboard's
+       reset and impossible-rise guards; latest minus first would fabricate
+       consumption after a reset or one bad reading. */
+    const { rows: energyRows } = await db.query(`
+      WITH readings AS (
+        SELECT observed_at, energy,
+               LAG(energy) OVER w AS prev_energy,
+               LAG(observed_at) OVER w AS prev_at
+          FROM energy_observations
+         WHERE company_id = $4 AND machine_id = $1
+           AND received_at >= $2::timestamptz - INTERVAL '5 minutes'
+           AND received_at < $3::timestamptz + INTERVAL '5 minutes'
+           AND received_at <= $5::timestamptz
+           AND observed_at >= $2::timestamptz
+           AND observed_at < $3::timestamptz
+           AND observed_at <= $5::timestamptz
+           AND energy > 0 AND energy < 'Infinity'::float8
+        WINDOW w AS (ORDER BY observed_at, received_at)
+      ), deltas AS (
+        SELECT prev_energy IS NOT NULL AS has_previous,
+               CASE
+                 WHEN prev_energy IS NULL OR energy < prev_energy THEN NULL
+                 WHEN energy - prev_energy <= (2000 * 300 / 3600.0)::float8 THEN energy - prev_energy
+                 WHEN energy - prev_energy > 2000 * GREATEST(EXTRACT(EPOCH FROM observed_at - prev_at), 300) / 3600.0 THEN NULL
+                 ELSE energy - prev_energy
+               END AS delta
+          FROM readings
+      )
+      SELECT SUM(delta) AS shift_kwh,
+             COUNT(delta)::bigint AS accepted_intervals,
+             COUNT(*) FILTER (WHERE has_previous AND delta IS NULL)::bigint AS rejected_intervals,
+             (SELECT energy FROM energy_observations
+               WHERE company_id = $4 AND machine_id = $1
+                 AND received_at >= $5::timestamptz - INTERVAL '30 days'
+                 AND received_at <= $5::timestamptz
+                 AND observed_at >= $5::timestamptz - INTERVAL '30 days'
+                 AND observed_at <= $5::timestamptz
+                 AND energy > 0 AND energy < 'Infinity'::float8
+               ORDER BY observed_at DESC, received_at DESC LIMIT 1) AS total_energy
+        FROM deltas
+    `, [machineId, detailShiftStart, detailShiftEnd, companyId, new Date()]);
+    const measuredEnergy = energyRows[0] || {};
+    const currentEnergy = measuredEnergy.total_energy == null ? null : Number(measuredEnergy.total_energy);
+    const shiftEnergyKwh = measuredEnergy.shift_kwh == null ? null : Number(measuredEnergy.shift_kwh);
+    const rejectedEnergyIntervals = Number(measuredEnergy.rejected_intervals || 0);
+    const energyComplete = Number(measuredEnergy.accepted_intervals || 0) > 0 && rejectedEnergyIntervals === 0;
 
  
     /* ================= QUALITY ================= */
@@ -687,12 +712,12 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
  
     /* ================= LIVE STATUS ================= */
     /*
-     * Only need the latest telemetry for status, spindle, feed, alarm, energy.
+     * Only need the latest telemetry for status, spindle, feed and alarm.
      * Parts count comes from production_hourly (producedQty) — same as dashboard.
      */
 
     const { rows: liveRows } = await db.query(`
-      SELECT machine_status, spindle_load, feed_rate, received_at, alarm, mode, energy
+      SELECT machine_status, spindle_load, feed_rate, received_at, alarm, mode
       FROM telemetry_raw
       WHERE machine_id = $1
         AND company_id = $2
@@ -759,12 +784,6 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       : freshDiffRT < 0 || freshDiffRT > OFFLINE_THRESHOLD_RT
         ? 'OFFLINE'
         : isRunning ? 'RUNNING' : 'IDLE';
-
-    // shift_kwh = current energy − first energy reading this shift
-    const currentEnergy = live?.energy != null ? Number(live.energy) : null;
-    if (currentEnergy !== null && energyAtShiftStart !== null) {
-      shiftEnergyKwh = Math.max(0, currentEnergy - Number(energyAtShiftStart));
-    }
 
     // Use production_hourly as single source — same as dashboard
     const achievedBase = Math.max(0, producedQty);
@@ -851,8 +870,10 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
       },
 
       power: {
-        shift_kwh: Number(shiftEnergyKwh.toFixed(3)),
-        total_kwh: live?.energy != null ? Number(Number(live.energy).toFixed(3)) : null
+        shift_kwh: shiftEnergyKwh == null ? null : Number(shiftEnergyKwh.toFixed(3)),
+        total_kwh: currentEnergy == null ? null : Number(currentEnergy.toFixed(3)),
+        energy_complete: energyComplete,
+        rejected_intervals: rejectedEnergyIntervals
       },
 
       live: {
@@ -866,7 +887,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         feed_rate:       isOnline ? Number(live?.feed_rate    || 0) : 0,
         // adjusted (reset-offset included); falls back to producedQty when OFFLINE
         parts_count:     achievedBase,
-        total_energy:    live?.energy != null ? Number(live.energy) : null
+        total_energy:    currentEnergy
       }
  
     };
