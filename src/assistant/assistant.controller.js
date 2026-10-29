@@ -36,6 +36,16 @@ exports.chat = async (req, res, next) => {
   finally { req.removeListener('aborted', stop); res.removeListener('close', stop); }
 };
 
+/** A person flags an answer. Only the trimmed, bounded fields reach the audit row
+    (audited() records req.body), where S&T and the company admin read it. */
+exports.report = (req, res) => {
+  const text = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+  const answer = text(req.body?.answer, 4000);
+  if (!answer) return res.status(400).json({ status: 'error', code: 'NO_ANSWER', message: 'Which answer? Nothing was reported.' });
+  req.body = { answer, question: text(req.body?.question, 500) || null, reason: text(req.body?.reason, 300) || null };
+  res.status(201).json({ status: 'success', message: 'Reported. Thank you.' });
+};
+
 /** S&T: one company's figures, its timezone, and its use today and this month. */
 exports.getCompanySettings = async (req, res, next) => {
   try {

@@ -198,3 +198,23 @@ test('a key pasted into ANTHROPIC_WORKSPACE_ID is never sent as the workspace, a
   expect(readConfig()).toMatchObject({ workspaceId: 'wrkspc_01AbC', workspaceIdIsKey: false });
   delete process.env.ANTHROPIC_WORKSPACE_ID;
 });
+
+describe('reporting an answer (Google Play: flag AI content without leaving the app)', () => {
+  test('kept in the audit trail, trimmed and bounded; an empty report is refused', async () => {
+    let res = await request(app).post('/api/assistant/report').send({ answer: '   ' });
+    expect([res.status, res.body.code]).toEqual([400, 'NO_ANSWER']);
+    res = await request(app).post('/api/assistant/report')
+      .send({ answer: ` ${'x'.repeat(5000)} `, question: ' OEE today? ', reason: 'wrong figure', extra: 'dropped' });
+    expect(res.status).toBe(201);
+    await new Promise(resolve => setImmediate(resolve));
+    const row = mockDb.calls().find(c => /INSERT INTO audit_logs/.test(c.text));
+    expect(row.params.slice(0, 4)).toEqual([2, 5, 'CREATE_ASSISTANT_REPORT', 'assistant_report']);
+    expect(JSON.parse(row.params[6]).body).toEqual({ answer: 'x'.repeat(4000), question: 'OEE today?', reason: 'wrong figure' });
+  });
+
+  test('only for people who may use the assistant', async () => {
+    mockUser.permissions = ['page:reports:view'];
+    expect((await request(app).post('/api/assistant/report').send({ answer: 'x' })).status).toBe(403);
+    expect(mockDb.calls().some(c => /INSERT INTO audit_logs/.test(c.text))).toBe(false);
+  });
+});
