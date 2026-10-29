@@ -34,6 +34,14 @@ test('a deliberate error keeps its status, message and application code', async 
   expect(res.body).toEqual({ status: 'error', message: 'Pick 92 days or fewer', code: 'RANGE_TOO_LARGE', days: 120, max_days: 92 });
 });
 
+test('TICKET_EXISTS says which ticket is already open', async () => {
+  const res = await request(appThrowing({ status: 409, code: 'TICKET_EXISTS', message: 'Ticket #41 is already open for this alarm',
+    ticket_id: 41, ticket_status: 'IN_PROGRESS' })).get('/x');
+  expect(res.status).toBe(409);
+  expect(res.body).toEqual({ status: 'error', message: 'Ticket #41 is already open for this alarm', code: 'TICKET_EXISTS',
+    ticket_id: 41, ticket_status: 'IN_PROGRESS' });
+});
+
 test('a database error code is never forwarded, even with a status', async () => {
   const res = await request(appThrowing(Object.assign(new Error('duplicate key'), { code: '23505' }))).get('/x');
   expect(res.body.code).toBeUndefined();

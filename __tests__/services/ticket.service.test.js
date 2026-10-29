@@ -62,15 +62,48 @@ describe('ticket.service.createTicket', () => {
 
   test('links the originating alarm when alarm_id is given', async () => {
     mockDb.queueResponse(
-      { rows: [], rowCount: 0 },
-      { rows: [{ id: 3, status: 'OPEN' }], rowCount: 1 },
-      { rows: [], rowCount: 0 },
-      { rows: [], rowCount: 0 }
+      { rows: [], rowCount: 0 },                                  // BEGIN
+      { rows: [{ machine_id: 5 }], rowCount: 1 },                  // the alarm, locked
+      { rows: [], rowCount: 0 },                                  // no open ticket for it
+      { rows: [{ id: 3, status: 'OPEN' }], rowCount: 1 },          // INSERT
+      { rows: [], rowCount: 0 },                                  // history
+      { rows: [], rowCount: 0 }                                   // COMMIT
     );
 
     await svc.createTicket({ company_id, machine_id: 5, alarm_id: 77, title: 'ALARM on VMC-1', created_by: 9 });
 
-    expect(mockDb.calls()[1].params[2]).toBe(77); // alarm_id column
+    const [, lock, open, insert] = mockDb.calls();
+    expect(lock.text).toMatch(/FROM machine_alarms WHERE id = \$1 AND company_id = \$2 FOR UPDATE/);
+    expect(lock.params).toEqual([77, company_id]);
+    expect(open.text).toMatch(/status NOT IN \('RESOLVED', 'CLOSED'\)/);
+    expect(insert.params[2]).toBe(77); // alarm_id column
+  });
+
+  test('a second ticket for an alarm whose ticket is still open is refused, naming that ticket', async () => {
+    mockDb.queueResponse(
+      { rows: [], rowCount: 0 },
+      { rows: [{ machine_id: 5 }], rowCount: 1 },
+      { rows: [{ id: 41, status: 'IN_PROGRESS' }], rowCount: 1 }
+    );
+
+    await expect(svc.createTicket({ company_id, machine_id: 5, alarm_id: 77, title: 'again', created_by: 9 }))
+      .rejects.toMatchObject({ status: 409, code: 'TICKET_EXISTS', ticket_id: 41, ticket_status: 'IN_PROGRESS',
+                               message: 'Ticket #41 is already open for this alarm' });
+    expect(mockDb.calls().some(c => /INSERT INTO maintenance_tickets/.test(c.text))).toBe(false);
+    expect(mockDb.calls().at(-1).text).toBe('ROLLBACK');
+  });
+
+  test('a ticket on another machine than its alarm is refused', async () => {
+    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [{ machine_id: 8 }], rowCount: 1 });
+    await expect(svc.createTicket({ company_id, machine_id: 5, alarm_id: 77, title: 'x', created_by: 9 }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(mockDb.calls().some(c => /INSERT INTO maintenance_tickets/.test(c.text))).toBe(false);
+  });
+
+  test('an alarm that is gone is a 404, nothing written', async () => {
+    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [], rowCount: 0 });
+    await expect(svc.createTicket({ company_id, machine_id: 5, alarm_id: 77, title: 'x', created_by: 9 }))
+      .rejects.toMatchObject({ status: 404, message: 'Alarm not found' });
   });
 
   test('rolls back if the insert fails', async () => {
@@ -136,6 +169,39 @@ describe('ticket.service.updateTicketStatus', () => {
     // Already resolved earlier — CLOSED must not wipe that timestamp.
     expect(update.text).toMatch(/resolved_at = resolved_at/);
     expect(update.text).toMatch(/closed_at = NOW\(\)/);
+  });
+
+  test.each(['RESOLVED', 'CLOSED'])('a ticket raised from an alarm, %s: the alarm is resolved with it', async (status) => {
+    mockDb.queueResponse(
+      { rows: [], rowCount: 0 },
+      { rows: [{ status: 'IN_PROGRESS', alarm_id: 77 }], rowCount: 1 },
+      { rows: [{ id: 12, status }], rowCount: 1 },
+      { rows: [], rowCount: 0 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 0 }
+    );
+
+    await svc.updateTicketStatus(12, company_id, { status, note: 'Referenced the magazine', changed_by: 9 });
+
+    const alarm = mockDb.calls().find(c => /UPDATE machine_alarms/.test(c.text));
+    expect(alarm.text).toMatch(/is_resolved = TRUE, resolved_by = \$1, resolved_at = NOW\(\)/);
+    expect(alarm.text).toMatch(/WHERE id = \$3 AND company_id = \$4 AND is_resolved = FALSE/);   // never re-stamps one already resolved
+    expect(alarm.params).toEqual([9, 'Resolved with maintenance ticket #12: Referenced the magazine', 77, company_id]);
+    expect(mockDb.calls().at(-1).text).toBe('COMMIT');
+  });
+
+  test('a ticket with no alarm, or one moved to In progress, leaves alarms alone', async () => {
+    mockDb.queueResponse(
+      { rows: [], rowCount: 0 }, { rows: [{ status: 'OPEN', alarm_id: null }], rowCount: 1 },
+      { rows: [{ id: 1 }], rowCount: 1 }, { rows: [], rowCount: 0 }, { rows: [], rowCount: 0 }
+    );
+    await svc.updateTicketStatus(1, company_id, { status: 'RESOLVED', changed_by: 9 });
+    mockDb.queueResponse(
+      { rows: [], rowCount: 0 }, { rows: [{ status: 'OPEN', alarm_id: 77 }], rowCount: 1 },
+      { rows: [{ id: 2 }], rowCount: 1 }, { rows: [], rowCount: 0 }, { rows: [], rowCount: 0 }
+    );
+    await svc.updateTicketStatus(2, company_id, { status: 'IN_PROGRESS', changed_by: 9 });
+    expect(mockDb.calls().some(c => /UPDATE machine_alarms/.test(c.text))).toBe(false);
   });
 
   test('re-opening a resolved ticket clears resolved_at', async () => {
@@ -208,6 +274,14 @@ describe('ticket.service.getTickets', () => {
     expect(dataCall.text).toMatch(/t\.machine_id = \$2/);
     expect(dataCall.text).toMatch(/t\.status = \$3/);
     expect(result.pagination).toEqual({ page: 1, limit: 20, total: 2, totalPages: 1 });
+  });
+
+  test('open=true: every ticket not yet resolved or closed, counted and paged by the database', async () => {
+    mockDb.queueResponse({ rows: [{ count: '0' }] }, { rows: [] });
+    await svc.getTickets({ company_id, open: 'true', limit: 100 });
+    const [countCall, dataCall] = mockDb.calls();
+    expect(countCall.text).toMatch(/t\.status NOT IN \('RESOLVED', 'CLOSED'\)/);
+    expect(dataCall.params.slice(-2)).toEqual([100, 0]);
   });
 });
 

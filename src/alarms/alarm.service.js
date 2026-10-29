@@ -154,9 +154,9 @@ exports.resolveAlarm = async ({ alarm_id, resolved_by, resolution_note, company_
  *    the Alarm Report counts it).
  * Bad input is a 400, not a 500: page=abc reached the SQL as NaN.
  *
- * Each row carries ticket_id, the newest maintenance ticket raised from it,
- * so the page says "Ticket raised" after a reload instead of offering a
- * second one. `summary` counts the same alarms without the severity filter
+ * Each row carries ticket_id and ticket_status, the newest maintenance
+ * ticket raised from it, so the page shows that ticket (and its status)
+ * after a reload instead of offering a second one. `summary` counts the same alarms without the severity filter
  * (total, critical, still on the machine, machines), for the page's
  * All | Critical | Non-critical switch (29 Oct 2026).
  */
@@ -205,12 +205,13 @@ exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, 
   const [dataRes, sumRes] = await Promise.all([
     db.query(
       `SELECT a.*, m.machine_serial_no, u.username as resolved_by_name,
-              (SELECT t.id FROM maintenance_tickets t
-                WHERE t.alarm_id = a.id AND t.company_id = a.company_id
-                ORDER BY t.id DESC LIMIT 1) AS ticket_id
+              tk.id AS ticket_id, tk.status AS ticket_status
        FROM machine_alarms a
        JOIN machines m ON m.id = a.machine_id
        LEFT JOIN users u ON u.id = a.resolved_by
+       LEFT JOIN LATERAL (SELECT t.id, t.status FROM maintenance_tickets t
+                           WHERE t.alarm_id = a.id AND t.company_id = a.company_id
+                           ORDER BY t.id DESC LIMIT 1) tk ON TRUE
        ${where}
        ORDER BY (a.ended_at IS NULL) DESC, a.started_at DESC, a.id DESC
        LIMIT $${i++} OFFSET $${i++}`,

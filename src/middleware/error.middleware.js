@@ -45,6 +45,9 @@ module.exports = (err, req, res, next) => {
   if (err.status && err.code) body.code = err.code;
   if (err.status && err.days != null)     body.days     = err.days;
   if (err.status && err.max_days != null) body.max_days = err.max_days;
+  // TICKET_EXISTS: which ticket is already open, so the page can show it
+  if (err.status && err.ticket_id != null) body.ticket_id = err.ticket_id;
+  if (err.status && err.ticket_status != null) body.ticket_status = err.ticket_status;
 
   res.status(status).json(body);
 };

@@ -134,10 +134,10 @@ describe('the list', () => {
     expect(page.params.slice(-2)).toEqual([5, 5]);   // limit 5, offset 5
   });
 
-  test('each row says which ticket was raised from it, within the company', async () => {
+  test('each row says which ticket was raised from it, and its status, within the company', async () => {
     const { page } = await run({});
-    expect(page.text).toMatch(/SELECT t\.id FROM maintenance_tickets t\s+WHERE t\.alarm_id = a\.id AND t\.company_id = a\.company_id/);
-    expect(page.text).toMatch(/AS ticket_id/);
+    expect(page.text).toMatch(/SELECT t\.id, t\.status FROM maintenance_tickets t\s+WHERE t\.alarm_id = a\.id AND t\.company_id = a\.company_id/);
+    expect(page.text).toMatch(/tk\.id AS ticket_id, tk\.status AS ticket_status/);
   });
 
   test('the summary counts the same alarms with every filter but severity, for the All | Critical | Non-critical switch', async () => {

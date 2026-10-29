@@ -42,13 +42,17 @@ function toIssueType(value, fallback = 'BREAKDOWN') {
 
 exports.toPriority = toPriority;
 
-exports.getTickets = async ({ company_id, machine_id, status, priority, assigned_to, page = 1, limit = 20, plant_id = null }) => {
+/* open=true: every ticket not yet resolved or closed. The Maintenance page
+   asked for the newest 20 of any status and hid the finished ones itself, so
+   an open ticket older than the 20 newest never showed (29 Oct 2026). */
+exports.getTickets = async ({ company_id, machine_id, status, priority, assigned_to, open, page = 1, limit = 20, plant_id = null }) => {
   const conditions = [`t.company_id = $1`];
   const params = [company_id];
   let i = 2;
 
   if (machine_id)   { conditions.push(`t.machine_id = $${i++}`);   params.push(machine_id); }
   if (status)       { conditions.push(`t.status = $${i++}`);       params.push(status); }
+  if (open === true || open === 'true') conditions.push(`t.status NOT IN ('RESOLVED', 'CLOSED')`);
   if (priority)     { conditions.push(`t.priority = $${i++}`);     params.push(priority); }
   if (assigned_to)  { conditions.push(`t.assigned_to = $${i++}`);  params.push(assigned_to); }
   addMachinePlantScope(conditions, params, 't', plant_id);
@@ -92,7 +96,8 @@ exports.getTicketById = async (id, company_id, plant_id = null) => {
     `SELECT t.*, m.machine_serial_no,
             u.username AS assigned_to_name,
             c.username AS created_by_name,
-            a.alarm_type, a.severity AS alarm_severity, a.message AS alarm_message
+            a.alarm_type, a.severity AS alarm_severity, a.message AS alarm_message,
+            a.alarm_code, a.started_at AS alarm_started_at, a.is_resolved AS alarm_is_resolved
      FROM maintenance_tickets t
      JOIN machines m ON m.id = t.machine_id
      LEFT JOIN users u ON u.id = t.assigned_to
@@ -122,6 +127,30 @@ exports.createTicket = async ({ company_id, machine_id, alarm_id, title, descrip
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    /* One open ticket per alarm (29 Oct 2026). Raising a ticket from an
+       alarm made a new one every time — after a reload, from a second
+       person, from the phone — so one fault became several tickets. The
+       alarm row is locked while we look, so two at once cannot both pass;
+       the second hears which ticket is already open. A ticket must also be
+       on the alarm's own machine. */
+    if (alarm_id) {
+      const alarmRes = await client.query(
+        `SELECT machine_id FROM machine_alarms WHERE id = $1 AND company_id = $2 FOR UPDATE`, [alarm_id, company_id]);
+      if (!alarmRes.rowCount) throw { status: 404, message: 'Alarm not found' };
+      if (Number(alarmRes.rows[0].machine_id) !== Number(machine_id)) {
+        throw { status: 400, message: 'The ticket must be on the alarm\'s own machine' };
+      }
+      const openRes = await client.query(
+        `SELECT id, status FROM maintenance_tickets
+          WHERE alarm_id = $1 AND company_id = $2 AND status NOT IN ('RESOLVED', 'CLOSED')
+          ORDER BY id DESC LIMIT 1`, [alarm_id, company_id]);
+      if (openRes.rowCount) {
+        const open = openRes.rows[0];
+        throw { status: 409, code: 'TICKET_EXISTS', message: `Ticket #${open.id} is already open for this alarm`,
+                ticket_id: Number(open.id), ticket_status: open.status };
+      }
+    }
 
     const status = assigned_to ? 'ASSIGNED' : 'OPEN';
     const res = await client.query(
@@ -231,6 +260,20 @@ exports.updateTicketStatus = async (id, company_id, { status, note, changed_by, 
        VALUES ($1, $2, $3, $4, $5)`,
       [id, fromStatus, status, note || null, changed_by]
     );
+
+    /* The ticket raised from an alarm is done: so is the alarm (29 Oct 2026).
+       It stayed "Active" on Machine Alarms after the repair, for someone to
+       resolve a second time. Only an alarm nobody has resolved yet; re-opening
+       the ticket leaves the alarm as it is. */
+    const alarmId = currentRes.rows[0].alarm_id;
+    if (alarmId && (status === 'RESOLVED' || status === 'CLOSED')) {
+      await client.query(
+        `UPDATE machine_alarms
+            SET is_resolved = TRUE, resolved_by = $1, resolved_at = NOW(), resolution_note = $2
+          WHERE id = $3 AND company_id = $4 AND is_resolved = FALSE`,
+        [changed_by, `Resolved with maintenance ticket #${id}${note ? `: ${note}` : ''}`, alarmId, company_id]
+      );
+    }
 
     await client.query('COMMIT');
     return updateRes.rows[0];
