@@ -2,6 +2,8 @@
  * Machines in name order, the numbers in a name read as numbers (29 Oct
  * 2026, the user: one sort order for every machine list the API gives):
  * VMC - 1 - F, VMC - 2 - F … VMC - 9 - M, VMC - 10 - M, not 1, 10, 11, 2.
+ * The VMCs come first, then the HMCs, then any other machine (the user:
+ * "VMC 1, 2, 3, next HMC 1, 2").
  *
  * The key splits a name into runs of digits and the rest; each digit run is
  * zero-padded so it compares as a number, the rest compares in lower case
@@ -16,9 +18,13 @@ const naturalKey = column => `(SELECT string_agg(CASE WHEN nk.part[1] ~ '^[0-9]+
                 ELSE lower(regexp_replace(nk.part[1], '[^[:alnum:]]', '', 'g')) END, '' ORDER BY nk.i)
            FROM regexp_matches(coalesce(${column}, ''), '[0-9]+|[^0-9]+', 'g') WITH ORDINALITY AS nk(part, i)) COLLATE "C"`;
 
+/** The machine families in the order they are listed; any other name after them. */
+const FAMILIES = ['VMC', 'HMC'];
+const familyRank = column => `CASE ${FAMILIES.map((f, i) => `WHEN upper(btrim(coalesce(${column}, ''))) LIKE '${f}%' THEN ${i}`).join(' ')} ELSE ${FAMILIES.length} END`;
+
 const machineOrder = (column = 'machine_serial_no', direction = 'ASC') => {
   const dir = String(direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-  return `${naturalKey(column)} ${dir}, ${column} ${dir}`;
+  return `${familyRank(column)} ${dir}, ${naturalKey(column)} ${dir}, ${column} ${dir}`;
 };
 
-module.exports = { machineOrder, naturalKey };
+module.exports = { machineOrder, naturalKey, FAMILIES };

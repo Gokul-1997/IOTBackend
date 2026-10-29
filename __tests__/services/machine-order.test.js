@@ -2,10 +2,11 @@
  * One machine order for every list the API gives (29 Oct 2026, the user:
  * "machine list sort order, all API"): by name, the numbers in a name read
  * as numbers — VMC - 2 - F before VMC - 10 - M. The key is SQL, so a paged
- * list keeps the order from page to page. (The order itself was checked on
- * PostgreSQL: CNC-01, CNC-1A, HMC - 7 - F, HMC - 15 - F, VMC - 1 - F,
- * VMC - 1 - M, VMC-2, VMC - 2 - F, VMC - 9 - M, VMC - 10 - M, vmc - 11 - m,
- * VMC18- M.)
+ * list keeps the order from page to page. VMCs first, then HMCs, then the
+ * rest (the user: "VMC 1, 2, 3, next HMC 1, 2"). (Checked on PostgreSQL:
+ * VMC - 1 - F, VMC - 2 - F, VMC - 3 - F, VMC - 9 - M, VMC - 10 - M,
+ * VMC - 12 - F, VMC - 17 - F, VMC18- M, HMC - 1 - F, HMC - 7 - F,
+ * HMC - 15 - F, CNC-01, Lathe 2.)
  */
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
 const { mockDb, resetDb } = require('../helpers/mockDb');
@@ -13,8 +14,9 @@ const { machineOrder } = require('../../src/lib/machine-order');
 
 beforeEach(() => resetDb());
 
-test('the key pads each run of digits and ignores case, spaces and dashes; ties go by the name', () => {
+test('VMCs, then HMCs, then the rest; the key pads each run of digits and ignores case, spaces and dashes; ties go by the name', () => {
   const sql = machineOrder('m.machine_serial_no');
+  expect(sql).toMatch(/^CASE WHEN upper\(btrim\(coalesce\(m\.machine_serial_no, ''\)\)\) LIKE 'VMC%' THEN 0 WHEN .* LIKE 'HMC%' THEN 1 ELSE 2 END ASC, /);
   expect(sql).toContain("lpad(nk.part[1], 20, '0')");
   expect(sql).toContain("lower(regexp_replace(nk.part[1], '[^[:alnum:]]', '', 'g'))");
   expect(sql).toContain('regexp_matches(coalesce(m.machine_serial_no, \'\')');
