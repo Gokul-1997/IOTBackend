@@ -10,7 +10,7 @@ test('the alarm list and count remain inside the recipient\'s assigned plant', a
   mockDb.queueResponse({ rows: [{ count: '0' }] }, { rows: [] });
   await scope.run({ company_id: 4, plant_id: 8, roles: ['SUPERVISOR'] },
     () => alarms.getAlarms({ company_id: 4, machine_id: 99 }));
-  expect(mockDb.calls()).toHaveLength(2);
+  expect(mockDb.calls()).toHaveLength(3);                        // count, page, summary
   for (const query of mockDb.calls()) {
     expect(query.text).toContain('a.machine_id IN (SELECT authorized_machine.id');
     expect(query.text).toContain('authorized_machine.company_id = 4 AND authorized_machine.plant_id = 8');

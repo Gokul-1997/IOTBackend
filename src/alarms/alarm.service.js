@@ -153,6 +153,12 @@ exports.resolveAlarm = async ({ alarm_id, resolved_by, resolution_note, company_
  *  - severity=CRITICAL | NORMAL (NORMAL = anything not critical, the way
  *    the Alarm Report counts it).
  * Bad input is a 400, not a 500: page=abc reached the SQL as NaN.
+ *
+ * Each row carries ticket_id, the newest maintenance ticket raised from it,
+ * so the page says "Ticket raised" after a reload instead of offering a
+ * second one. `summary` counts the same alarms without the severity filter
+ * (total, critical, still on the machine, machines), for the page's
+ * All | Critical | Non-critical switch (29 Oct 2026).
  */
 const badRequest = message => ({ status: 400, message });
 const positiveInt = (v, label) => {
@@ -185,28 +191,48 @@ exports.getAlarms = async ({ company_id, is_snt_super, machine_id, is_resolved, 
   if (machineId)     { conditions.push(`a.machine_id = $${i++}`); params.push(machineId); }
   if (resolved !== null) { conditions.push(`a.is_resolved = $${i++}`); params.push(resolved); }
   if (isActive !== null) conditions.push(isActive ? 'a.ended_at IS NULL' : 'a.ended_at IS NOT NULL');
+  const base = [...conditions];
   if (sev === 'CRITICAL') conditions.push(`UPPER(a.severity) = 'CRITICAL'`);
   if (sev === 'NORMAL')   conditions.push(`UPPER(a.severity) <> 'CRITICAL'`);
 
-  const where = (conditions.length ? `WHERE ${conditions.join(' AND ')}` : 'WHERE TRUE')
-    + readScope.plantSql('a.machine_id');
+  const whereOf = list => (list.length ? `WHERE ${list.join(' AND ')}` : 'WHERE TRUE') + readScope.plantSql('a.machine_id');
+  const where = whereOf(conditions);
   const offset = (pageNum - 1) * limitNum;
 
   const countRes = await db.query(`SELECT COUNT(*) FROM machine_alarms a ${where}`, params);
   const total = parseInt(countRes.rows[0].count);
 
-  const dataRes = await db.query(
-    `SELECT a.*, m.machine_serial_no, u.username as resolved_by_name
-     FROM machine_alarms a
-     JOIN machines m ON m.id = a.machine_id
-     LEFT JOIN users u ON u.id = a.resolved_by
-     ${where}
-     ORDER BY (a.ended_at IS NULL) DESC, a.started_at DESC, a.id DESC
-     LIMIT $${i++} OFFSET $${i++}`,
-    [...params, limitNum, offset]
-  );
+  const [dataRes, sumRes] = await Promise.all([
+    db.query(
+      `SELECT a.*, m.machine_serial_no, u.username as resolved_by_name,
+              (SELECT t.id FROM maintenance_tickets t
+                WHERE t.alarm_id = a.id AND t.company_id = a.company_id
+                ORDER BY t.id DESC LIMIT 1) AS ticket_id
+       FROM machine_alarms a
+       JOIN machines m ON m.id = a.machine_id
+       LEFT JOIN users u ON u.id = a.resolved_by
+       ${where}
+       ORDER BY (a.ended_at IS NULL) DESC, a.started_at DESC, a.id DESC
+       LIMIT $${i++} OFFSET $${i++}`,
+      [...params, limitNum, offset]
+    ),
+    // the severity filter adds no parameter, so the same ones bind here
+    db.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE UPPER(a.severity) = 'CRITICAL')::int AS critical,
+              COUNT(*) FILTER (WHERE a.ended_at IS NULL)::int AS still_on,
+              COUNT(DISTINCT a.machine_id)::int AS machines
+       FROM machine_alarms a ${whereOf(base)}`,
+      params
+    )
+  ]);
+  const sum = sumRes.rows[0] || {};
+  const summary = {
+    total: Number(sum.total) || 0, critical: Number(sum.critical) || 0,
+    still_on: Number(sum.still_on) || 0, machines: Number(sum.machines) || 0
+  };
 
-  return { data: dataRes.rows, pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) } };
+  return { data: dataRes.rows, summary, pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) } };
 };
 
 exports.getAlertPreferences = async (company_id) => {

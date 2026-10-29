@@ -127,8 +127,38 @@ describe('the list', () => {
   test('every query binds exactly the parameters it references', async () => {
     const highest = sql => Math.max(0, ...[...String(sql).matchAll(/\$(\d+)/g)].map(m => Number(m[1])));
     const { count, page } = await run({ machine_id: 3, is_resolved: 'false', active: 'true', severity: 'CRITICAL', page: 2, limit: 5 });
+    const summary = mockDb.calls().find(c => /AS still_on/.test(c.text));
     expect(count.params.length).toBe(highest(count.text));
     expect(page.params.length).toBe(highest(page.text));
+    expect(summary.params.length).toBe(highest(summary.text));
     expect(page.params.slice(-2)).toEqual([5, 5]);   // limit 5, offset 5
+  });
+
+  test('each row says which ticket was raised from it, within the company', async () => {
+    const { page } = await run({});
+    expect(page.text).toMatch(/SELECT t\.id FROM maintenance_tickets t\s+WHERE t\.alarm_id = a\.id AND t\.company_id = a\.company_id/);
+    expect(page.text).toMatch(/AS ticket_id/);
+  });
+
+  test('the summary counts the same alarms with every filter but severity, for the All | Critical | Non-critical switch', async () => {
+    const app = makeApp(admin());
+    mockDb.queueResponse(grants(), { rows: [{ count: '4' }] }, { rows: [] },
+      { rows: [{ total: 23, critical: 4, still_on: 15, machines: 9 }] });
+    const res = await request(app).get('/api/alarms').query({ machine_id: 3, is_resolved: 'false', severity: 'CRITICAL' });
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toEqual({ total: 23, critical: 4, still_on: 15, machines: 9 });
+    expect(res.body.pagination.total).toBe(4);
+    const count = mockDb.calls().find(c => /SELECT COUNT\(\*\) FROM machine_alarms/.test(c.text));
+    const summary = mockDb.calls().find(c => /AS still_on/.test(c.text));
+    const summaryWhere = summary.text.split('FROM machine_alarms a')[1];
+    expect(summaryWhere).toMatch(/a\.company_id = \$1 AND a\.machine_id = \$2 AND a\.is_resolved = \$3/);
+    expect(summaryWhere).not.toMatch(/severity/);                 // the switch's counts stay put while it filters
+    expect(count.text).toMatch(/UPPER\(a\.severity\) = 'CRITICAL'/);
+    expect(summary.params).toEqual(count.params);
+  });
+
+  test('an old database answer without a summary row gives zeros, not an error', async () => {
+    const { res } = await run({});
+    expect(res.body.summary).toEqual({ total: 0, critical: 0, still_on: 0, machines: 0 });
   });
 });
