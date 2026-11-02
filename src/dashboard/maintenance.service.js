@@ -26,6 +26,7 @@ const { severityClass } = require('./severity');
 const { resolveWindow, scope, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
 const { LIMITS: METER_LIMITS, latestMeterFieldsSQL, latestMeterSnapshot } = require('./energy-meter.service');
+const energyStore = require('./energy-store');
 const { machineOrder } = require('../lib/machine-order');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
@@ -62,9 +63,11 @@ const OWNED_ACTIVE_MACHINE = 'AND machine_id IN (SELECT id FROM machines WHERE c
 const SUPPLY_STALE_MS = 120e3;   // the meter writes at most every 15 s
 const SUPPLY_COLUMNS = ['v1n', 'v2n', 'v3n', 'v_ln_avg', 'v12', 'v23', 'v31', 'v_ll_avg'];
 async function latestSupply(companyId, machineId, from, to) {
+  const canonical = await energyStore.enabled(companyId);
   try {
     return await db.query(latestMeterFieldsSQL(SUPPLY_COLUMNS, {
-      machine: '$4', company: '$1', from: '$2', to: '$3', activeOnly: true, upperExclusive: true
+      machine: '$4', company: '$1', from: '$2', to: '$3', activeOnly: true, upperExclusive: true,
+      legacyOnly: !canonical
     }), [companyId, from, to, machineId]);
   } catch (err) {
     if (err?.code === '42P01') return { rows: [] };

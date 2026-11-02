@@ -53,9 +53,9 @@ test('a quiet change-only meter retains its last counter while status is offline
   expect(d.power.total_kwh).toBe(3104);
   expect(d.power.shift_kwh).toBeNull();
   const q = calls.find(c => ENERGY.test(c.text));
-  const latest = q.text.slice(q.text.indexOf('(SELECT energy'));
-  expect(latest).toContain("received_at >= $5::timestamptz - INTERVAL '30 days'");
-  expect(latest).toContain("observed_at >= $5::timestamptz - INTERVAL '30 days'");
+  const latest = q.text.slice(q.text.indexOf('source_latest AS'));
+  expect(latest).toContain("t.received_at >= $5::timestamptz - INTERVAL '30 days'");
+  expect(latest).toContain("COALESCE(to_timestamp(t.device_time), t.received_at) >= $5::timestamptz - INTERVAL '30 days'");
   expect(latest).not.toContain("INTERVAL '1 hour'");
   expect(latest).toMatch(/ORDER BY observed_at DESC, received_at DESC LIMIT 1/);
 });
@@ -83,16 +83,19 @@ test('counter reads enforce the checked machine company, current shift and no fu
   const q = calls.find(c => ENERGY.test(c.text));
   expect(q.params).toEqual([25, new Date('2026-10-29T08:00:00+05:30'),
     new Date('2026-10-29T20:00:00+05:30'), 4, new Date('2026-10-29T12:00:00+05:30')]);
-  expect(q.text.match(/company_id = \$4 AND machine_id = \$1/g)).toHaveLength(2);
+  expect(q.text).toContain('company_id = $4 AND machine_id = $1');
+  expect(q.text).toContain('t.company_id = $4 AND t.machine_id = $1');
+  expect(q.text).toContain('r.company_id = $4 AND r.machine_id = $1');
   expect(q.text).toMatch(/received_at >= \$2::timestamptz/);
   expect(q.text).toMatch(/received_at < \$3::timestamptz/);
-  expect(q.text.match(/received_at <= \$5::timestamptz/g)).toHaveLength(2);
+  expect(q.text).toContain('t.received_at <= $5::timestamptz');
   expect(q.text).toContain('observed_at >= $2::timestamptz');
   expect(q.text).toContain('observed_at < $3::timestamptz');
-  expect(q.text.match(/observed_at <= \$5::timestamptz/g)).toHaveLength(2);
+  expect(q.text).toContain('COALESCE(to_timestamp(t.device_time), t.received_at) <= $5::timestamptz');
+  expect(q.text).toContain('observed_at <= $5::timestamptz');
   expect(q.text).toContain('WINDOW w AS (ORDER BY observed_at, received_at)');
   expect(q.text).toContain('LAG(observed_at) OVER w AS prev_at');
-  expect(q.text).not.toMatch(/FROM telemetry_raw/);
+  expect(q.text).toContain("t.energy > 0 AND t.energy < 'Infinity'::float8");
 });
 
 test('without a current shift the latest energy is still available and shift usage stays unknown', async () => {

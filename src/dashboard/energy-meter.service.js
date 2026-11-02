@@ -314,7 +314,7 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
     ? canonicalReadings({ companyId,machineId:machine.id,from,to,nowMs,bucket:r.bucket })
     : Promise.all([
     db.query(
-      latestMeterFieldsSQL(READING_COLUMNS),
+      latestMeterFieldsSQL(READING_COLUMNS, { legacyOnly: !canonical }),
       [machine.id, new Date(nowMs - LOOKBACK_MS), to, companyId]),
     db.query(
       `SELECT (EXTRACT(EPOCH FROM date_bin($4::interval, read_at, TIMESTAMPTZ '2000-01-01 00:00:00+00')) * 1000)::bigint AS t,

@@ -3,6 +3,7 @@ const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { fleetPage } = require('./fleet-page');
 const { machineOrder } = require('../lib/machine-order');
 const energyStore = require('./energy-store');
+const { getLegacyMachineEnergy } = require('./legacy-machine-energy');
 
 /** Return a Date whose .getFullYear/.getHours/… reflect IST, regardless of server TZ */
 function nowIST() {
@@ -593,44 +594,8 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const measuredEnergy = canonicalEnergy
       ? await energyStore.machineEnergy({ companyId, machineId, start: detailShiftStart,
         end: detailShiftEnd, asOf: energyAsOf })
-      : (await db.query(`
-      WITH readings AS (
-        SELECT observed_at, energy,
-               LAG(energy) OVER w AS prev_energy,
-               LAG(observed_at) OVER w AS prev_at
-          FROM energy_observations
-         WHERE company_id = $4 AND machine_id = $1
-           AND received_at >= $2::timestamptz - INTERVAL '5 minutes'
-           AND received_at < $3::timestamptz + INTERVAL '5 minutes'
-           AND received_at <= $5::timestamptz
-           AND observed_at >= $2::timestamptz
-           AND observed_at < $3::timestamptz
-           AND observed_at <= $5::timestamptz
-           AND energy > 0 AND energy < 'Infinity'::float8
-        WINDOW w AS (ORDER BY observed_at, received_at)
-      ), deltas AS (
-        SELECT prev_energy IS NOT NULL AS has_previous,
-               CASE
-                 WHEN prev_energy IS NULL OR energy < prev_energy THEN NULL
-                 WHEN energy - prev_energy <= (2000 * 300 / 3600.0)::float8 THEN energy - prev_energy
-                 WHEN energy - prev_energy > 2000 * GREATEST(EXTRACT(EPOCH FROM observed_at - prev_at), 300) / 3600.0 THEN NULL
-                 ELSE energy - prev_energy
-               END AS delta
-          FROM readings
-      )
-      SELECT SUM(delta) AS shift_kwh,
-             COUNT(delta)::bigint AS accepted_intervals,
-             COUNT(*) FILTER (WHERE has_previous AND delta IS NULL)::bigint AS rejected_intervals,
-             (SELECT energy FROM energy_observations
-               WHERE company_id = $4 AND machine_id = $1
-                 AND received_at >= $5::timestamptz - INTERVAL '30 days'
-                 AND received_at <= $5::timestamptz
-                 AND observed_at >= $5::timestamptz - INTERVAL '30 days'
-                 AND observed_at <= $5::timestamptz
-                 AND energy > 0 AND energy < 'Infinity'::float8
-               ORDER BY observed_at DESC, received_at DESC LIMIT 1) AS total_energy
-        FROM deltas
-    `, [machineId, detailShiftStart, detailShiftEnd, companyId, energyAsOf])).rows[0] || {};
+      : await getLegacyMachineEnergy({ companyId, machineId, start: detailShiftStart,
+        end: detailShiftEnd, asOf: energyAsOf });
     const currentEnergy = measuredEnergy.total_energy == null ? null : Number(measuredEnergy.total_energy);
     const shiftEnergyKwh = measuredEnergy.shift_kwh == null ? null : Number(measuredEnergy.shift_kwh);
     const rejectedEnergyIntervals = Number(measuredEnergy.rejected_intervals || 0);

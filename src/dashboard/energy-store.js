@@ -14,6 +14,7 @@ const { machineOrder } = require('../lib/machine-order');
 const OFFSET = 330 * 60_000;
 const DAY = 86_400_000;
 const readiness = new Map();
+let readinessWarningAfter = 0;
 const good = "('measured','flat','rollover')";
 const REGISTERS = ['kwh_total', 'kwh_import', 'kwh_export', 'kvarh_total', 'kvah_total'];
 const levels = ['month', 'day', 'hour'];
@@ -72,8 +73,23 @@ async function enabled(companyId) {
   const company = id(companyId, 'Company');
   const old = readiness.get(company);
   if (old && old.until > Date.now()) return old.ready;
-  const { rows } = await db.query('SELECT ready FROM energy_pipeline_state WHERE company_id = $1', [company]);
-  const ready = rows[0]?.ready === true;
+  let ready = false;
+  try {
+    const { rows } = await db.query('SELECT ready FROM energy_pipeline_state WHERE company_id = $1', [company]);
+    ready = rows[0]?.ready === true;
+  } catch (err) {
+    // A rolling deployment may enable the feature before migration 064.
+    // Only that absent optional readiness table means "not ready". A lost
+    // connection, missing different relation or permission failure still
+    // needs to fail visibly instead of silently changing the data source.
+    const missingReadiness = err?.code === '42P01' && (err.table === 'energy_pipeline_state'
+      || /relation "(?:[^".]+\.)?energy_pipeline_state" does not exist/.test(err.message || ''));
+    if (!missingReadiness) throw err;
+    if (Date.now() >= readinessWarningAfter) {
+      console.warn('Energy v2 readiness table is not installed; retaining the current energy source until migration 064 is applied.');
+      readinessWarningAfter = Date.now() + 60_000;
+    }
+  }
   if (readiness.size >= 1000) readiness.clear();
   readiness.set(company, { ready, until: Date.now() + 5000 });
   return ready;
