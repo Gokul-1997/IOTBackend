@@ -38,6 +38,7 @@ const { parsePart, when } = require('./parts');
 const cache = require('./cache');
 const { machineOrder } = require('../lib/machine-order');
 const { tableRows } = require('../lib/table-query');
+const energyStore = require('./energy-store');
 
 /* The Machine Detail table's header (lib/table-query.js, 29 Oct 2026): sort
    any column, filter overload; built here, so read from each row. */
@@ -406,10 +407,12 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
   const show = q.show === undefined || q.show === null || q.show === '' || q.show === 'all' ? null : String(q.show).toLowerCase();
   if (show && show !== 'overload') throw httpError('show must be all or overload', 400);
 
+  const canonicalEnergy = await energyStore.enabled(companyId);
+  const source = canonicalEnergy ? energyStore : { figures, byShift };
   const [figs, shifts, settings] = await Promise.all([
-    cache.remember('energy:figures', companyId, { machineId, search, start, end }, cache.ttlFor(q),
-      () => figures({ companyId, machineId, search, start, end })),
-    when(want.charts, () => byShift({ companyId, machineId, search, start, end }), []),
+    cache.remember('energy:figures', companyId, { machineId, search, start, end, pipeline: canonicalEnergy ? 'v2' : 'legacy' }, cache.ttlFor(q),
+      () => source.figures({ companyId, machineId, search, start, end })),
+    when(want.charts, () => source.byShift({ companyId, machineId, search, start, end }), []),
     settingsFor(companyId)
   ]);
   const rows = figs.machines;
@@ -421,7 +424,7 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
     const peak = round(r.peak_kw, 8);
     const overloadKw = round(cfg?.overload_kw, 8);
     const produced = Number(r.produced);
-    const machineComplete = kwh != null && !Number(r.rejected_intervals || 0)
+    const machineComplete = r.energy_complete !== false && kwh != null && !Number(r.rejected_intervals || 0)
       && (!figs.trend.length || Number(r.days) === figs.trend.length);
 
     return {
@@ -465,10 +468,10 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
     return n + (rate == null ? 0 : Number(rawByMachine.get(m.machine_id).kwh) * rate);
   }, 0);
   const rejectedIntervals = machines.reduce((n, m) => n + m.rejected_intervals, 0);
-  const dailyComplete = r => machines.length > 0 && r.kwh != null
+  const dailyComplete = r => r.energy_complete !== false && machines.length > 0 && r.kwh != null
     && r.machines === machines.length && !r.rejected_intervals;
   const energyComplete = machines.length > 0 && reporting.length === machines.length && rejectedIntervals === 0
-    && figs.trend.every(dailyComplete);
+    && machines.every(m => m.energy_complete) && figs.trend.every(dailyComplete);
   const currencyConsistent = reporting.every(m => m.currency === settings.currency);
   const priced = reporting.filter(m => m.cost !== null && m.currency === settings.currency).length;
   const costComplete = energyComplete && currencyConsistent && priced === reporting.length;
@@ -539,8 +542,8 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
     },
     currency: settings.currency,
     cost_basis: 'current_tariff_estimate',
-    energy_source: 'telemetry_counter_deltas',
-    by_shift_source: 'production_hourly',
+    energy_source: canonicalEnergy ? 'canonical_energy_intervals' : 'telemetry_counter_deltas',
+    by_shift_source: canonicalEnergy ? 'canonical_energy_intervals' : 'production_hourly',
     // Company-default metadata only. Trend costs are priced per machine
     // using the currently configured tariff, not a historical invoice.
     rate_per_kwh: settings.company?.cost_per_kwh != null ? Number(settings.company.cost_per_kwh) : null,

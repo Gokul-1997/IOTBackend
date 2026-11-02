@@ -5,6 +5,7 @@ const shiftJob = require('./shiftOee.job');
 const preventiveJob = require('./preventiveMaintenance.job');
 const periodicJob = require('./periodicMaintenance.job');
 const alarmNotifications = require('./alarmNotifications.job');
+const energyReconcile = require('./energyReconcile.job');
 
 /*
  * Scheduled jobs, run by exactly one process at a time.
@@ -45,6 +46,9 @@ function schedule(expr, name, job) {
 
 if (process.env.CRON_ENABLED !== 'false' && process.env.NODE_ENV !== 'test') {
   schedule('*/15 * * * * *', 'alarm-notifications', alarmNotifications);
+  // The worker also holds its own lock for manual/backfill invocations. Keep
+  // the dispatch lock distinct so this wrapper cannot lock out its own worker.
+  if(process.env.ENERGY_V2_ENABLED==='true')schedule('*/10 * * * * *', 'energy-reconcile-dispatch', energyReconcile);
   schedule('*/10 * * * *', 'shift-oee',        shiftJob);            // every 10 min (IST)
   schedule('0 * * * *',    'hourly-oee',       hourlyJob);           // on the hour (IST)
   schedule('*/15 * * * *', 'preventive',       preventiveJob);       // raise PM tickets from breached alarm thresholds

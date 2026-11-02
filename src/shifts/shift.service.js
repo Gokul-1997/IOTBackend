@@ -217,21 +217,39 @@ exports.updateShift = async (id, data, company_id) => {
 ===================================================== */
 
 exports.deleteShift = async (id, company_id) => {
-  const existing = await pool.query(`
-    SELECT id FROM shifts WHERE id = $1 AND company_id = $2
-  `, [id, company_id]);
-
-  if (!existing.rowCount) {
-    throw inputError('Shift not found');
-  }
-
-  // Remove or nullify all FK references before deleting the shift
-  await pool.query(`DELETE FROM oee_shift_summary WHERE shift_id = $1`, [id]);
-  await pool.query(`DELETE FROM oee_hourly WHERE shift_id = $1`, [id]);
-  await pool.query(`DELETE FROM production_hourly WHERE shift_id = $1`, [id]);
-  await pool.query(`UPDATE quality_entries SET shift_id = NULL WHERE shift_id = $1`, [id]);
-  await pool.query(`DELETE FROM machine_shift_config WHERE shift_id = $1`, [id]);
-  await pool.query(`DELETE FROM shifts WHERE id = $1 AND company_id = $2`, [id, company_id]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id FROM shifts WHERE id=$1 AND company_id=$2 FOR UPDATE', [id, company_id]);
+    if (!existing.rowCount) throw inputError('Shift not found');
+    // Locking the parent also serializes concurrent FK references. Historical
+    // rows are evidence, including nullable/cascading FKs; never erase them to
+    // make a master-data deletion succeed. Discover optional energy tables too.
+    const { rows: references } = await client.query(`SELECT
+        quote_ident(n.nspname)||'.'||quote_ident(c.relname) AS relation,
+        quote_ident(a.attname) AS column_name,c.relname AS table_name
+      FROM pg_constraint fk JOIN pg_class c ON c.oid=fk.conrelid
+      JOIN pg_namespace n ON n.oid=c.relnamespace
+      JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=fk.conkey[1]
+      WHERE fk.contype='f' AND fk.confrelid='shifts'::regclass
+        AND array_length(fk.conkey,1)=1 AND c.relname NOT IN('shift_breaks','machine_shift_config')`);
+    // Some legacy installations lack FK constraints on these summary tables.
+    const tables = new Map(references.map(r => [r.table_name, r]));
+    for (const table of ['oee_shift_summary','oee_hourly','production_hourly','quality_entries']) {
+      if (!tables.has(table)) tables.set(table, {relation: table, column_name: 'shift_id'});
+    }
+    for (const ref of tables.values()) {
+      const { rows: [result] } = await client.query(`SELECT EXISTS(SELECT 1 FROM ${ref.relation} WHERE ${ref.column_name}=$1) AS used`, [id]);
+      if (result.used) throw Object.assign(new Error('This shift has recorded history. Deactivate it instead of deleting it.'), {status:409});
+    }
+    await client.query('DELETE FROM machine_shift_config WHERE shift_id=$1', [id]);
+    await client.query('DELETE FROM shifts WHERE id=$1 AND company_id=$2', [id, company_id]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23503') throw Object.assign(new Error('This shift is still in use. Deactivate it instead of deleting it.'), {status:409});
+    throw error;
+  } finally { client.release(); }
 };
 
 /* =====================================================

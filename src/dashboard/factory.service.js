@@ -13,6 +13,7 @@ const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { severityClass } = require('./severity');
 const { resolveWindow, parseMachineId } = require('./window');
 const oeeSvc = require('./oee.dashboard.service');
+const energyStore = require('./energy-store');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
 const SEVERITY_CLASS = severityClass('severity');
@@ -29,9 +30,10 @@ exports.getFactoryDashboard = async (req) => {
   const companyId  = req.user.company_id;
   const machineId  = parseMachineId(req.query.machine_id);
   const win        = await resolveWindow(companyId, req.query);
+  const canonicalEnergy = await energyStore.enabled(companyId);
 
   const [
-    settingsRes, machineRes, shiftRes, targetRes, yesterdayRes
+    settingsRes, machineRes, shiftRes, targetRes, yesterdayRes, measuredEnergy
   ] = await Promise.all([
 
     /* company tariff — cost is unavailable rather than zero when unset.
@@ -199,7 +201,11 @@ exports.getFactoryDashboard = async (req) => {
          ${win.shift ? `AND p.shift_id = $${machineId ? 5 : 4}` : ''}
        GROUP BY p.machine_id`,
       [companyId, win.day, asOf.toISOString(), ...(machineId ? [machineId] : []), ...(win.shift ? [win.shift.id] : [])]
-    )
+    ),
+    canonicalEnergy
+      ? energyStore.factoryEnergy({ companyId, machineId, date: win.day,
+        shiftId: win.shift?.id || null, asOf: asOf.toISOString() })
+      : Promise.resolve(null)
   ]);
 
   const settings   = settingsRes.rows[0] || {};
@@ -237,7 +243,7 @@ exports.getFactoryDashboard = async (req) => {
 
   /* month-to-date energy, for the monthly cost figure, and the same days
      of last month for the "vs last month" comparison */
-  const monthRequest = db.query(`
+  const monthRequest = canonicalEnergy ? Promise.resolve({ rows: [] }) : db.query(`
     SELECT COALESCE(SUM(p.energy_kwh) FILTER (
              WHERE p.hour_start >= date_trunc('month', $2::date)::timestamp AT TIME ZONE 'Asia/Kolkata'), 0)::float AS kwh,
            COALESCE(SUM(p.energy_kwh) FILTER (
@@ -346,7 +352,7 @@ exports.getFactoryDashboard = async (req) => {
     if (targetMachineIds.has(r.machine_id)) e.actual += Number(r.produced || 0);
     byHour.set(key, e);
   }
-  const trend = [...byHour.values()].sort((a, b) => a.hour.getTime() - b.hour.getTime()).map(e => {
+  let trend = [...byHour.values()].sort((a, b) => a.hour.getTime() - b.hour.getTime()).map(e => {
     const hrs = shiftHours.get(e.shift_id);
     return {
       hour: e.hour,
@@ -357,11 +363,77 @@ exports.getFactoryDashboard = async (req) => {
     };
   });
 
+  if (canonicalEnergy) {
+    // Consumption and production share the chart's clock hour, but retain
+    // independent evidence. An absent interval is unknown, never a zero.
+    const energyHours = new Map((measuredEnergy.trend || []).map(row => [
+      new Date(row.hour).toISOString(), row
+    ]));
+    const combined = new Map(trend.map(row => {
+      const key = new Date(row.hour).toISOString();
+      const point = energyHours.get(key);
+      return [key, { ...row, kwh: point?.kwh == null ? null : Number(point.kwh) }];
+    }));
+    for (const [key, point] of energyHours) {
+      if (!combined.has(key)) combined.set(key, {
+        hour: new Date(key), kwh: point.kwh == null ? null : Number(point.kwh),
+        produced: 0, actual: 0, target: null
+      });
+    }
+    trend = [...combined.values()].sort((a, b) => new Date(a.hour) - new Date(b.hour));
+  }
+
   const producedParts = prod.produced;
   const yday = yesterdayRes.rows.reduce((a, r) => ({ kwh: a.kwh + Number(r.kwh || 0), produced: a.produced + Number(r.produced || 0) }),
                                          { kwh: 0, produced: 0 });
   const pctChange = (now, before) => (before > 0 ? Number((((now - before) / before) * 100).toFixed(1)) : null);
   const perPart = (kwh, produced) => (rate && produced > 0 ? Number(((kwh * rate) / produced).toFixed(2)) : null);
+
+  const measuredNumber = (value, places = 3) => value == null || !Number.isFinite(Number(value))
+    ? null : Number(Number(value).toFixed(places));
+  const configuredRate = settings.energy_rate_per_kwh == null ? null : Number(settings.energy_rate_per_kwh);
+  const validRate = Number.isFinite(configuredRate) && configuredRate >= 0 ? configuredRate : null;
+  const canonicalCost = (cost, complete) => complete ? measuredNumber(cost, 2) : null;
+  const canonicalCostPerPart = (cost, complete, parts) => complete && cost != null && parts > 0
+    ? measuredNumber(Number(cost) / parts, 2) : null;
+  const canonicalPct = (value, previous, complete) => complete && value != null && previous != null
+    ? pctChange(Number(value), Number(previous)) : null;
+  const energy = canonicalEnergy ? {
+    kwh: measuredNumber(measuredEnergy.kwh),
+    month_kwh: measuredNumber(measuredEnergy.month_kwh),
+    currency: measuredEnergy.currency || settings.currency || 'INR',
+    cost_basis: 'current_tariff_estimate',
+    rate_per_kwh: validRate,
+    cost_day: canonicalCost(measuredEnergy.cost_day, measuredEnergy.cost_complete),
+    cost_month: canonicalCost(measuredEnergy.cost_month, measuredEnergy.month_cost_complete),
+    day_vs_yesterday_pct: canonicalPct(measuredEnergy.kwh, measuredEnergy.yesterday_kwh,
+      measuredEnergy.energy_complete && measuredEnergy.yesterday_energy_complete),
+    month_vs_last_pct: canonicalPct(measuredEnergy.month_kwh, measuredEnergy.prev_month_kwh,
+      measuredEnergy.month_energy_complete && measuredEnergy.prev_month_energy_complete),
+    cost_per_part: canonicalCostPerPart(measuredEnergy.cost_day, measuredEnergy.cost_complete, producedParts),
+    cost_per_part_vs_yesterday_pct: canonicalPct(
+      canonicalCostPerPart(measuredEnergy.cost_day, measuredEnergy.cost_complete, producedParts),
+      canonicalCostPerPart(measuredEnergy.yesterday_cost, measuredEnergy.yesterday_cost_complete, yday.produced),
+      measuredEnergy.energy_complete && measuredEnergy.yesterday_energy_complete),
+    energy_complete: measuredEnergy.energy_complete === true,
+    month_energy_complete: measuredEnergy.month_energy_complete === true,
+    cost_complete: measuredEnergy.cost_complete === true,
+    month_cost_complete: measuredEnergy.month_cost_complete === true,
+    accepted_intervals: Number(measuredEnergy.accepted_intervals || 0),
+    rejected_intervals: Number(measuredEnergy.rejected_intervals || 0),
+    energy_source: 'canonical_energy_intervals'
+  } : {
+    kwh: Number(prod.energy_kwh.toFixed(3)),
+    month_kwh: Number((monthRes.rows[0]?.kwh || 0).toFixed(3)),
+    currency: settings.currency || 'INR',
+    rate_per_kwh: rate || null,
+    cost_day: rate ? Number((prod.energy_kwh * rate).toFixed(2)) : null,
+    cost_month: rate ? Number(((monthRes.rows[0]?.kwh || 0) * rate).toFixed(2)) : null,
+    day_vs_yesterday_pct: pctChange(prod.energy_kwh, yday.kwh),
+    month_vs_last_pct: pctChange(monthRes.rows[0]?.kwh || 0, monthRes.rows[0]?.prev_kwh || 0),
+    cost_per_part: perPart(prod.energy_kwh, producedParts),
+    cost_per_part_vs_yesterday_pct: pctChange(perPart(prod.energy_kwh, producedParts) || 0, perPart(yday.kwh, yday.produced) || 0)
+  };
 
   const alarmBy = Object.fromEntries(alarmRes.rows.map(r => [r.class, r]));
   const dtRows  = downtimeRes.rows;
@@ -403,21 +475,7 @@ exports.getFactoryDashboard = async (req) => {
       machines_measurable: fleet.machines_measurable
     },
 
-    energy: {
-      kwh:        Number(prod.energy_kwh.toFixed(3)),
-      month_kwh:  Number((monthRes.rows[0]?.kwh || 0).toFixed(3)),
-      currency:   settings.currency || 'INR',
-      rate_per_kwh: rate || null,
-      // null, not 0, when no tariff is configured — a zero here would
-      // read as "electricity is free" rather than "not set up yet"
-      cost_day:   rate ? Number((prod.energy_kwh * rate).toFixed(2)) : null,
-      cost_month: rate ? Number(((monthRes.rows[0]?.kwh || 0) * rate).toFixed(2)) : null,
-      // comparisons, null when there is nothing to compare against
-      day_vs_yesterday_pct:   pctChange(prod.energy_kwh, yday.kwh),
-      month_vs_last_pct:      pctChange(monthRes.rows[0]?.kwh || 0, monthRes.rows[0]?.prev_kwh || 0),
-      cost_per_part:          perPart(prod.energy_kwh, producedParts),
-      cost_per_part_vs_yesterday_pct: pctChange(perPart(prod.energy_kwh, producedParts) || 0, perPart(yday.kwh, yday.produced) || 0)
-    },
+    energy,
 
     // The comparison obeys the same selected shift as its headline and
     // trend. All shifts remain visible only when the filter is All.

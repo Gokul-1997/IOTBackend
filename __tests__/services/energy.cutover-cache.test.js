@@ -1,0 +1,33 @@
+jest.mock('../../src/redis',()=>{const r=require('../setup/fake-redis').createFakeRedis();r.status='ready';return r;});
+const redis=require('../../src/redis');
+const store=require('../../src/dashboard/energy-store');
+const svc=require('../../src/dashboard/energy.service');
+const meter=require('../../src/dashboard/energy-meter.service');
+const ctrl=require('../../src/dashboard/dashboard.controller');
+const response=()=>{const r={};for(const method of ['status','type','send','json'])r[method]=jest.fn(()=>r);return r;};
+beforeEach(async()=>{redis.status='ready';await redis.flushall();});
+afterEach(()=>jest.restoreAllMocks());
+test('a company cutover cannot reuse its unexpired legacy energy response',async()=>{
+  let ready=false;
+  jest.spyOn(store,'enabled').mockImplementation(async()=>ready);
+  const work=jest.spyOn(svc,'getEnergy').mockResolvedValueOnce({kwh:999}).mockResolvedValueOnce({kwh:2});
+  const req={user:{company_id:4},query:{from:'2026-10-28',to:'2026-10-28'}};
+  const old=response();await ctrl.energy(req,old);
+  expect(JSON.parse(old.send.mock.calls[0][0]).data.kwh).toBe(999);
+  ready=true;
+  const current=response();await ctrl.energy(req,current);
+  expect(JSON.parse(current.send.mock.calls[0][0]).data.kwh).toBe(2);
+  expect(work).toHaveBeenCalledTimes(2);
+});
+test('meter cutover also bypasses the unexpired legacy meter cache',async()=>{
+  let ready=false;
+  jest.spyOn(store,'enabled').mockImplementation(async()=>ready);
+  const work=jest.spyOn(meter,'meterReadings').mockResolvedValueOnce({summary:{kwh_used:999}}).mockResolvedValueOnce({summary:{kwh_used:2}});
+  const req={user:{company_id:4},query:{machine_id:19,range:'24h'}};
+  const old=response();await ctrl.energyMeter(req,old);
+  expect(old.json.mock.calls[0][0].data.summary.kwh_used).toBe(999);
+  ready=true;
+  const current=response();await ctrl.energyMeter(req,current);
+  expect(current.json.mock.calls[0][0].data.summary.kwh_used).toBe(2);
+  expect(work).toHaveBeenCalledTimes(2);
+});

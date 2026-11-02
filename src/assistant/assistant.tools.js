@@ -195,6 +195,7 @@ const TOOLS = {
             energy_kwh: num(summary.total_energy), efficiency_pct: num(summary.efficiency_pct),
             efficiency_means: 'run time ÷ (run + idle time)'
           },
+          ...(summary.energy_coverage && { energy_coverage: summary.energy_coverage }),
           by_machine: byMachine.slice(0, 25), machines_listed: Math.min(25, byMachine.length), machines_total: byMachine.length,
           by_shift: group(r => r.shift),
           by_day: p.days <= 31 ? group(r => String(r.hour || '').slice(0, 6)).map(({ name, parts }) => ({ day: name, parts })) : undefined
@@ -437,8 +438,15 @@ const TOOLS = {
       const k = d.kpis || {};
       const source = { report: 'Energy Dashboard', period: { from: p.from, to: p.to }, filters: { machine: machine?.name ?? null, shift: null },
                        view: `/energy-dashboard?${query({ from: p.from, to: p.to, machine_id: machine?.id })}`, download: null };
+      const coverage = d.coverage ? { ...d.coverage, machines: d.coverage.machines,
+        reporting_energy: d.coverage.reporting, tariff_set: d.coverage.tariff_configured } : null;
+      const measurement = {
+        coverage, energy_source: d.energy_source || null, by_shift_source: d.by_shift_source || null,
+        cost_basis: d.cost_basis || null
+      };
       if (k.total_kwh == null) {
-        return { data: { report: 'Energy', period: source.period, filters: source.filters, records: 0, note: d.coverage?.note || null }, source };
+        return { data: { report: 'Energy', period: source.period, filters: source.filters, records: 0,
+          ...measurement, note: d.coverage?.note || null }, source };
       }
       return {
         data: {
@@ -446,7 +454,7 @@ const TOOLS = {
           totals: { kwh: k.total_kwh, cost: k.total_cost, kwh_per_part: k.kwh_per_part, parts: k.total_produced,
                     operating_hours: hours(k.total_operating_seconds), kwh_vs_previous_day_pct: k.kwh_vs_yesterday_pct,
                     overload_alerts: k.overload_alerts, overload_limit_set: k.overload_limit_set },
-          coverage: d.coverage ? { machines: d.coverage.machines, reporting_energy: d.coverage.reporting, tariff_set: d.coverage.tariff_configured } : null,
+          ...measurement,
           top_consumers: (d.top_consumers || []).map(m => ({ name: m.machine_serial_no, kwh: m.kwh, cost: m.cost, kwh_per_part: m.kwh_per_part })),
           by_shift: (d.by_shift || []).slice(0, 6).map(x => ({ shift: x.shift_name, kwh: x.kwh, run_hours: hours(x.run_seconds), parts: x.produced }))
         },

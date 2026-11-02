@@ -478,7 +478,7 @@ describe('maintenance dashboard — Fanuc battery diagnostics and data isolation
     const now = Date.parse('2026-10-28T06:30:00Z');
     const result = svc.supplyOf({ read_at: new Date(now + 1000), v1n: 'Infinity', v12: 'NaN', v2n: 0 }, now);
     expect(result.stale).toBe(true);
-    expect(result.ln).toMatchObject({ v1n: null, v2n: 0 });
+    expect(result.ln).toMatchObject({ v1n: null, v2n: null });
     expect(result.ll.v12).toBeNull();
   });
 });

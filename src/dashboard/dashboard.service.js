@@ -2,6 +2,7 @@ const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { fleetPage } = require('./fleet-page');
 const { machineOrder } = require('../lib/machine-order');
+const energyStore = require('./energy-store');
 
 /** Return a Date whose .getFullYear/.getHours/… reflect IST, regardless of server TZ */
 function nowIST() {
@@ -587,7 +588,12 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
        uses accepted consecutive intervals, with the Energy dashboard's
        reset and impossible-rise guards; latest minus first would fabricate
        consumption after a reset or one bad reading. */
-    const { rows: energyRows } = await db.query(`
+    const canonicalEnergy = await energyStore.enabled(companyId);
+    const energyAsOf = new Date();
+    const measuredEnergy = canonicalEnergy
+      ? await energyStore.machineEnergy({ companyId, machineId, start: detailShiftStart,
+        end: detailShiftEnd, asOf: energyAsOf })
+      : (await db.query(`
       WITH readings AS (
         SELECT observed_at, energy,
                LAG(energy) OVER w AS prev_energy,
@@ -624,12 +630,12 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
                  AND energy > 0 AND energy < 'Infinity'::float8
                ORDER BY observed_at DESC, received_at DESC LIMIT 1) AS total_energy
         FROM deltas
-    `, [machineId, detailShiftStart, detailShiftEnd, companyId, new Date()]);
-    const measuredEnergy = energyRows[0] || {};
+    `, [machineId, detailShiftStart, detailShiftEnd, companyId, energyAsOf])).rows[0] || {};
     const currentEnergy = measuredEnergy.total_energy == null ? null : Number(measuredEnergy.total_energy);
     const shiftEnergyKwh = measuredEnergy.shift_kwh == null ? null : Number(measuredEnergy.shift_kwh);
     const rejectedEnergyIntervals = Number(measuredEnergy.rejected_intervals || 0);
-    const energyComplete = Number(measuredEnergy.accepted_intervals || 0) > 0 && rejectedEnergyIntervals === 0;
+    const energyComplete = measuredEnergy.energy_complete ??
+      (Number(measuredEnergy.accepted_intervals || 0) > 0 && rejectedEnergyIntervals === 0);
 
  
     /* ================= QUALITY ================= */

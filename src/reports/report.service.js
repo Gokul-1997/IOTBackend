@@ -1,6 +1,7 @@
 const db = require('../db');
 const { plantSql, sharedEntityPlantSql } = require('../lib/read-scope');
 const { shiftDateWindow } = require('../dashboard/production-window');
+const energyStore = require('../dashboard/energy-store');
 
 /* ─── helpers ─── */
 
@@ -65,6 +66,7 @@ exports.getOperators = async (company_id, machine_id) => {
 ───────────────────────────────────────────────────────── */
 
 exports.productionData = async (company_id, date_from, date_to, machine_id, shift_id, operator_id) => {
+  const canonicalEnergy = await energyStore.enabled(company_id);
   const params = [company_id, date_from, date_to];
   const conds  = [];
 
@@ -78,6 +80,7 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
   const { rows } = await db.query(`
     WITH ${OPERATOR_CTE}, report_clock AS (SELECT ${asOf} AS as_of)
     SELECT
+      ${canonicalEnergy ? 'p.machine_id, p.shift_id, p.hour_start,' : ''}
       m.machine_serial_no                                                        AS machine,
       COALESCE(op.operator_name, '--')                                           AS operator,
       COALESCE(s.shift_code, '--')                                               AS shift,
@@ -124,6 +127,10 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
     ORDER BY ${machineOrder('m.machine_serial_no')}, p.hour_start
   `, params);
 
+  const energyCoverage = canonicalEnergy
+    ? await energyStore.attachReportEnergy(company_id, rows, { date_from, date_to, machine_id, shift_id })
+    : null;
+  const measuredRows = rows.filter(r => r.energy_kwh != null);
   const totalParts  = rows.reduce((a, r) => a + Number(r.produced_qty || 0), 0);
   const totalRunSec = rows.reduce((a, r) => a + Number(r.run_seconds   || 0), 0);
   const totalEnergy = rows.reduce((a, r) => a + Number(r.energy_kwh    || 0), 0);
@@ -132,7 +139,8 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
 
   return {
     rows: rows.map(r => ({
-      ...r,
+      ...Object.fromEntries(Object.entries(r).filter(([key]) =>
+        !canonicalEnergy || !['machine_id', 'shift_id', 'hour_start'].includes(key))),
       run_time:   secToHHMM(r.run_seconds),
       idle_time:  secToHHMM(r.idle_seconds),
       setup_time: secToHHMM(r.manual_seconds),
@@ -141,8 +149,14 @@ exports.productionData = async (company_id, date_from, date_to, machine_id, shif
     summary: {
       total_parts:    totalParts,
       run_hours:      (totalRunSec / 3600).toFixed(2),
-      total_energy:   totalEnergy.toFixed(2),
-      efficiency_pct: efficiency
+      total_energy:   canonicalEnergy && !measuredRows.length ? null : totalEnergy.toFixed(2),
+      efficiency_pct: efficiency,
+      ...(canonicalEnergy && { energy_coverage: energyCoverage || {
+        rows: rows.length, rows_with_energy: measuredRows.length,
+        accepted_intervals: rows.reduce((n, r) => n + Number(r.accepted_intervals || 0), 0),
+        rejected_intervals: rows.reduce((n, r) => n + Number(r.rejected_intervals || 0), 0),
+        energy_complete: rows.length > 0 && rows.every(r => r.energy_complete === true)
+      } })
     }
   };
 };

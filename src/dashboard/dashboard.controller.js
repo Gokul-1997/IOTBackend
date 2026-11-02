@@ -15,6 +15,7 @@ const operatorSvc   = require('./operator.service');
 const oeeDashSvc    = require('./oee.dashboard.service');
 const energySvc     = require('./energy.service');
 const meterSvc      = require('./energy-meter.service');
+const energyStore = require('./energy-store');
 const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
@@ -41,7 +42,8 @@ const { current: readAuthorization } = require('../lib/read-scope');
  */
 async function sendShared(res, name, req, compute, { live = false } = {}) {
   const ttl = live ? dashCache.LIVE_TTL : dashCache.ttlFor(req.query);
-  const body = await dashCache.json(name, req.user.company_id, req.query, ttl,
+  const params=name==='energy'?{...req.query,energy_pipeline:await energyStore.enabled(req.user.company_id)?'v2':'legacy'}:req.query;
+  const body = await dashCache.json(name, req.user.company_id, params, ttl,
     async () => ({ status: 'success', data: await compute() }));
   return res.type('application/json').send(body);
 }
@@ -110,7 +112,7 @@ exports.machineSpindle = async (req, res) => {
 async function sendMeter(res, args) {
   try {
     const data = await dashCache.remember('energy:meter', args.companyId,
-      { machineId: args.machineId, range: args.range }, dashCache.LIVE_TTL,
+      { machineId: args.machineId, range: args.range, energy_pipeline:await energyStore.enabled(args.companyId)?'v2':'legacy' }, dashCache.LIVE_TTL,
       () => meterSvc.meterReadings(args));
     if (!data) return res.status(404).json({ status: 'error', message: 'Machine not found' });
     return res.json({ status: 'success', data });
