@@ -98,6 +98,18 @@ test('future observations are absent measurements, including when another channe
     field_observed_at: { v1n: NOW - 1000, kwh_total: null } });
 });
 
+test('THD channels preserve measured zero and independent freshness without filling unknown phases', async () => {
+  given({ latest: [{ field_values: { thd_v1n: 0, thd_i2: 3.4, thd_i3: null },
+    field_observed_at: { thd_v1n: NOW - 1000, thd_i2: NOW - 180000, thd_i3: NOW - 1000 } }] });
+  const result = await service.meterReadings({ companyId: 4, nowMs: NOW });
+  expect(result.latest).toMatchObject({ thd_v1n: 0, thd_v2n: null, thd_i2: 3.4, thd_i3: null,
+    field_stale: { thd_v1n: false, thd_v2n: null, thd_i2: true, thd_i3: null },
+    field_observed_at: { thd_v1n: NOW - 1000, thd_v2n: null, thd_i2: NOW - 180000, thd_i3: null } });
+  const latestQuery = mockDb.calls()[1].text;
+  expect(latestQuery).toContain("('thd_v1n', (l.field_observed_at ->> 'thd_v1n')::double precision)");
+  expect(latestQuery).toContain('MAX(r.read_at) FILTER (WHERE r.thd_i3 IS NOT NULL');
+});
+
 test('SQL field names are validated before building projection or legacy queries', () => {
   expect(() => service.latestMeterFieldsSQL(['v1n); DROP TABLE machines; --'])).toThrow('Invalid meter fields');
   expect(() => service.latestMeterFieldsSQL([])).toThrow('Invalid meter fields');

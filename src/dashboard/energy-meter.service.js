@@ -62,7 +62,9 @@ const READING_COLUMNS = [
   'kw_demand_max', 'kw_demand_min', 'kvar_demand_max', 'kvar_demand_min', 'kva_demand_max',
   'v1n_max', 'v2n_max', 'v3n_max', 'v12_max', 'v23_max', 'v31_max', 'i1_max', 'i2_max', 'i3_max',
   'kwh_import', 'kwh_export', 'kwh_total', 'kvarh_import', 'kvarh_export', 'kvarh_total', 'kvah_total',
-  'run_hours', 'aux_interrupts'
+  'run_hours', 'aux_interrupts',
+  'thd_v1n', 'thd_v2n', 'thd_v3n', 'thd_v12', 'thd_v23', 'thd_v31',
+  'thd_i1', 'thd_i2', 'thd_i3'
 ];
 
 const httpError = (message, status) => Object.assign(new Error(message), { status });

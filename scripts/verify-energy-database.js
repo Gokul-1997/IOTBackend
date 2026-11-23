@@ -41,10 +41,10 @@ async function verify(client,{callback}={}) {
     assert(columns.every(c=>/^[a-z0-9_]+$/.test(c)));
     await client.query(`CREATE TABLE energy_meter_readings(machine_id INT NOT NULL,company_id INT,
       read_at TIMESTAMPTZ NOT NULL,received_at TIMESTAMPTZ DEFAULT NOW(),standalone BOOLEAN DEFAULT FALSE,
-      standalone_fields TEXT[] DEFAULT '{}',${columns.map(c=>`${c} DOUBLE PRECISION`).join(',')},PRIMARY KEY(machine_id,read_at))`);
+      standalone_fields TEXT[] DEFAULT '{}',${columns.filter(c=>!c.startsWith('thd_')).map(c=>`${c} DOUBLE PRECISION`).join(',')},PRIMARY KEY(machine_id,read_at))`);
     const {rows:[ext]}=await client.query("SELECT extversion FROM pg_extension WHERE extname='timescaledb'");
     if(ext)await client.query("SELECT create_hypertable('energy_meter_readings','read_at',chunk_time_interval=>INTERVAL '7 days')");
-    for(const file of ['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql']) {
+    for(const file of ['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql','066_energy_meter_thd.sql']) {
       await client.query(partsOf(fs.readFileSync(path.join(ROOT,'src/migrations',file),'utf8')).body);
     }
     reports.push({check:'schema',timescaledb:ext?.extversion||null,passed:true});
@@ -64,6 +64,22 @@ async function verify(client,{callback}={}) {
     assert.equal(latest.field_values.v_ll_avg,415);
     assert.equal(Number(latest.field_observed_at.kw_total),Date.parse('2026-10-28T10:00:00+05:30'));
     reports.push({check:'sparse_latest_event_time',passed:true});
+    const thdMigration=partsOf(fs.readFileSync(path.join(ROOT,'src/migrations/066_energy_meter_thd.sql'),'utf8')).body;
+    await client.query(thdMigration); // Reapplying the additive DDL must be harmless.
+    const {rows:thdColumns}=await client.query(`SELECT column_name,data_type,is_nullable
+      FROM information_schema.columns WHERE table_schema=$1 AND table_name='energy_meter_readings'
+      AND column_name LIKE 'thd_%'`,[schema]);
+    assert.equal(thdColumns.length,9);
+    assert(thdColumns.every(column=>column.data_type==='real'&&column.is_nullable==='YES'));
+    await client.query(`INSERT INTO energy_meter_readings(company_id,machine_id,read_at,thd_v1n,thd_i2)
+      VALUES(4,19,'2026-10-28T10:00:56+05:30',0,3.4)`);
+    const {rows:[thdLatest]}=await client.query('SELECT * FROM energy_meter_latest WHERE company_id=4 AND machine_id=19');
+    assert.equal(thdLatest.field_values.thd_v1n,0);
+    assert(Math.abs(thdLatest.field_values.thd_i2-3.4)<0.000001);
+    assert.equal(thdLatest.field_values.thd_i3,undefined);
+    assert.equal(Number(thdLatest.field_observed_at.thd_v1n),Date.parse('2026-10-28T10:00:56+05:30'));
+    assert.equal(thdLatest.field_values.kwh_total,102);
+    reports.push({check:'nullable_THD_schema_idempotency_and_latest_projection',passed:true});
     // Application modules receive this explicit test client, never .env pools.
     inject(path.join(ROOT,'src/db.js'),{query:(...args)=>client.query(...args)});
     inject(path.join(ROOT,'src/dashboard/cache.js'),{touch:()=>{}});

@@ -7,6 +7,9 @@ const {run,sha}=require('../../scripts/migrate');
 const {apply,files}=require('../../scripts/apply-energy-migrations');
 const checksum=sha(fs.readFileSync(path.join(__dirname,'../../src/migrations/063_sparse_energy_observations.sql'),'utf8'));
 beforeEach(()=>run.mockClear());
+test('the selected upgrade includes the additive THD storage migration',()=>{
+  expect(files).toEqual(['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql','066_energy_meter_thd.sql']);
+});
 test('refuses a missing or drifted sparse-source prerequisite before applying anything',async()=>{
   const pool={query:jest.fn(async()=>({rows:[{checksum:'wrong'}]}))};
   await expect(apply(pool)).rejects.toThrow('verified checksum');

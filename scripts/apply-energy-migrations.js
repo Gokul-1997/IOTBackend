@@ -7,7 +7,7 @@ const path=require('node:path');
 const os=require('node:os');
 const {Pool}=require('pg');
 const {run,sha}=require('./migrate');
-const files=['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql'];
+const files=['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql','066_energy_meter_thd.sql'];
 async function apply(pool,{write=false,log=console}={}) {
   const prerequisite='063_sparse_energy_observations.sql';
   const root=path.join(__dirname,'../src/migrations');
