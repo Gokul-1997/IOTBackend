@@ -34,6 +34,15 @@ function formatDuration(totalSeconds) {
   return `${h}:${m}:${s}`;
 }
 
+// This controller value has no agreed reason-code or duration mapping yet.
+// Preserve a real numeric zero and leave missing/nonfinite values unknown.
+function controllerDowntimeValue(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
 
   const realNow     = new Date();                      // real epoch for comparisons
@@ -688,7 +697,9 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
      */
 
     const { rows: liveRows } = await db.query(`
-      SELECT machine_status, spindle_load, feed_rate, received_at, alarm, mode
+      SELECT machine_status, spindle_load, feed_rate, received_at, alarm, mode,
+             to_jsonb(telemetry_raw)->>'controller_downtime_value' AS controller_downtime_value,
+             to_jsonb(telemetry_raw)->>'device_time' AS controller_downtime_observed_at
       FROM telemetry_raw
       WHERE machine_id = $1
         AND company_id = $2
@@ -709,10 +720,10 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const { rows: activeAlarms } = await db.query(`
       SELECT alarm_code, alarm_type, message, severity, started_at
         FROM machine_alarms
-       WHERE machine_id = $1 AND ended_at IS NULL
+       WHERE machine_id = $1 AND ended_at IS NULL AND company_id = $2
        ORDER BY started_at DESC
        LIMIT 5
-    `, [machineId]);
+    `, [machineId, companyId]);
 
     /* ================= ACCEPTED QTY ================= */
     /*
@@ -748,6 +759,13 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const isOnline   = receivedAtRT && freshDiffRT !== null && freshDiffRT >= 0 && freshDiffRT <= OFFLINE_THRESHOLD_RT;
     const isRunning  = isOnline && ['RUN', 'RUNNING', 'CUTTING'].includes(rawStatus);
     const isIdle     = isOnline && !isRunning && rawStatus !== '';
+
+    // Receipt freshness alone cannot make an old controller reading current.
+    // Expose only this packet's value with its real device observation time.
+    const downtimeValue = controllerDowntimeValue(live.controller_downtime_value);
+    const downtimeObservedAt = controllerDowntimeValue(live.controller_downtime_observed_at);
+    const downtimeCurrent = isOnline && downtimeValue !== null && Number.isSafeInteger(downtimeObservedAt)
+      && nowSecRT - downtimeObservedAt >= 0 && nowSecRT - downtimeObservedAt <= OFFLINE_THRESHOLD_RT;
 
     /* Derived status — matches dashboard card logic */
     const detailStatus = !receivedAtRT
@@ -853,6 +871,8 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         // the same rule the machine list uses for its red card
         alarm:           !!live.alarm,
         active_alarms:   activeAlarms,
+        controller_downtime_value: downtimeCurrent ? downtimeValue : null,
+        controller_downtime_observed_at: downtimeCurrent ? downtimeObservedAt : null,
         mode:            live?.mode || null,
         spindle_load:    isOnline ? Number(live?.spindle_load || 0) : 0,
         feed_rate:       isOnline ? Number(live?.feed_rate    || 0) : 0,

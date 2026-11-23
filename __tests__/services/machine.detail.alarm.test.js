@@ -55,7 +55,8 @@ test('the open alarms are this machine\'s, newest first, bounded', async () => {
   given({ alarm: true, open: [OPEN_ALARM] });
   await svc.machineDetail(1, 25, 4);
   const q = calls.find(c => /FROM machine_alarms\s+WHERE machine_id = \$1 AND ended_at IS NULL/.test(c.text));
-  expect(q.params).toEqual([25]);
+  expect(q.params).toEqual([25, 4]);
+  expect(q.text).toContain('AND company_id = $2');
   expect(q.text).toMatch(/ORDER BY started_at DESC\s+LIMIT 5/);
 });
 
