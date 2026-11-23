@@ -6,6 +6,7 @@ let dir;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iot-migration-test-')); });
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 const log = { log: jest.fn(), error: jest.fn() };
+beforeEach(() => { log.log.mockClear(); log.error.mockClear(); });
 function fixture({ done = [], exists = true, failBody = false, failLedger = false } = {}) {
   const calls = [];
   const client = { release: jest.fn(), query: jest.fn(async (sql, values) => {
@@ -69,6 +70,63 @@ test('checksum drift refuses upgrades instead of hiding changed historical migra
   const f = fixture({ done: [{ filename: '040_safe.sql', checksum: sha('SELECT 2;') }] });
   await expect(run(f.pool, { dir, log })).rejects.toThrow('Applied migrations changed');
   expect(f.calls.map(c => c.sql)).not.toContain('BEGIN');
+});
+
+const thdFile = '066_energy_meter_thd.sql';
+const originalThdChecksum = 'bff6cbcbed006d5f';
+const fixedThdSQL = () => fs.readFileSync(path.join(__dirname, '../../src/migrations', thdFile), 'utf8');
+const copyThd = (sql = fixedThdSQL()) => fs.writeFileSync(path.join(dir, thdFile), sql);
+
+test.each([{ args: [] }, { args: ['--status'] }, { args: ['--dry'] }])('an applied original THD migration remains compatible without schema/ledger rewrites: %j', async ({ args }) => {
+  copyThd();
+  const f = fixture({ done: [{ filename: thdFile, checksum: originalThdChecksum }] });
+  expect(await run(f.pool, { args, dir, log })).toBe(0);
+  expect(log.log).toHaveBeenCalledWith(`applied (compatible original checksum) ${thdFile}`);
+  expect(f.calls.some(call => call.sql === 'BEGIN' || call.sql.includes('ALTER TABLE energy_meter_readings') ||
+    call.sql.startsWith('INSERT INTO schema_migrations') || call.sql.startsWith('UPDATE schema_migrations'))).toBe(false);
+  if (args.length) expect(f.calls.every(call => call.sql.startsWith('SELECT '))).toBe(true);
+});
+
+test('a failed THD attempt leaves no marker and retries the fixed DDL atomically', async () => {
+  copyThd();
+  const failed = fixture();
+  const query = failed.client.query.getMockImplementation();
+  failed.client.query.mockImplementation(async (sql, values) => {
+    const result = await query(sql, values);
+    if (sql.includes('ALTER TABLE energy_meter_readings')) throw Error('DDL failed');
+    return result;
+  });
+  await expect(run(failed.pool, { dir, log })).rejects.toThrow(`Migration ${thdFile} failed`);
+  expect(failed.calls.map(call => call.sql)).toContain('ROLLBACK');
+  expect(failed.calls.some(call => call.sql.startsWith('INSERT INTO schema_migrations'))).toBe(false);
+  const retry = fixture();
+  expect(await run(retry.pool, { dir, log })).toBe(0);
+  const body = retry.calls.find(call => call.sql.includes('ALTER TABLE energy_meter_readings'));
+  expect(body.sql).toBe(partsOf(fixedThdSQL()).body);
+  expect(retry.calls.find(call => call.sql.startsWith('INSERT INTO schema_migrations')).values)
+    .toEqual([thdFile, sha(fixedThdSQL()), expect.any(Number)]);
+  expect(retry.calls.map(call => call.sql)).toContain('COMMIT');
+});
+
+test.each(['unknown ledger checksum', 'further source edit'])('THD compatibility rejects %s before schema changes', async failure => {
+  copyThd(fixedThdSQL() + (failure === 'further source edit' ? '\n-- unexpected edit\n' : ''));
+  const done = [{ filename: thdFile, checksum: failure === 'unknown ledger checksum' ? 'unrecognized' : originalThdChecksum }];
+  const f = fixture({ done });
+  await expect(run(f.pool, { dir, log })).rejects.toThrow('Applied migrations changed');
+  expect(f.calls.map(call => call.sql)).not.toContain('BEGIN');
+  for (const option of ['--dry', '--status']) {
+    const readOnly = fixture({ done });
+    expect(await run(readOnly.pool, { args: [option], dir, log })).toBe(1);
+    expect(readOnly.calls.every(call => call.sql.startsWith('SELECT '))).toBe(true);
+    expect(log.log).toHaveBeenCalledWith(`CHANGED ${thdFile}`);
+  }
+});
+
+test('THD compatibility never applies to a different historical filename', async () => {
+  fs.writeFileSync(path.join(dir, '040_safe.sql'), fixedThdSQL());
+  const f = fixture({ done: [{ filename: '040_safe.sql', checksum: originalThdChecksum }] });
+  await expect(run(f.pool, { dir, log })).rejects.toThrow('Applied migrations changed');
+  expect(f.calls.map(call => call.sql)).not.toContain('BEGIN');
 });
 test('enum preamble is separated while function bodies retain their BEGIN/END', () => {
   const p = partsOf("ALTER TYPE state ADD VALUE IF NOT EXISTS 'NEW';\nBEGIN;\nDO $$\nBEGIN\n RAISE NOTICE 'ok';\nEND $$;\nCOMMIT;\n");

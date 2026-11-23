@@ -10,6 +10,12 @@ const DIR = path.join(__dirname, '..', 'src', 'migrations');
 const RETIRED = new Set(['003_clean_reset.sql']);
 const LOCK = [742381, 1];
 const sha = sql => crypto.createHash('sha256').update(sql).digest('hex').slice(0, 16);
+// 066's original column grants failed on TimescaleDB compressed parents. The
+// fixed grant changes no successful installation's schema. Accept only this
+// exact historical/current pair; all other migration edits remain drift.
+const COMPATIBLE_CHECKSUMS = {
+  '066_energy_meter_thd.sql': { previous: 'bff6cbcbed006d5f', current: 'e62a645b1e94e1d5' }
+};
 
 function optionsOf(args) {
   const options = { status: false, dry: false, baseline: false, through: null };
@@ -63,16 +69,22 @@ async function run(pool, { args = [], dir = DIR, log = console } = {}) {
     const exists = await client.query("SELECT to_regclass('public.schema_migrations') AS name");
     const done = new Map(exists.rows[0]?.name
       ? (await client.query('SELECT filename, checksum FROM schema_migrations')).rows.map(r => [r.filename, r.checksum]) : []);
-    const drifted = all.filter(f => done.has(f) && done.get(f) !== sha(fs.readFileSync(path.join(dir, f), 'utf8')));
+    const checksums = new Map(all.map(f => [f, sha(fs.readFileSync(path.join(dir, f), 'utf8'))]));
+    const compatible = new Set(all.filter(f => {
+      const pair = COMPATIBLE_CHECKSUMS[f];
+      return pair && done.get(f) === pair.previous && checksums.get(f) === pair.current;
+    }));
+    const drifted = all.filter(f => done.has(f) && done.get(f) !== checksums.get(f) && !compatible.has(f));
     const pending = all.filter(f => !done.has(f) && (!options.through || f <= options.through));
     if (options.status || options.dry) {
       log.log(`applied: ${done.size}   pending in selected range: ${pending.length}`);
-      for (const f of all) log.log(`${done.has(f) ? (drifted.includes(f) ? 'CHANGED' : 'applied') : 'PENDING'} ${f}`);
+      for (const f of all) log.log(`${done.has(f) ? (drifted.includes(f) ? 'CHANGED' : compatible.has(f) ? 'applied (compatible original checksum)' : 'applied') : 'PENDING'} ${f}`);
       if (done.has('003_clean_reset.sql')) log.log('retired: 003_clean_reset.sql (historical record retained; never run again)');
       if (drifted.length) log.error('Applied migration checksums changed. Write a new migration.');
       return drifted.length ? 1 : 0;
     }
     if (drifted.length) throw new Error(`Applied migrations changed: ${drifted.join(', ')}. Write a new migration.`);
+    for (const filename of compatible) log.log(`applied (compatible original checksum) ${filename}`);
     for (const filename of pending) {
       const sql = fs.readFileSync(path.join(dir, filename), 'utf8');
       const t0 = Date.now();

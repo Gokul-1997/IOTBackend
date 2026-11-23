@@ -171,12 +171,30 @@ that explicit connection and do not silently load the production `.env`.
 
 1. Take and verify a database backup and enough free-space headroom. Run the
    read-only auditor. Verify migration 063/checksum and the owner audit.
-   Preview then install only the two additive migrations:
+   Preview then install the additive migrations 064–066:
 
    ```sh
    node scripts/apply-energy-migrations.js
    node scripts/apply-energy-migrations.js --apply
    ```
+
+   Migration 066 adds the nullable THD channels for the nested energy payload;
+   install it before deploying the updated API and collector. On older
+   TimescaleDB versions, a column-level GRANT is incorrectly forwarded to the
+   compressed parent even though ADD COLUMN updates only compressed chunks.
+   If the earlier 066 failed with `column "thd_v1n" of relation
+   "_compressed_hypertable_..." does not exist`, pull the corrected code and
+   rerun the migration. Its schema changes and ledger entry are atomic, so a
+   failed attempt needs no manual ledger edit.
+
+   The corrected 066 tries the normal grant first. Only that legacy failure
+   uses transaction-local `timescaledb.restoring` around the grant, restoring
+   its previous value immediately afterward. It does not decompress history
+   or grant table-level UPDATE. The fallback requires a database superuser
+   or permission to set that parameter; otherwise the migration rolls back
+   with administrator guidance. Successful installations of the exact
+   original 066 remain accepted by the runner without rewriting their ledger
+   or executing the migration again; other checksum drift is still rejected.
 
 2. Deploy the collector with the lossless typed-field/late-reading/batch fixes.
    Deploy API/web/mobile code with `ENERGY_V2_ENABLED=false`. Check collector
@@ -245,6 +263,7 @@ enabled during application rollback.
 ```sh
 npm test -- --runInBand
 node scripts/verify-energy-database.js
+node scripts/verify-energy-thd-migration.js
 ```
 
 The second command requires `ENERGY_TEST_DATABASE_URL`; it creates an isolated
@@ -253,6 +272,11 @@ sparse timestamps, high-water/paged replay, zero/NULL, tenant separation,
 shared-reader parity and source deletion repair. It supports plain PostgreSQL
 for local tests and installed TimescaleDB for actual compatibility checks.
 The collector has `tools/verify-ingestion.mjs` and `tools/verify-meter-batch.mjs`.
+The THD verifier also requires an explicit `ENERGY_TEST_DATABASE_URL` pointing
+to a disposable administrator test database. It checks compressed history and
+collector permissions, and emulates the legacy GRANT failure on newer
+TimescaleDB to exercise fallback, setting restoration and permission-denied
+rollback. Its temporary schema, roles and event trigger always roll back.
 
 After materialization, re-run the auditor and `EXPLAIN ANALYZE` on representative
 one-day/seven-day/monthly queries. Check actual chunk pruning, indexes, materialized
@@ -280,3 +304,5 @@ dirty-bucket fallback separately when investigating delayed corrections.
 - [Gap-fill semantics and NULL versus interpolation](https://www.tigerdata.com/docs/reference/timescaledb/hyperfunctions/time_bucket_gapfill/time_bucket_gapfill)
 - [Retention with continuous aggregates](https://www.tigerdata.com/docs/learn/data-lifecycle/data-retention/data-retention-with-continuous-aggregates)
 - [Time bucket boundaries](https://www.tigerdata.com/docs/learn/data-lifecycle/time-buckets/about-time-buckets)
+- [TimescaleDB 2.19 GRANT propagation](https://github.com/timescale/timescaledb/blob/2.19.3/src/process_utility.c)
+- [TimescaleDB 2.19 compressed-column propagation](https://github.com/timescale/timescaledb/blob/2.19.3/tsl/src/compression/create.c)

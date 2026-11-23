@@ -44,8 +44,25 @@ async function verify(client,{callback}={}) {
       standalone_fields TEXT[] DEFAULT '{}',${columns.filter(c=>!c.startsWith('thd_')).map(c=>`${c} DOUBLE PRECISION`).join(',')},PRIMARY KEY(machine_id,read_at))`);
     const {rows:[ext]}=await client.query("SELECT extversion FROM pg_extension WHERE extname='timescaledb'");
     if(ext)await client.query("SELECT create_hypertable('energy_meter_readings','read_at',chunk_time_interval=>INTERVAL '7 days')");
-    for(const file of ['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql','066_energy_meter_thd.sql']) {
+    for(const file of ['064_energy_interval_pipeline.sql','065_energy_continuous_aggregates.sql']) {
       await client.query(partsOf(fs.readFileSync(path.join(ROOT,'src/migrations',file),'utf8')).body);
+    }
+    if(ext) {
+      // Exercise ADD COLUMN while actual historical chunks are compressed,
+      // before migration 066 runs. This old reading supplies no energy counter
+      // and cannot change the expected consumption totals below.
+      await client.query(`INSERT INTO energy_meter_readings(company_id,machine_id,read_at,kw_total)
+        VALUES(5,21,'2026-08-01T12:00:00Z',3)`);
+      await client.query("SELECT compress_chunk(show_chunks('energy_meter_readings'))");
+      assert.equal((await client.query(`SELECT COUNT(*)::int n FROM timescaledb_information.chunks
+        WHERE hypertable_schema=$1 AND hypertable_name='energy_meter_readings' AND is_compressed`,[schema])).rows[0].n,1);
+    }
+    await client.query(partsOf(fs.readFileSync(path.join(ROOT,'src/migrations/066_energy_meter_thd.sql'),'utf8')).body);
+    if(ext) {
+      const {rows:[historical]}=await client.query(`SELECT kw_total,thd_v1n FROM energy_meter_readings
+        WHERE machine_id=21 AND read_at='2026-08-01T12:00:00Z'`);
+      assert.equal(historical.kw_total,3);
+      assert.equal(historical.thd_v1n,null);
     }
     reports.push({check:'schema',timescaledb:ext?.extversion||null,passed:true});
     await client.query(`INSERT INTO energy_meter_readings(company_id,machine_id,read_at,kwh_total,kw_total)
