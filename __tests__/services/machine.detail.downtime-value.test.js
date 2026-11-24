@@ -95,3 +95,20 @@ test('a foreign machine cannot expose a controller value or query its telemetry'
   expect(await service.machineDetail(null, 19, 99)).toBeNull();
   expect(calls.some(call => TELEMETRY.test(call.text))).toBe(false);
 });
+
+test('a configured machine code resolves by company/code rather than by database reason ID', async () => {
+  given(4);
+  answers.push([/FROM downtime_reasons/, [{ id: 25, code: '4', name: 'TEA', category: 'PLANNED' }]]);
+  const data = await service.machineDetail(null, 19, 4);
+  expect(data.live.controller_downtime_reason).toEqual({ id: 25, code: '4', name: 'TEA', category: 'PLANNED' });
+  const query = calls.find(call => /FROM downtime_reasons/.test(call.text));
+  expect(query.params).toEqual([4, '4']);
+  expect(query.text).toContain('BTRIM(code)=$2');
+});
+
+test('zero remains a clear signal even if the configured catalogue contains code zero', async () => {
+  given(0);
+  const data = await service.machineDetail(null, 19, 4);
+  expect(data.live.controller_downtime_reason).toBeNull();
+  expect(calls.some(call => /FROM downtime_reasons/.test(call.text))).toBe(false);
+});

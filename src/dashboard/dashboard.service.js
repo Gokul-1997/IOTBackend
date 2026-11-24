@@ -766,6 +766,13 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
     const downtimeObservedAt = controllerDowntimeValue(live.controller_downtime_observed_at);
     const downtimeCurrent = isOnline && downtimeValue !== null && Number.isSafeInteger(downtimeObservedAt)
       && nowSecRT - downtimeObservedAt >= 0 && nowSecRT - downtimeObservedAt <= OFFLINE_THRESHOLD_RT;
+    let downtimeReason = null;
+    if (downtimeCurrent && Number.isSafeInteger(downtimeValue) && downtimeValue > 0) {
+      const { rows } = await db.query(`SELECT id, code, name, category FROM downtime_reasons
+        WHERE is_active AND (company_id=$1 OR company_id IS NULL) AND BTRIM(code)=$2
+        ORDER BY company_id IS NULL, id LIMIT 1`, [companyId, String(downtimeValue)]);
+      downtimeReason = rows[0] || null;
+    }
 
     /* Derived status — matches dashboard card logic */
     const detailStatus = !receivedAtRT
@@ -873,6 +880,7 @@ exports.machineDetail = async (plantId, machineId, companyId) => {
         active_alarms:   activeAlarms,
         controller_downtime_value: downtimeCurrent ? downtimeValue : null,
         controller_downtime_observed_at: downtimeCurrent ? downtimeObservedAt : null,
+        controller_downtime_reason: downtimeReason,
         mode:            live?.mode || null,
         spindle_load:    isOnline ? Number(live?.spindle_load || 0) : 0,
         feed_rate:       isOnline ? Number(live?.feed_rate    || 0) : 0,

@@ -55,6 +55,30 @@ journal are written by the new build only — let `journal.pending` reach 0 firs
 
 ## 3. API (Backend) and web app
 
+Controller-selected downtime reasons require migration
+`068_controller_downtime_events.sql`. It resolves positive integer machine
+signals against that company's active `downtime_reasons.code`, rather than
+using the raw number as a database reason ID. In S AND T's current catalogue,
+code `4` is TEA and code `6` is Inspection; the PMC alarm message is a separate
+observation. Zero clears the selection even if the catalogue contains code 0.
+
+The trigger stores only observed stopped intervals, caps silent gaps at 60
+seconds, ignores older replays, and gives manual entries precedence. Running
+packets with a retained reason code do not accrue downtime. Machine events
+appear in the existing Downtime Management and Reason Analysis queries.
+
+`scripts/backfill-controller-reasons.js` previews a bounded company/machine
+window by default. Its explicit `--apply` rebuilds only controller-derived
+events from saved telemetry, preserving manual events and other machines.
+It requires an explicit `REASON_DATABASE_URL`; no application `.env` is loaded.
+Always include `--company-id`, `--machine-id`, `--from` and `--to` (at most seven
+days and 100,000 observations). A larger existing event range is refused.
+
+Local repeatable verification uses `scripts/verify-controller-downtime.js`
+with a disposable `REASON_TEST_DATABASE_URL`. It verifies configured mapping,
+reason changes, resume, zero, tenant isolation, manual precedence, replay,
+and repeated backfill. All fixture changes roll back.
+
 ```bash
 cd Backend && git pull && npm ci --omit=dev && pm2 reload ecosystem.config.js --env production
 curl -s https://stmapi.stmcnc.com/health/ready     # {"ok":true,"db":true,"redis":true,…}
