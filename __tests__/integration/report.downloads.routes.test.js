@@ -66,6 +66,16 @@ beforeEach(async () => {
 });
 
 describe('a small report downloads as the screen shows it', () => {
+  test('PDF uses the same tenant, dates, filters and selected columns', async () => {
+    mockDb.queueResponse(rows([shiftRow('VMC19', '62.10')]));
+    const res = await request(app).get('/api/reports/shift-oee').query({ format: 'pdf',
+      date_from: '2026-10-21', date_to: '2026-10-21', machine_id: '81', columns: 'machine,oee' }).buffer(true).parse(binary);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/pdf/);
+    expect(res.headers['content-disposition']).toContain('.pdf');
+    expect(res.body.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(mockDb.calls()[0].params).toEqual([5, '2026-10-21', '2026-10-21', '81']);
+  });
   test('Excel: the whole range and every filter reach the query; the chosen columns, sorted as on screen', async () => {
     mockDb.queueResponse(rows([shiftRow('CNC-01', '62.10'), shiftRow('CNC-02', '81.50')]));
     const res = await request(app)
@@ -111,7 +121,7 @@ describe('a small report downloads as the screen shows it', () => {
 
 describe('what is refused before anything is read', () => {
   test.each([
-    [{ date_from: '2026-10-21', date_to: '2026-10-21', format: 'pdf' }, /format must be xlsx or csv/],
+    [{ date_from: '2026-10-21', date_to: '2026-10-21', format: 'zip' }, /format must be xlsx, csv or pdf/],
     [{ date_from: '21-10-2026', date_to: '2026-10-21' }, /YYYY-MM-DD/],
     [{ date_from: '2026-10-21', date_to: '2026-10-20' }, /before/],
     [{ date_from: '2026-10-21', date_to: '2026-10-21', machine_id: '7; DROP TABLE x' }, /machine_id must be a positive whole number/],

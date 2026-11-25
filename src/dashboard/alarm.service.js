@@ -38,13 +38,16 @@ function httpError(message, status) {
  * it, and by then it is the dashboard that is broken, not the query.
  */
 function resolveRange({ from, to }) {
-  const isDate = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v));
+  const isDate = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 
   if (from && !isDate(from)) throw httpError('from must be a date in YYYY-MM-DD form', 400);
   if (to   && !isDate(to))   throw httpError('to must be a date in YYYY-MM-DD form', 400);
 
-  const end   = to   ? `${to} 23:59:59.999`   : null;
-  const start = from ? `${from} 00:00:00`     : null;
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const endDay = to || today;
+  const startDay = from || new Date(Date.parse(`${endDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+  const end = `${endDay} 23:59:59.999+05:30`;
+  const start = `${startDay} 00:00:00+05:30`;
 
   if (start && end && new Date(start) > new Date(end)) {
     throw httpError('from must not be after to', 400);
@@ -176,6 +179,46 @@ async function bySeverity(filter) {
     filter.params
   );
   return r;
+}
+
+/** Each machine_alarms row is one alarm occurrence, not one telemetry poll.
+ * Keep the denominator across every matching occurrence. The tail is an
+ * explicit Other bucket so a chart with many codes still finishes at 100%. */
+function paretoRows(rows) {
+  const sorted = rows.map(r => ({ ...r, total: Number(r.total) || 0 }))
+    .filter(r => r.total > 0)
+    .sort((a, b) => Number(Boolean(a.is_other)) - Number(Boolean(b.is_other)) || b.total - a.total ||
+      String(a.alarm_type || '').localeCompare(String(b.alarm_type || '')) || String(a.alarm_code || '').localeCompare(String(b.alarm_code || '')));
+  const total = sorted.reduce((n, r) => n + r.total, 0);
+  let cumulative = 0;
+  return sorted.map(r => {
+    cumulative += r.total;
+    return { ...r, share_pct: Math.round(r.total / total * 1000) / 10,
+      cumulative_pct: Math.round(cumulative / total * 1000) / 10 };
+  });
+}
+
+async function pareto(filter) {
+  const { rows } = await pool.query(
+    `WITH grouped AS (
+       SELECT NULLIF(BTRIM(a.alarm_code), '') AS alarm_code,
+              COALESCE(NULLIF(BTRIM(a.alarm_type), ''), 'Unspecified') AS alarm_type,
+              CASE WHEN NULLIF(BTRIM(a.alarm_code), '') IS NULL THEN COALESCE(NULLIF(BTRIM(a.message), ''), 'Alarm without code') END AS uncoded_message,
+              MIN(NULLIF(BTRIM(a.message), '')) AS message, COUNT(*)::bigint AS total
+         FROM machine_alarms a
+         LEFT JOIN machines m ON m.id = a.machine_id
+         ${filter.sql}
+        GROUP BY 1, 2, 3
+     ), ranked AS (
+       SELECT *, ROW_NUMBER() OVER (ORDER BY total DESC, alarm_type, alarm_code NULLS LAST, uncoded_message NULLS LAST) AS rank
+         FROM grouped
+     )
+     SELECT alarm_code, alarm_type, message, total, FALSE AS is_other FROM ranked WHERE rank <= 20
+     UNION ALL
+     SELECT NULL, 'Other alarms', NULL, SUM(total)::bigint, TRUE FROM ranked WHERE rank > 20 HAVING COUNT(*) > 0`,
+    filter.params
+  );
+  return paretoRows(rows);
 }
 
 /**
@@ -387,7 +430,7 @@ exports.getAlarms = async (q = {}) => {
   // one day selected: the trend goes hour by hour, as the design draws it
   const oneDay = q.from && q.to && q.from === q.to;
 
-  const [k, machines, shifts, severity, tr, rows, f, top] = await Promise.all([
+  const [k, machines, shifts, severity, tr, rows, f, top, alarmPareto] = await Promise.all([
     when(want.kpis, () => kpis(filter)),
     when(want.charts, () => byMachine(filter)),
     when(want.charts, () => byShift(filter)),
@@ -395,7 +438,8 @@ exports.getAlarms = async (q = {}) => {
     when(want.charts, () => (oneDay ? hourlyTrend(filter, q.from) : trend(filter, { start, end }))),
     when(want.table, () => list(tableFilter, q)),
     when(want.kpis, () => facets(companyId, { start, end })),
-    when(want.kpis, () => longest(filter))
+    when(want.kpis, () => longest(filter)),
+    when(want.charts, () => pareto(filter))
   ]);
 
   return {
@@ -411,6 +455,7 @@ exports.getAlarms = async (q = {}) => {
       by_machine: machines,
       by_shift: shifts,
       by_severity: severity,
+      pareto: alarmPareto,
       trend: tr,
       trend_by: oneDay ? 'hour' : 'day'
     }),
@@ -457,3 +502,4 @@ exports.getExportRows = async (q = {}) => {
 
 exports.resolveRange = resolveRange;
 exports.buildFilter = buildFilter;
+exports.paretoRows = paretoRows;

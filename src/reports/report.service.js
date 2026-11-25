@@ -278,6 +278,7 @@ exports.shiftOeeData = async (company_id, date_from, date_to, machine_id, shift_
 
 const { createExcel }       = require('./excel.util');
 const { toCsv }             = require('../utils/export.util');
+const { createPdf }         = require('./pdf.util');
 const { resolveColumns, shapeRows, sortRows, assertType } = require('./report.columns');
 
 const REPORT_NAMES = {
@@ -289,7 +290,8 @@ exports.REPORT_NAMES = REPORT_NAMES;
 
 const CONTENT_TYPES = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  csv:  'text/csv; charset=utf-8'
+  csv:  'text/csv; charset=utf-8',
+  pdf: 'application/pdf'
 };
 exports.CONTENT_TYPES = CONTENT_TYPES;
 
@@ -312,13 +314,19 @@ exports.reportRows = async (type, company_id, filters) => (await fetchRows(type,
  */
 exports.buildFile = async ({ company_id, type, format = 'xlsx', filters, columns, sort, dir, rows = null }) => {
   assertType(type);
+  if (!CONTENT_TYPES[format]) throw Object.assign(new Error('format must be xlsx, csv or pdf'), { status: 400 });
   const cols = resolveColumns(type, columns);
   const data = rows || await exports.reportRows(type, company_id, filters);
   const shaped = shapeRows(sortRows(data, type, sort, dir), cols);
   const labels = cols.map(c => c.label);
   const body = format === 'csv'
     ? toCsv(shaped, labels)
-    : await createExcel(REPORT_NAMES[type].slice(0, 31), shaped, labels);
+    : format === 'pdf'
+      ? await createPdf(REPORT_NAMES[type], shaped, labels, {
+        subtitle: `${filters.date_from} to ${filters.date_to} | Company ${company_id}` +
+          ['machine_id', 'shift_id', 'operator_id'].filter(k => filters[k]).map(k => ` | ${k.replace('_id', '')} ID ${filters[k]}`).join('')
+      })
+      : await createExcel(REPORT_NAMES[type].slice(0, 31), shaped, labels);
   return {
     body, rows: data.length, columnLabels: labels, contentType: CONTENT_TYPES[format],
     filename: `${type}_${filters.date_from}_to_${filters.date_to}.${format}`

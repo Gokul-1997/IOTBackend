@@ -56,13 +56,15 @@ function queueDashboard({
   runSeconds = 1800,
   reject = 0,
   rework = 0,
+  rejectionReason = null,
+  reworkReason = null,
   hourly = []
 } = {}) {
   mockDb.queueResponse(
     { rows: [MACHINE_ROW] },                                  // machine
     { rows: [SHIFT_ROW] },                                    // shift
     { rows: hourly.length ? hourly : [{ hour_start: '2026-05-06T02:30:00Z', produced_qty: produced, run_seconds: runSeconds, idle_seconds: 0, cycle_time_seconds: 60, planned_seconds: 3600 }] }, // one observed shift query
-    { rows: [{ reject, rework }] }                            // quality entries
+    { rows: [{ reject, rework, rejection_reason: rejectionReason, rework_reason: reworkReason }] } // quality entries
   );
 }
 
@@ -95,6 +97,12 @@ describe('getQualityDashboardService', () => {
     expect(production.reject).toBe(2);
     expect(production.rework).toBe(1);
     expect(production.accepted).toBe(7);   // 10 - 2 - 1
+  });
+
+  test('returns independently recorded rejection and rework reasons for the selected shift', async () => {
+    queueDashboard({ reject: 2, rework: 1, rejectionReason: 'Diameter out of tolerance', reworkReason: 'Burr removal' });
+    const result = await quality.getQualityDashboardService(BASE_ARGS);
+    expect(result.quality_reasons).toEqual({ rejection: 'Diameter out of tolerance', rework: 'Burr removal' });
   });
 
   test('TC-QS-03 accepted is clamped to 0 when reject+rework > produced', async () => {
@@ -205,6 +213,26 @@ function queueUpsert({ produced = 10, existingId = null } = {}) {
 }
 
 describe('upsertQualityEntryService', () => {
+
+  test('saves independently trimmed reasons with a new quality total', async () => {
+    queueUpsert();
+    await quality.upsertQualityEntryService({ ...UPSERT_ARGS, rejection_reason: '  Dimension failure  ', rework_reason: 'Deburr' });
+    const call = mockDb.calls().find(c => c.text.includes('INSERT INTO quality_entries'));
+    expect(call.params.slice(-2)).toEqual(['Dimension failure', 'Deburr']);
+  });
+
+  test('an older client omitting reasons preserves them, while blank explicitly clears a reason', async () => {
+    queueUpsert({ existingId: 55 });
+    await quality.upsertQualityEntryService({ ...UPSERT_ARGS, rejection_reason: '   ' });
+    const call = mockDb.calls().find(c => c.text.includes('UPDATE quality_entries'));
+    expect(call.text).toMatch(/CASE WHEN \$8::boolean THEN \$6 ELSE rejection_reason END/);
+    expect(call.params.slice(-4)).toEqual([null, null, true, false]);
+  });
+
+  test.each([['rejection_reason', 'x'.repeat(501)], ['rework_reason', { name: 'Invalid' }], ['rejection_reason', 'null\u0000byte']])('rejects malformed %s before connecting', async (field, value) => {
+    await expect(quality.upsertQualityEntryService({ ...UPSERT_ARGS, [field]: value })).rejects.toMatchObject({ status: 400 });
+    expect(mockDb.connect).not.toHaveBeenCalled();
+  });
 
   test('TC-QU-01 creates new entry when none exists', async () => {
     queueUpsert({ existingId: null });

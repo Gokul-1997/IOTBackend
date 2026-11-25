@@ -38,6 +38,7 @@ const allowanceStore = require('./assistant.allowance');
 const tools = require('./assistant.tools');
 const signed = require('./assistant.history');
 const budget = require('./assistant.budget');
+const validation = require('./assistant.validation');
 
 const KINDS = ['answer', 'clarify', 'out_of_scope', 'restricted', 'not_found'];
 const MAX_ROUNDS = 4;
@@ -247,6 +248,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
       const messages = history.map(t => ({ role: t.role, content: t.content }));
       const sources = [];
       const used = [];
+      const evidence = [];
       let reads = 0;
       let grounded = false;            // a tool read company data, or a help topic matched, for this question
 
@@ -262,7 +264,7 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
         const calls = (res.content || []).filter(b => b.type === 'tool_use');
         const reply = calls.find(c => c.name === 'reply');
         if (reply || !calls.length) {
-          return replyFor(user, await finish({ user, reply, res, say, allowance, sources, used, round, spent, grounded }));
+          return replyFor(user, await finish({ user, reply, res, say, allowance, sources, used, round, spent, grounded, evidence }));
         }
         const results = [];
         for (const c of calls) {
@@ -274,7 +276,9 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
           if (content.length > TOOL_RESULT_CHARS) { r = { error: true, out: { problem: TOO_BIG } }; content = JSON.stringify(r.out); }
           used.push(c.name);
           if (!r.error && (c.name !== 'mexa_help' || r.out?.sections)) grounded = true;
-          if (r.source && !r.error) sources.push(r.source);
+          if (!r.error) evidence.push({ data: r.out, source: r.source, help: c.name === 'mexa_help' });
+          if (r.source && !r.error) sources.push({ ...r.source,
+            ...(c.name !== 'mexa_help' ? { checked_at: new Date().toISOString() } : {}) });
           results.push({ type: 'tool_result', tool_use_id: c.id, content, ...(r.error ? { is_error: true } : {}) });
         }
         messages.push({ role: 'assistant', content: res.content }, { role: 'user', content: results });
@@ -301,13 +305,23 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
   }
 
   /** The reply tool's kind and text → what the person reads; a completed answer is counted, every token kept. */
-  async function finish({ user, reply, res, say, allowance, sources, used, round, spent, grounded }) {
+  async function finish({ user, reply, res, say, allowance, sources, used, round, spent, grounded, evidence }) {
     const asked = reply?.input || {};
     let kind = KINDS.includes(asked.kind) ? asked.kind : 'answer';
     let text = String(reply ? asked.text ?? '' : (res.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n')).trim().slice(0, REPLY_CHARS);
     // held to by the server, not left to the model: an answer stands on what the tools read for this
     // question, and a question back is one short question — anything else is outside its scope
     if (kind === 'answer' && !grounded) kind = 'out_of_scope';
+    let figures = null;
+    if (kind === 'answer' && evidence.some(item => !item.help)) {
+      const check = validation.inspect(text, evidence);
+      figures = { status: 'matched_database_values', checked_at: new Date().toISOString(), numerical_claims: check.claims };
+      if (!check.valid) {
+        const corrected = validation.databaseSummary(evidence);
+        if (corrected) { text = corrected.slice(0, REPLY_CHARS); figures.status = 'corrected_from_database'; }
+        else { kind = 'clarify'; text = 'I could not verify those figures in the database. Which machine and date range should I check?'; }
+      }
+    }
     if (kind === 'clarify' && (text.length > CLARIFY_CHARS || !text.includes('?'))) kind = 'out_of_scope';
     if (kind === 'out_of_scope') text = say.outOfScope;
     if (kind === 'restricted') text = say.restricted;
@@ -321,7 +335,8 @@ function createAssistant({ callModel = defaultCallModel, config = readConfig, no
       user: user.id, company: user.company_id, kind, rounds: round + 1, tools: used,
       tokens: { in: spent.inputTokens, cached: spent.cachedTokens, out: spent.outputTokens }
     }));
-    return { kind, text, sources: kind === 'answer' ? unique(sources) : [], allowance: allowanceStore.present(after) };
+    return { kind, text, sources: kind === 'answer' ? unique(sources) : [],
+      ...(kind === 'answer' ? { validation: figures } : {}), allowance: allowanceStore.present(after) };
   }
 
   return { status, chat, _answering: answering };

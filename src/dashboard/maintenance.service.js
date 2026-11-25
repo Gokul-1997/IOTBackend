@@ -28,6 +28,7 @@ const oeeSvc = require('./oee.dashboard.service');
 const { LIMITS: METER_LIMITS, latestMeterFieldsSQL, latestMeterSnapshot } = require('./energy-meter.service');
 const energyStore = require('./energy-store');
 const { machineOrder } = require('../lib/machine-order');
+const { conditionHealth } = require('./condition-health');
 
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
 const SEVERITY_CLASS = severityClass('severity');
@@ -355,6 +356,7 @@ exports.getMaintenanceDashboard = async (req) => {
     updated_at: new Date().toISOString(),
     machines,
     health,
+    machine_health: machineId ? conditionHealth(rowsRes.rows.find(row => Number(row.machine_id) === machineId)) : null,
     alarms,
     oee:        oeeOf(oeeRes),
     production: prodRes.rows[0] || { produced: 0, run_seconds: 0, idle_seconds: 0 },

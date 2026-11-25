@@ -330,7 +330,7 @@ describe('export', () => {
     queue();
     const rows = await svc.getExportRows({ company_id });
     expect(Object.keys(rows[0])).toEqual([
-      'Operator ID', 'Operator', 'Shift', 'Machines', 'Shared', 'Score', 'Run time', 'Down time',
+      'Operator ID', 'Operator', 'Shift', 'Machines', 'Shared', 'Score', 'Run time', 'Estimated production', 'Down time',
       'Utilization', 'Produced', 'Good', 'Rejected', 'Quality rate', 'Alarms', 'OEE', 'Efficiency', 'Status'
     ]);
   });
@@ -346,5 +346,36 @@ describe('export', () => {
     queue([link({ operator_id: 1 }), link({ operator_id: 2, operator_name: 'B' })]);
     const rows = await svc.getExportRows({ company_id });
     expect(rows.every(r => r.Shared === '1 shared')).toBe(true);
+  });
+});
+
+describe('estimated production from measured running time', () => {
+  const one = async (m = {}) => { queue([link()], [machine(m)]); return (await svc.getOperators({ company_id })).operators.data[0]; };
+  test('converts running hours and component cycle seconds consistently', async () => {
+    const r = await one({ run_seconds: '7200', cycle_seconds: '60' });
+    expect(r.continuous_running_hours).toBe(2);
+    expect(r.estimated_production).toBe(120);
+    expect(r.estimate_basis).toBe('MEASURED_RUN_CURRENT_COMPONENT_CYCLE');
+  });
+
+  test('adds each machine estimate, without averaging different cycle times or counting shared assignments twice', async () => {
+    queue([link(), link({ machine_id: 11 }), link({ operator_id: 2 })],
+      [machine({ run_seconds: '3600', cycle_seconds: '60' }), machine({ machine_id: 11, run_seconds: '7200', cycle_seconds: '120' })]);
+    const d = await svc.getOperators({ company_id });
+    expect(d.kpis.estimated_production).toBe(120);
+    expect(d.operators.data.find(r => r.operator_id === 1).estimated_production).toBe(120);
+    expect(d.operators.data.find(r => r.operator_id === 2).estimated_production).toBe(60);
+  });
+
+  test.each([null, 0, -1, 'invalid'])('a running machine with cycle %s makes the full estimate unavailable', async cycle_seconds => {
+    const r = await one({ cycle_seconds });
+    expect(r.estimated_production).toBeNull();
+    expect(r.missing_cycle_machines).toBe(1);
+  });
+
+  test('zero running time estimates zero while no machines remains unknown', () => {
+    expect(svc.productionEstimate([{ run_seconds: 0, component_cycle_seconds: null }]).estimated_production).toBe(0);
+    expect(svc.productionEstimate([]).estimated_production).toBeNull();
+    expect(svc.productionEstimate([{ run_seconds: 3600, component_cycle_seconds: 60 }, { run_seconds: 1800, component_cycle_seconds: null }]).estimated_production).toBeNull();
   });
 });

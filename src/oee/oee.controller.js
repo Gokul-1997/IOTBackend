@@ -10,6 +10,7 @@ const { effectivePlantId } = require('../lib/plant-scope');
 const OeeService = require('./oee.service');
 const { MAX_DIRECT_DAYS, MAX_DIRECT_ROWS } = require('../reports/report.limits');
 const { emailInstead } = require('../reports/report.mailer');
+const { MAX_PDF_ROWS } = require('../reports/pdf.util');
 
 /* ===============================================
    GET META (Machines, Shifts, Lines)
@@ -41,18 +42,24 @@ exports.getReports = async (req, res, next) => {
    records, or a range past three months — is not downloaded: it is answered
    202 "check your email in 10–15 minutes", then built and emailed (report.mailer).
    =============================================== */
-const FORMATS = ['csv', 'xlsx'];
+const FORMATS = ['csv', 'xlsx', 'pdf'];
 
 exports.exportRecords = async (req, res, next) => {
   try {
     const format = String(req.query.format || 'csv').toLowerCase();
     if (!FORMATS.includes(format)) {
-      return res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
+      return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
     }
 
     const companyId = req.user.company_id;
     const plan = OeeService.exportPlan(req.query, effectivePlantId(req.user), companyId);
+    if (format === 'pdf' && plan.days > MAX_DIRECT_DAYS) {
+      return res.status(413).json({ status: 'error', message: `PDF supports up to ${MAX_DIRECT_DAYS} days. Choose a shorter period, or export Excel or CSV.` });
+    }
     const rows = plan.days <= MAX_DIRECT_DAYS ? await OeeService.planRows(plan, MAX_DIRECT_ROWS + 1) : null;
+    if (format === 'pdf' && rows && rows.length > MAX_PDF_ROWS) {
+      return res.status(413).json({ status: 'error', message: 'PDF supports up to 5,000 records. Narrow the dates or filters, or choose Excel or CSV.' });
+    }
 
     if (rows && rows.length <= MAX_DIRECT_ROWS) {
       if (!rows.length) {
@@ -65,6 +72,9 @@ exports.exportRecords = async (req, res, next) => {
     }
 
     const count = await OeeService.planCount(plan);
+    if (format === 'pdf' && count > MAX_PDF_ROWS) {
+      return res.status(413).json({ status: 'error', message: 'PDF supports up to 5,000 records. Narrow the dates or filters, or choose Excel or CSV.' });
+    }
     if (!count) {
       return res.status(404).json({ status: 'error', message: 'No OEE records match these filters' });
     }

@@ -26,7 +26,7 @@ const getQualityDashboard = async (req, res) => {
 
 const upsertQualityEntry = async (req, res) => {
   try {
-    const { machine_id, shift_id, date, reject_qty, rework_qty } = req.body;
+    const { machine_id, shift_id, date, reject_qty, rework_qty, rejection_reason, rework_reason } = req.body;
 
     if (!machine_id || !shift_id || !date) {
       return res.status(400).json({
@@ -42,6 +42,8 @@ const upsertQualityEntry = async (req, res) => {
       date,
       reject_qty: reject_qty || 0,
       rework_qty: rework_qty || 0,
+      rejection_reason,
+      rework_reason,
       user_id: req.user?.id || null
     });
 

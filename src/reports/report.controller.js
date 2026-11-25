@@ -2,6 +2,7 @@ const svc   = require('./report.service');
 const { assertDirectRange, rangeDays, MAX_DIRECT_DAYS, MAX_DIRECT_ROWS } = require('./report.limits');
 const { REPORT_COLUMNS, assertType, resolveColumns, sortRows } = require('./report.columns');
 const { emailInstead } = require('./report.mailer');
+const { MAX_PDF_ROWS } = require('./pdf.util');
 
 /* ─────────────────────────────────────────────────────────
    DROPDOWNS
@@ -92,7 +93,7 @@ exports.shiftOeeData = async (req, res, next) => {
    (report.mailer.js). There is no Email button.
 ───────────────────────────────────────────────────────── */
 
-const FORMATS = ['xlsx', 'csv'];
+const FORMATS = ['xlsx', 'csv', 'pdf'];
 
 /** An optional id filter: absent, or a positive whole number — never passed on to SQL as anything else. */
 function idFilter(query, name) {
@@ -115,11 +116,14 @@ const download = type => async (req, res, next) => {
     const q = req.query;
     const format = String(q.format || 'xlsx').toLowerCase();
     if (!FORMATS.includes(format)) {
-      return res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
+      return res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
     }
     const date_from = q.date_from || q.date;
     const date_to = q.date_to || date_from;
     const days = rangeDays(date_from, date_to);              // 400: missing, malformed or reversed
+    if (format === 'pdf' && days > MAX_DIRECT_DAYS) {
+      return res.status(413).json({ status: 'error', message: `PDF supports up to ${MAX_DIRECT_DAYS} days. Choose a shorter period, or export Excel or CSV.` });
+    }
     const filters = {
       date_from, date_to,
       machine_id: idFilter(q, 'machine_id'), shift_id: idFilter(q, 'shift_id'), operator_id: idFilter(q, 'operator_id')
@@ -130,6 +134,9 @@ const download = type => async (req, res, next) => {
     const spec = { company_id: req.user.company_id, type, format, filters, columns, sort: q.sort, dir: q.dir };
 
     const rows = days <= MAX_DIRECT_DAYS ? await svc.reportRows(type, req.user.company_id, filters) : null;
+    if (format === 'pdf' && rows && rows.length > MAX_PDF_ROWS) {
+      return res.status(413).json({ status: 'error', message: 'PDF supports up to 5,000 records. Narrow the dates or filters, or choose Excel or CSV.' });
+    }
     if (rows && rows.length <= MAX_DIRECT_ROWS) {
       const file = await svc.buildFile({ ...spec, rows });
       res.setHeader('Content-Type', file.contentType);

@@ -115,6 +115,29 @@ async function operatorOptions(companyId) {
 
 const round1 = v => v == null ? null : Number(Number(v).toFixed(1));
 
+/** Sum each machine's measured run seconds / configured component cycle seconds.
+ * Different machines can have different components, so dividing fleet hours by
+ * an average cycle would give the wrong result. This is an estimate using the
+ * current component, not a reconstruction of historical component changes.
+ */
+function productionEstimate(machines) {
+  let estimate = 0;
+  let missing = 0;
+  for (const machine of machines) {
+    const run = Number(machine.run_seconds);
+    const cycle = Number(machine.component_cycle_seconds);
+    if (!Number.isFinite(run) || run < 0) { missing++; continue; }
+    if (run === 0) continue;
+    if (!Number.isFinite(cycle) || cycle <= 0) { missing++; continue; }
+    estimate += run / cycle;
+  }
+  return {
+    estimated_production: machines.length && !missing ? round1(estimate) : null,
+    missing_cycle_machines: missing,
+    estimate_basis: 'MEASURED_RUN_CURRENT_COMPONENT_CYCLE'
+  };
+}
+
 /** The average of whichever of the three rates were measured. */
 function scoreOf({ utilization_pct, efficiency_pct, quality_rate_pct }) {
   const parts = [utilization_pct, efficiency_pct, quality_rate_pct].filter(v => v != null);
@@ -155,6 +178,8 @@ function derive(op, machines) {
     good:             f.good,
     rejected:         f.rejected,
     run_seconds:      run,
+    continuous_running_hours: round1(run / 3600),
+    ...productionEstimate(machines),
     idle_seconds:     idle,
     // measured, not declared: the machine on and not cutting
     downtime_seconds: idle,
@@ -205,7 +230,7 @@ function parseShow(v) {
 const SORTABLE = new Set([
   'operator_code', 'operator_name', 'shift_name', 'machine_names', 'score', 'run_seconds',
   'downtime_seconds', 'utilization_pct', 'produced', 'good', 'rejected', 'quality_rate_pct',
-  'rejection_rate_pct', 'alarm_count', 'oee_pct', 'efficiency_pct'
+  'rejection_rate_pct', 'alarm_count', 'oee_pct', 'efficiency_pct', 'estimated_production'
 ]);
 
 /**
@@ -290,7 +315,8 @@ exports.getOperators = async (q = {}) => {
     });
 
   const machinesById = new Map(
-    machineRows.map(r => [r.machine_id, oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS)])
+    machineRows.map(r => [r.machine_id, { ...oeeSvc.deriveOee(r, oeeSvc.DEFAULT_THRESHOLDS),
+      component_cycle_seconds: r.cycle_seconds == null ? null : Number(r.cycle_seconds) }])
   );
 
   // how many operators hold each machine — the caveat on every shared row
@@ -335,6 +361,8 @@ exports.getOperators = async (q = {}) => {
       kpis: {
         produced: fleet.produced, good: fleet.good, rejected: fleet.rejected,
         run_seconds: fleet.run_seconds, idle_seconds: fleet.idle_seconds,
+        continuous_running_hours: round1(fleet.run_seconds / 3600),
+        ...productionEstimate(held),
         quality_rate_pct: fleet.quality_pct,
         utilization_pct: (fleet.run_seconds + fleet.idle_seconds) > 0
           ? round1((fleet.run_seconds / (fleet.run_seconds + fleet.idle_seconds)) * 100) : null,
@@ -392,6 +420,7 @@ exports.getExportRows = async (q = {}) => {
     'Shared':        r.shared_machines > 0 ? `${r.shared_machines} shared` : '',
     'Score':         pct(r.score),
     'Run time':      hhmm(r.run_seconds),
+    'Estimated production': r.estimated_production ?? '',
     'Down time':     hhmm(r.downtime_seconds),
     'Utilization':   pct(r.utilization_pct),
     'Produced':      r.produced,
@@ -414,3 +443,4 @@ exports.scoreOf = scoreOf;
 exports.sortRows = sortRows;
 exports.leaders = leaders;
 exports.SCORE_BANDS = SCORE_BANDS;
+exports.productionEstimate = productionEstimate;

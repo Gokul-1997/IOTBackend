@@ -1,11 +1,5 @@
-/*
- * Every dashboard export is Excel or CSV. The PDF exports were taken out
- * (2026-10-14) — nobody used them: asking for one, or for anything else,
- * is a 400 before anything is read. The reports PDF module is gone too.
- */
+/* Every format shares the filtered dataset; unsupported formats cost no query. */
 jest.mock('../../src/db', () => require('../helpers/mockDb').mockDb);
-const fs = require('fs');
-const path = require('path');
 const { mockDb, resetDb } = require('../helpers/mockDb');
 const ctrl = require('../../src/dashboard/dashboard.controller');
 
@@ -26,11 +20,11 @@ const EXPORTS = ['exportEnergy', 'exportOee', 'exportOperators', 'exportDowntime
 beforeEach(() => resetDb());
 
 describe.each(EXPORTS)('%s', (name) => {
-  test.each(['pdf', 'PDF', 'docx', ''])('%p is refused, before anything is read', async (format) => {
+  test.each(['docx', 'zip', ''])('%p is refused, before anything is read', async (format) => {
     const r = res();
     await ctrl[name](req(format), r);
     expect(r.status).toHaveBeenCalledWith(400);
-    expect(r.json).toHaveBeenCalledWith({ status: 'error', message: 'format must be xlsx or csv' });
+    expect(r.json).toHaveBeenCalledWith({ status: 'error', message: 'format must be xlsx, csv or pdf' });
     expect(mockDb.calls()).toHaveLength(0);
   });
 
@@ -42,10 +36,21 @@ describe.each(EXPORTS)('%s', (name) => {
   });
 });
 
-test('no PDF anywhere: the reports PDF routes and the PDF library are gone', () => {
-  const root = path.join(__dirname, '../..');
-  expect(fs.readFileSync(path.join(root, 'src/routes.js'), 'utf8')).not.toMatch(/pdf/i);
-  expect(fs.existsSync(path.join(root, 'src/reports/pdf.routes.js'))).toBe(false);
-  expect(require(path.join(root, 'package.json')).dependencies).not.toHaveProperty('pdfkit');
-  expect(require('../../src/utils/export.util')).not.toHaveProperty('tablePdf');
+
+const SERVICE = {
+  exportEnergy: 'energy.service', exportOee: 'oee.dashboard.service', exportOperators: 'operator.service',
+  exportDowntime: 'downtime.service', exportAlarms: 'alarm.service', exportPeriodic: 'periodic.service',
+  exportMaintenanceReport: 'maintenance-report.service'
+};
+test.each(EXPORTS)('%s supports printable PDFs using its existing filtered export rows', async name => {
+  const service = require('../../src/dashboard/' + SERVICE[name]);
+  const spy = jest.spyOn(service, 'getExportRows').mockResolvedValue([{ Machine: 'VMC19', Value: 12 }]);
+  try {
+    const response = res();
+    await ctrl[name]({ ...req('PDF'), query: { from: '2026-11-24', to: '2026-11-24', machine_id: '81' } }, response);
+    expect(response.type).toHaveBeenCalledWith('application/pdf');
+    expect(response.headers['Content-Disposition']).toContain('.pdf');
+    expect(response.send.mock.calls[0][0].subarray(0, 5).toString()).toBe('%PDF-');
+    expect(spy.mock.calls[0][0]).toMatchObject({ company_id: 4, machine_id: '81' });
+  } finally { spy.mockRestore(); }
 });

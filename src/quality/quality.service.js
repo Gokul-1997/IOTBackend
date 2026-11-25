@@ -88,7 +88,9 @@ exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, 
   const { rows: qRows } = await db.query(
     `SELECT
        COALESCE(SUM(reject_qty), 0) AS reject,
-       COALESCE(SUM(rework_qty), 0) AS rework
+       COALESCE(SUM(rework_qty), 0) AS rework,
+       STRING_AGG(DISTINCT NULLIF(BTRIM(rejection_reason), ''), '; ') AS rejection_reason,
+       STRING_AGG(DISTINCT NULLIF(BTRIM(rework_reason), ''), '; ') AS rework_reason
      FROM quality_entries
      WHERE machine_id = $1
        AND shift_id   = $2
@@ -137,6 +139,10 @@ exports.getQualityDashboardService = async ({ company_id, machine_id, shift_id, 
       rework,
       quality_percent
     },
+    quality_reasons: {
+      rejection: qRows[0]?.rejection_reason || null,
+      rework: qRows[0]?.rework_reason || null
+    },
     oee,
     hourly
   };
@@ -152,6 +158,8 @@ exports.upsertQualityEntryService = async ({
   date,
   reject_qty,
   rework_qty,
+  rejection_reason,
+  rework_reason,
   user_id
 }) => {
   date = qualityDate(date);
@@ -160,6 +168,15 @@ exports.upsertQualityEntryService = async ({
   if (![reject_qty, rework_qty].every(value => Number.isSafeInteger(value) && value >= 0)) {
     throw Object.assign(new Error('Reject and rework quantities must be non-negative whole numbers.'), { status: 400 });
   }
+  const reason = (value, label) => {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'string' || value.length > 500 || value.includes('\u0000')) {
+      throw Object.assign(new Error(`${label} must be text of at most 500 characters.`), { status: 400 });
+    }
+    return value.trim() || null;
+  };
+  const rejectReason = reason(rejection_reason, 'Rejection reason');
+  const reworkReason = reason(rework_reason, 'Rework reason');
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -214,18 +231,21 @@ exports.upsertQualityEntryService = async ({
     if (existing.length > 0) {
       await client.query(
         `UPDATE quality_entries
-         SET reject_qty = $1, rework_qty = $2, entered_by = $3, shift_date = $4
+         SET reject_qty = $1, rework_qty = $2, entered_by = $3, shift_date = $4,
+             rejection_reason = CASE WHEN $8::boolean THEN $6 ELSE rejection_reason END,
+             rework_reason = CASE WHEN $9::boolean THEN $7 ELSE rework_reason END
          WHERE id = $5`,
-        [reject_qty, rework_qty, user_id, date, existing[0].id]
+        [reject_qty, rework_qty, user_id, date, existing[0].id, rejectReason, reworkReason,
+          rejection_reason !== undefined, rework_reason !== undefined]
       );
       await client.query('COMMIT');
       return { action: "updated" };
     }
 
     await client.query(
-      `INSERT INTO quality_entries (machine_id, shift_id, shift_date, reject_qty, rework_qty, entered_by)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [machine_id, shift_id, date, reject_qty, rework_qty, user_id]
+      `INSERT INTO quality_entries (machine_id, shift_id, shift_date, reject_qty, rework_qty, entered_by, rejection_reason, rework_reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [machine_id, shift_id, date, reject_qty, rework_qty, user_id, rejectReason, reworkReason]
     );
     await client.query('COMMIT');
     return { action: "created" };

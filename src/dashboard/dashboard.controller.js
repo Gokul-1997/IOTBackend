@@ -20,17 +20,23 @@ const maintReportSvc = require('./maintenance-report.service');
 const periodicEngine = require('../maintenance/periodic-engine.service');
 const excel         = require('../reports/excel.util');
 const { toCsv } = require('../utils/export.util');
+const { createPdf } = require('../reports/pdf.util');
 const dashCache     = require('./cache');
 
-/* Exports are Excel or CSV — the PDF exports were taken out (2026-10-14):
-   nobody used them, and a table is read in a spreadsheet. The format is
-   checked before anything is read, so a refused one costs no query. */
-const EXPORT_FORMATS = ['xlsx', 'csv'];
+/* Validate before querying; every format uses the same filtered dataset. */
+const EXPORT_FORMATS = ['xlsx', 'csv', 'pdf'];
 function exportFormat(req, res) {
   const format = String(req.params.format || '').toLowerCase();
   if (EXPORT_FORMATS.includes(format)) return format;
-  res.status(400).json({ status: 'error', message: 'format must be xlsx or csv' });
+  res.status(400).json({ status: 'error', message: 'format must be xlsx, csv or pdf' });
   return null;
+}
+async function sendPdf(res, req, title, filename, rows) {
+  const period = [req.query.from, req.query.to].filter(Boolean).join(' to ');
+  const filters = ['machine_id', 'shift_id', 'operator_id', 'status', 'issue_type', 'priority']
+    .filter(k => req.query[k]).map(k => `${k.replaceAll('_', ' ')}: ${req.query[k]}`);
+  const body = await createPdf(title, rows, null, { subtitle: [period, ...filters].filter(Boolean).join(' | ') });
+  return res.type('application/pdf').setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`).send(body);
 }
 const { current: readAuthorization } = require('../lib/read-scope');
 
@@ -227,6 +233,7 @@ exports.exportEnergy = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'No machines match these filters' });
     }
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Energy Report', `energy_${stamp}`, rows);
     if (format === 'xlsx') {
       const file = await excel.createExcel('Energy', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -267,6 +274,7 @@ exports.exportOee = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'No machines match these filters' });
     }
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Machine OEE Report', `oee_${stamp}`, rows);
 
     if (format === 'xlsx') {
       const file = await excel.createExcel('OEE', rows);
@@ -307,6 +315,7 @@ exports.exportOperators = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'No operators match these filters' });
     }
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Operator Performance', `operator_performance_${stamp}`, rows);
 
     if (format === 'xlsx') {
       const file = await excel.createExcel('Operator Performance', rows);
@@ -347,6 +356,7 @@ exports.exportDowntime = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'No downtime records match these filters' });
     }
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Downtime Report', `downtime_${stamp}`, rows);
 
     if (format === 'xlsx') {
       const file = await excel.createExcel('Downtime', rows);
@@ -389,6 +399,7 @@ exports.exportAlarms = async (req, res) => {
     }
 
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Alarm Report', `alarms_${stamp}`, rows);
 
     if (format === 'xlsx') {
       const file = await excel.createExcel('Alarms', rows);
@@ -502,9 +513,10 @@ exports.exportPeriodic = async (req, res) => {
     }
 
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Schedule Maintenance', `schedule_maintenance_${stamp}`, rows);
 
     if (format === 'xlsx') {
-      const file = await excel.createExcel('Periodic Maintenance', rows);
+      const file = await excel.createExcel('Schedule Maintenance', rows);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=periodic_maintenance_${stamp}.xlsx`);
       return res.send(file);
@@ -619,6 +631,7 @@ exports.exportMaintenanceReport = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'No maintenance tickets match these filters' });
     }
     const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'pdf') return await sendPdf(res, req, 'Maintenance Report', `maintenance_${stamp}`, rows);
 
     if (format === 'xlsx') {
       const file = await excel.createExcel('Maintenance', rows);

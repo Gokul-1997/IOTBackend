@@ -166,7 +166,7 @@ describe('the file', () => {
   });
 
   test.each([
-    [{ ...RANGE, format: 'pdf' }, 400, /format must be xlsx or csv/],
+    [{ ...RANGE, format: 'zip' }, 400, /format must be xlsx, csv or pdf/],
     [{ format: 'csv' }, 400, /from_date must be a date/],
     [{ ...RANGE, columns: 'oee,password' }, 400, /password/],
     [{ from_date: '2025-01-01', to_date: '2026-10-21' }, 413, /Up to 366 days/]

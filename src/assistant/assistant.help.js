@@ -10,7 +10,7 @@ const SECTIONS = [
     id: 'navigation', title: 'Where things are in MEXA',
     keywords: 'menu navigate find page where open screen dashboard analytics master admin profile settings sign out logout',
     text: `Menus along the top (each person sees only what their role allows):
-- Dashboards: Live Dashboard (every machine right now), Factory Overall, Maintenance, Preventive, Periodic, Alarms, Downtime, Operators, OEE, Energy.
+- Dashboards: Live Dashboard (every machine right now), Factory Overall, Maintenance, Breakdown, Schedule, Alarms, Downtime, Operators, OEE, Energy.
 - Analytics: Reports, Charts, Quality, Maintenance Report.
 - Alarms (active alarms to deal with), Downtime (record why a machine stopped), Maintenance (tickets, schedules, logs).
 - Master: Machines, Program Transfer, Component, Job, Lines, Shifts, Operators, Tariff & Rates.
@@ -28,7 +28,7 @@ The bell (top right) holds notifications; your name opens Profile, Settings and 
     keywords: 'report reports production oee hourly shift records machine oee excel csv download export email columns filter period',
     text: `- Analytics → Reports has tabs: Production, OEE Hourly, Shift OEE, OEE Records and Machine OEE.
 - Choose the dates, machines and shift (and the columns); the table shows exactly that.
-- Excel and CSV download exactly what the screen shows. A download over 20,000 rows or longer than 92 days is prepared in the background and emailed to your own account email — check your email in about 10–15 minutes.`
+- Excel, CSV and PDF use the same filtered records and selected columns. PDF is printable, up to 5,000 records and 92 days; choose Excel or CSV for larger datasets. An Excel/CSV download over 20,000 rows or longer than 92 days is prepared in the background and emailed to your own account email — check your email in about 10–15 minutes.`
   },
   {
     id: 'oee', title: 'How OEE is worked out',
@@ -60,7 +60,7 @@ The bell (top right) holds notifications; your name opens Profile, Settings and 
     id: 'maintenance', title: 'Maintenance: tickets, schedules and reports',
     keywords: 'maintenance ticket tickets repair breakdown schedule schedules preventive periodic log logs technician assign mttr pm service',
     text: `- Maintenance (top menu): raise and assign tickets and follow them through to resolved, plan maintenance schedules, and log the work done.
-- Dashboards → Maintenance shows machine condition; Preventive plans service by usage; Periodic by calendar.
+- Dashboards → Maintenance shows machine condition; Breakdown shows alarm-related maintenance; Schedule plans service by calendar.
 - Analytics → Maintenance Report: repairs, tickets and repair time, to download.`
   },
   {

@@ -14,11 +14,13 @@ const { OPERATOR_CTE } = require('../reports/operator-map');
 const { shapeRows } = require('../reports/report.columns');
 const { createExcel } = require('../reports/excel.util');
 const { toCsv } = require('../utils/export.util');
+const { createPdf } = require('../reports/pdf.util');
 const { machineOrder } = require('../lib/machine-order');
 
 const CONTENT_TYPES = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  csv:  'text/csv; charset=utf-8'
+  csv:  'text/csv; charset=utf-8',
+  pdf: 'application/pdf'
 };
 
 /* ===============================================
@@ -308,6 +310,7 @@ exports.planCount = async plan => {
  * background build of a large export), up to MAX_EXPORT_ROWS.
  */
 exports.buildFile = async (plan, format, rows = null) => {
+  if (!CONTENT_TYPES[format]) throw fail(400, 'INVALID_FORMAT', 'format must be xlsx, csv or pdf');
   const data = rows || await exports.planRows(plan, MAX_EXPORT_ROWS + 1);
   if (data.length > MAX_EXPORT_ROWS) {
     throw fail(413, 'TOO_MANY_ROWS',
@@ -317,7 +320,9 @@ exports.buildFile = async (plan, format, rows = null) => {
   const shaped = shapeRows(readable, plan.columns);
   const labels = plan.columns.map(c => c.label);
   return {
-    body: format === 'csv' ? toCsv(shaped, labels) : await createExcel('OEE Records', shaped, labels),
+    body: format === 'csv' ? toCsv(shaped, labels) : format === 'pdf'
+      ? await createPdf('OEE Records', shaped, labels, { subtitle: `${plan.from} to ${plan.to}` })
+      : await createExcel('OEE Records', shaped, labels),
     rows: data.length,
     columnLabels: labels,
     contentType: CONTENT_TYPES[format],

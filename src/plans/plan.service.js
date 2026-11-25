@@ -25,8 +25,8 @@ const APP_MODULES = [
      single live-dashboard widget through the old guard for all nine. */
   { key: 'analytics-factory',     label: 'Factory Overall',        group: 'Analytics', actions: ['view'] },
   { key: 'analytics-maintenance', label: 'Maintenance Dashboard',  group: 'Analytics', actions: ['view'] },
-  { key: 'analytics-preventive',  label: 'Preventive Maintenance', group: 'Analytics', actions: ['view'] },
-  { key: 'analytics-periodic',    label: 'Periodic Maintenance',   group: 'Analytics', actions: ['view', 'export'] },
+  { key: 'analytics-preventive',  label: 'Breakdown', group: 'Analytics', actions: ['view'] },
+  { key: 'analytics-periodic',    label: 'Schedule',  group: 'Analytics', actions: ['view', 'export'] },
   { key: 'analytics-alarms',      label: 'Alarm Report',           group: 'Analytics', actions: ['view', 'export'] },
   { key: 'analytics-downtime',    label: 'Downtime Analysis',      group: 'Analytics', actions: ['view', 'export'] },
   { key: 'analytics-operators',   label: 'Operator Performance',   group: 'Analytics', actions: ['view', 'export'] },

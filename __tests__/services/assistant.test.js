@@ -162,6 +162,20 @@ describe('status', () => {
 });
 
 describe('a question answered from the reports', () => {
+  test('an invented model figure is replaced with values actually read for this company', async () => {
+    database();
+    const { callModel } = scripted(
+      [use('production_report', { date_from: '2026-10-22', date_to: '2026-10-22' })],
+      reply('answer', 'Today the machines produced 999999 parts.')
+    );
+    const a = createAssistant({ callModel, config: config(), now: () => new Date('2026-10-22T06:00:00Z') });
+    const result = await a.chat(person(), ask('How many parts were produced today?'));
+    expect(result.kind).toBe('answer');
+    expect(result.text).toContain('parts: 65');
+    expect(result.text).not.toContain('999999');
+    expect(result.validation.status).toBe('corrected_from_database');
+    expect(result.sources[0].report).toBe('Production report');
+  });
   test('today\'s production: the report is read for the person\'s company, the answer cites it, and one answer is counted', async () => {
     database();
     const { callModel, sent } = scripted(
@@ -174,6 +188,7 @@ describe('a question answered from the reports', () => {
     expect(r).toMatchObject({ kind: 'answer', text: 'Today: 65 parts across 2 machines.\n- VMC - 12 - F: 40 pcs',
                               allowance: { used: 1, remaining: 49 } });
     expect(r.sources).toEqual([{
+      checked_at: expect.any(String),
       report: 'Production report', period: { from: '2026-10-22', to: '2026-10-22' }, filters: { machine: null, shift: null },
       view: '/reports?tab=production&from=2026-10-22&to=2026-10-22',
       download: { path: '/reports/production', params: { format: 'xlsx', date_from: '2026-10-22', date_to: '2026-10-22' },

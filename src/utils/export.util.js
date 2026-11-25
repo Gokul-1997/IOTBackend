@@ -1,5 +1,5 @@
 /**
- * Shared table export: CSV. (The PDF exports were taken out, 2026-10-14.)
+ * Shared CSV table export. Formatted PDF tables use reports/pdf.util.js.
  *
  * Lifted out of dashboard.controller once a second module needed it. Two
  * copies of an export would drift, and the first sign of that is a report

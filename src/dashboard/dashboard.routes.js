@@ -90,6 +90,7 @@ router.get('/maintenance-report/export/:format', auth, access('page:maintenance-
 router.get('/live', auth, access('page:dashboard:live:view'), ctrl.liveMachines);
 router.get('/live/:machine_id', auth, access('page:dashboard:live:view'), ctrl.machineDetail);
 router.get('/live/:machine_id/timeline', auth, access('page:dashboard:live:view'), ctrl.machineTimeline);
+router.get('/live/:machine_id/cycle-time', auth, access('page:dashboard:live:view'), require('./cycle-time.controller').read);
 router.get('/live/:machine_id/spindle', auth, access('page:dashboard:live:view'), heavy.forRanges('12h', '24h'), ctrl.machineSpindle);
 router.get('/live/:machine_id/meter', auth, access('page:dashboard:live:view'), heavy.forRanges('7d'), ctrl.machineMeter);
 
