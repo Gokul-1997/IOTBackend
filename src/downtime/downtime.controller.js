@@ -22,6 +22,11 @@ exports.updateReason = async (req, res) => {
   res.json({ success: true, data });
 };
 
+exports.deleteReason = async (req, res) => {
+  const data = await service.deleteReason(req.params.id, req.user.company_id);
+  res.json({ success: true, data });
+};
+
 exports.logEvent = async (req, res) => {
   const data = await service.logEvent({ ...req.body, company_id: req.user.company_id, plant_id: req.plantScopeId, entered_by: req.user.id });
   res.status(201).json({ success: true, data });

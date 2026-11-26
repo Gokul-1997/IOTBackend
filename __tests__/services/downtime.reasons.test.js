@@ -58,3 +58,81 @@ test('events: a page or limit that is not a number falls back instead of reachin
   const data = mockDb.calls()[1];
   expect(data.params.slice(-2)).toEqual([20, 0]);
 });
+
+test('editing trims values, normalizes code/category and only updates the caller\'s active reason', async () => {
+  const edited = { id: 25, company_id: 4, code: 'TEA', name: 'Tea break', category: 'PLANNED', is_active: true };
+  mockDb.queueResponse({ rows: [edited], rowCount: 1 });
+  expect(await svc.updateReason('25', 4, { code: ' tea ', name: ' Tea break ', category: ' planned ', is_active: true })).toEqual(edited);
+  expect(mockDb.calls()[0].params).toEqual(['TEA', 'Tea break', 'PLANNED', true, 25, 4]);
+  expect(mockDb.calls()[0].text).toMatch(/WHERE id=\$5 AND company_id=\$6 AND is_active = TRUE/);
+});
+
+test('editing a duplicated code gives a useful conflict and preserves other database failures', async () => {
+  mockDb.queueError(Object.assign(new Error('duplicate'), { code: '23505' }));
+  await expect(svc.updateReason(25, 4, { code: 'tea', name: 'Tea', category: 'PLANNED' }))
+    .rejects.toEqual({ status: 409, message: 'Reason code TEA already exists' });
+  const down = new Error('database unavailable');
+  mockDb.queueError(down);
+  await expect(svc.deleteReason(25, 4)).rejects.toBe(down);
+});
+
+test('deleting deactivates only the owned active catalogue row, leaving historical events untouched', async () => {
+  const removed = { id: 25, company_id: 4, code: '4', name: 'TEA', is_active: false };
+  mockDb.queueResponse({ rows: [removed], rowCount: 1 });
+  expect(await svc.deleteReason('25', 4)).toEqual(removed);
+  const [query] = mockDb.calls();
+  expect(query.params).toEqual([25, 4]);
+  expect(query.text).toMatch(/UPDATE downtime_reasons SET is_active = FALSE/);
+  expect(query.text).toMatch(/WHERE id=\$1 AND company_id=\$2 AND is_active = TRUE/);
+  expect(query.text).not.toMatch(/DELETE|downtime_events/);
+  expect(mockDb.calls()).toHaveLength(1);
+});
+
+test('built-in, other-company, already removed and nonexistent reason ids all give the same not-found result', async () => {
+  for (const id of [1, 25, 999]) {
+    await expect(svc.deleteReason(id, 4)).rejects.toEqual({ status: 404, message: 'Reason not found' });
+    await expect(svc.updateReason(id, 4, { code: 'X', name: 'New name', category: 'UNPLANNED' }))
+      .rejects.toEqual({ status: 404, message: 'Reason not found' });
+  }
+  expect(mockDb.calls().every(call => /company_id=\$[26]/.test(call.text))).toBe(true);
+});
+
+test.each([
+  { code: '', name: 'Name' }, { code: '  ', name: 'Name' }, { code: 4, name: 'Name' },
+  { code: 'x'.repeat(21), name: 'Name' }, { code: 'ß'.repeat(11), name: 'Name' },
+  { code: 'X', name: '' }, { code: 'X', name: 'n'.repeat(101) }, { code: 'X', name: ['Name'] },
+  { code: 'X\u0000', name: 'Name' }, { code: 'X', name: 'Name', category: 'INVALID' },
+  { code: 'X', name: 'Name', category: true }, { code: 'X', name: 'Name', is_active: 'false' }
+])('invalid edits %j are refused before a database query', async input => {
+  await expect(svc.updateReason(25, 4, input)).rejects.toMatchObject({ status: 400 });
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test.each(['invalid', 0, -1, 1.5, 2147483648])('invalid reason id %j is refused before any query', async id => {
+  await expect(svc.deleteReason(id, 4)).rejects.toMatchObject({ status: 400 });
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('an account without a company cannot create, edit or delete reasons', async () => {
+  const input = { code: 'X', name: 'Name' };
+  await expect(svc.createReason({ ...input, company_id: null })).rejects.toMatchObject({ status: 403 });
+  await expect(svc.updateReason(25, null, input)).rejects.toMatchObject({ status: 403 });
+  await expect(svc.deleteReason(25, null)).rejects.toMatchObject({ status: 403 });
+  expect(mockDb.calls()).toHaveLength(0);
+});
+
+test('new manual events atomically require an active company/shared reason while historical links remain untouched', async () => {
+  const input = { company_id: 4, machine_id: 81, downtime_reason_id: 25,
+    started_at: '2026-11-25T04:00:00Z', ended_at: '2026-11-25T04:01:00Z', entered_by: 7 };
+  await expect(svc.logEvent(input)).rejects.toEqual({ status: 404, message: 'Active downtime reason not found' });
+  const [query] = mockDb.calls();
+  expect(query.text).toMatch(/INSERT INTO downtime_events[\s\S]*SELECT \$1,\$2,\$3,\$4/);
+  expect(query.text).toMatch(/\$4::integer IS NULL OR EXISTS/);
+  expect(query.text).toMatch(/FROM downtime_reasons WHERE id=\$4 AND is_active = TRUE/);
+  expect(query.text).toMatch(/company_id=\$1 OR company_id IS NULL/);
+  expect(query.params.slice(0, 4)).toEqual([4, 81, null, 25]);
+  expect(mockDb.calls()).toHaveLength(1);
+  resetDb();
+  mockDb.queueResponse({ rows: [{ id: 90 }], rowCount: 1 });
+  expect(await svc.logEvent({ ...input, downtime_reason_id: null })).toEqual({ id: 90 });
+});

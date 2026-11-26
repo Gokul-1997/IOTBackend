@@ -28,22 +28,74 @@ const takenCode = (e, code) => {
   return e;
 };
 
+const CATEGORIES = new Set(['UNPLANNED', 'PLANNED', 'QUALITY', 'CHANGEOVER']);
+function companyOf(value) {
+  const company = Number(value);
+  if (!Number.isInteger(company) || company <= 0 || company > 2147483647) {
+    throw { status: 403, message: 'This account belongs to no company' };
+  }
+  return company;
+}
+function reasonId(value) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0 || id > 2147483647) {
+    throw { status: 400, message: 'Reason id must be a positive integer' };
+  }
+  return id;
+}
+function reasonFields(input = {}) {
+  const { code, name, category } = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const field = (value, label, max) => {
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > max || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw { status: 400, message: `${label} is required and must be text of at most ${max} characters` };
+    }
+    return value.trim();
+  };
+  const result = {
+    code: field(typeof code === 'string' ? code.toUpperCase() : code, 'Code', 20),
+    name: field(name, 'Name', 100),
+    category: category === undefined || category === null || category === '' ? 'UNPLANNED'
+      : typeof category === 'string' ? category.trim().toUpperCase() : ''
+  };
+  if (!CATEGORIES.has(result.category)) throw { status: 400, message: 'Category must be Unplanned, Planned, Quality or Changeover' };
+  return result;
+}
+
 exports.createReason = async ({ company_id, code, name, category }) => {
-  if (!code || !name) throw { status: 400, message: 'Code and name are required' };
+  const company = companyOf(company_id);
+  const fields = reasonFields({ code, name, category });
   const res = await db.query(
     `INSERT INTO downtime_reasons (company_id, code, name, category)
      VALUES ($1, $2, $3, $4) RETURNING *`,
-    [company_id, code.toUpperCase(), name, category || 'UNPLANNED']
-  ).catch(e => { throw takenCode(e, code); });
+    [company, fields.code, fields.name, fields.category]
+  ).catch(e => { throw takenCode(e, fields.code); });
   return res.rows[0];
 };
 
-exports.updateReason = async (id, company_id, { code, name, category, is_active }) => {
+exports.updateReason = async (id, company_id, input) => {
+  const company = companyOf(company_id);
+  const reason = reasonId(id);
+  const fields = reasonFields(input);
+  const active = input?.is_active;
+  if (active !== undefined && typeof active !== 'boolean') throw { status: 400, message: 'Active must be true or false' };
   const res = await db.query(
     `UPDATE downtime_reasons SET code=$1, name=$2, category=$3, is_active=$4
-     WHERE id=$5 AND company_id=$6 RETURNING *`,
-    [code?.toUpperCase(), name, category, is_active ?? true, id, company_id]
-  ).catch(e => { throw takenCode(e, code); });
+     WHERE id=$5 AND company_id=$6 AND is_active = TRUE RETURNING *`,
+    [fields.code, fields.name, fields.category, active ?? true, reason, company]
+  ).catch(e => { throw takenCode(e, fields.code); });
+  if (!res.rowCount) throw { status: 404, message: 'Reason not found' };
+  return res.rows[0];
+};
+
+/** Retain the reason row and its event links, so historical reports still name it. */
+exports.deleteReason = async (id, company_id) => {
+  const company = companyOf(company_id);
+  const reason = reasonId(id);
+  const res = await db.query(
+    `UPDATE downtime_reasons SET is_active = FALSE
+     WHERE id=$1 AND company_id=$2 AND is_active = TRUE RETURNING *`,
+    [reason, company]
+  );
   if (!res.rowCount) throw { status: 404, message: 'Reason not found' };
   return res.rows[0];
 };
@@ -54,11 +106,16 @@ exports.logEvent = async ({ company_id, machine_id, shift_id, downtime_reason_id
   await ownedOrThrow(company_id, { machine_id, shift_id, downtime_reason_id });
   const res = await db.query(
     `INSERT INTO downtime_events (company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by)
-     ${plant_id == null ? 'VALUES ($1,$2,$3,$4,$5,$6,$7,$8)' : 'SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM machines WHERE id=$2 AND company_id=$1 AND plant_id=$9)'} RETURNING *`,
+     SELECT $1,$2,$3,$4,$5,$6,$7,$8
+      WHERE ($4::integer IS NULL OR EXISTS (
+        SELECT 1 FROM downtime_reasons WHERE id=$4 AND is_active = TRUE
+          AND (company_id=$1 OR company_id IS NULL)
+      ))
+      ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines WHERE id=$2 AND company_id=$1 AND plant_id=$9)'} RETURNING *`,
     [company_id, machine_id, shift_id || null, downtime_reason_id || null,
      from, to, notes || null, entered_by, ...(plant_id == null ? [] : [plant_id])]
   );
-  if (!res.rowCount) throw { status: 404, message: 'Machine not found in your plant' };
+  if (!res.rowCount) throw { status: 404, message: plant_id == null ? 'Active downtime reason not found' : 'Machine or active downtime reason not found in your plant' };
   return res.rows[0];
 };
 
