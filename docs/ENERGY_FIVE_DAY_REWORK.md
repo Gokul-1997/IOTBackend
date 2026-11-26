@@ -13,9 +13,11 @@ The read path is:
 
 `ENERGY_V2_ENABLED` unset or `true` uses this path only for a company whose `energy_pipeline_state.ready` has been verified. Explicit `false` retains the legacy path. The automatic worker processes ready companies; explicit rebuild operations can process a company before cutover. Chart, shift and machine totals use the same validated counter facts. Unknown pricing or incomplete measurement coverage remains visible.
 
+Shift charts reuse the cached counter snapshot used for the KPI, daily and machine totals. A newer live interval cannot make a fresh shift chart disagree with still-cached KPI figures. The fleet voltage metric uses line-to-line observations; missing L-L readings are never substituted with L-N values.
+
 ## Scoped maintenance
 
-Migration 070 alone never enables retention or deletes history. The prepared maintenance tool is deliberately limited to **S AND T, company 4, five days**. It requires explicit environment and private backup paths:
+Apply migrations **070–072** together before the rollout: 071 indexes late packets by their measurement time, and 072 dispatches guards by row shape so they work on Timescale chunks. These migrations never enable retention or delete history by themselves. The prepared maintenance tool is deliberately limited to **S AND T, company 4, five days**. It requires explicit environment and private backup paths:
 
 ```sh
 node scripts/energy-five-day-maintenance.js --company-id 4 --days 5 --env-file .env --backup-dir /private/backup/energy
@@ -43,3 +45,5 @@ node scripts/verify-energy-quality-migration.js postgres://codex@127.0.0.1:45473
 ```
 
 Frontend energy tests cover Units, five-day defaults, unavailable corrupt readings, request reuse across tabs and date/timezone boundaries. Deploy the built Angular assets and restart the current API/collector after pulling all three repositories; Git push runs CI and does not deploy these services.
+
+After successful cutover, remove any older `ENERGY_V2_ENABLED=false` setting or set it to `true` in the API's production environment. Restart `iot-app` with the updated environment and scheduled jobs enabled on that single server process. Confirm the energy response reports `energy_source: canonical_energy_intervals`; otherwise the server is still using the slower legacy path. The initial rebuild does not replace the running API/collector processes.

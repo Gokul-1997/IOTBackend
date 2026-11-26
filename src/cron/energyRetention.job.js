@@ -47,7 +47,8 @@ async function sweep(client, policy) {
         AND resumed_at >= $2::timestamptz AND resumed_at < $3::timestamptz
         AND unallocated_energy_kwh IS NOT NULL`,
       late: `UPDATE telemetry_late SET payload=energy_strip_payload(payload) WHERE company_id=$1
-        AND received_at >= $2::timestamptz AND received_at < $3::timestamptz
+        AND payload IS NOT NULL
+        AND COALESCE(to_timestamp(device_time),received_at) >= $2::timestamptz
         AND COALESCE(to_timestamp(device_time),received_at) < $3::timestamptz
         AND payload IS DISTINCT FROM energy_strip_payload(payload)`
     };

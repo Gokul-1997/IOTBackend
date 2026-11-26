@@ -87,6 +87,8 @@ test('retiring one company and one bounded window preserves CNC and production r
   expect(source.find(q => q.sql.startsWith('UPDATE telemetry_raw')).sql).toContain('COALESCE(to_timestamp(device_time),received_at) < $3');
   expect(source.find(q => q.sql.startsWith('UPDATE production_hourly')).sql).toContain("hour_start < $3");
   expect(source.find(q => q.sql.startsWith('UPDATE telemetry_late')).sql).toContain('payload=energy_strip_payload(payload)');
+  expect(source.find(q => q.sql.startsWith('UPDATE telemetry_late')).sql).toContain('COALESCE(to_timestamp(device_time),received_at) >= $2');
+  expect(source.find(q => q.sql.startsWith('UPDATE telemetry_late')).sql).not.toContain('received_at >= $2');
   expect(f.calls.some(q => /^DELETE FROM (telemetry_raw|production_hourly|telemetry_late|ingest_gaps)\b/.test(q.sql))).toBe(false);
   const latestLock = f.calls.findIndex(q => q.sql.includes('pg_advisory_xact_lock'));
   const latestUpdate = f.calls.findIndex(q => q.sql.startsWith('UPDATE energy_meter_latest'));

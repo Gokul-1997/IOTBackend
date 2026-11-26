@@ -43,13 +43,16 @@ function operations() {
     { name: 'production-old', table: 'production_hourly', time: 'hour_start', predicate: 'hour_start<$2 AND energy_kwh<>0', set: 'energy_kwh=0' },
     { name: 'gaps-old', table: 'ingest_gaps', time: 'resumed_at', predicate: 'resumed_at<$2 AND unallocated_energy_kwh IS NOT NULL', set: 'unallocated_energy_kwh=NULL' },
     { name: 'late-old', table: 'telemetry_late', time: 'received_at',
-      predicate: 'COALESCE(to_timestamp(device_time),received_at)<$2 AND payload IS DISTINCT FROM energy_strip_payload(payload)',
+      predicate: 'payload IS NOT NULL AND COALESCE(to_timestamp(device_time),received_at)<$2 AND payload IS DISTINCT FROM energy_strip_payload(payload)',
       set: 'payload=energy_strip_payload(payload)' },
     { name: 'meter-invalid', table: 'energy_meter_readings', time: 'read_at',
       predicate: `read_at>=$2 AND (${fields.map(f => `(${f} IS NOT NULL AND NOT (${validSql(f, f)}))`).join(' OR ')})`,
       set: fields.map(f => `${f}=CASE WHEN ${validSql(f, f)} THEN ${f} END`).join(',') },
     { name: 'raw-invalid', table: 'telemetry_raw', time: 'received_at',
-      predicate: `COALESCE(to_timestamp(device_time),received_at)>=$2 AND (${rawFields.map(f => `(${f} IS NOT NULL AND NOT (${validSql(f, f)}))`).join(' OR ')})`,
+      // Admission rejects device clocks over one minute ahead. This broader
+      // five-minute receipt margin preserves every admitted retained sample
+      // and lets Timescale prune all earlier CNC chunks.
+      predicate: `received_at >= $2::timestamptz-INTERVAL '5 minutes' AND COALESCE(to_timestamp(device_time),received_at)>=$2 AND (${rawFields.map(f => `(${f} IS NOT NULL AND NOT (${validSql(f, f)}))`).join(' OR ')})`,
       columns: 'company_id,machine_id,id,received_at::text AS received_at,device_time,energy,voltage,current,power',
       set: rawFields.map(f => `${f}=CASE WHEN ${validSql(f, f)} THEN ${f} END`).join(',') }
   ];
@@ -69,7 +72,7 @@ function save(dir, manifest) {
   fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, path.join(dir, 'manifest.json'));
 }
-async function mutate(client, dir, manifest, op, from, to, log) {
+async function mutate(client, dir, manifest, op, from, to, log, attempt=0) {
   const key = `${op.name}:${from}:${to}`;
   const coverage=new RegExp('^'+op.name+':([^Z]+Z):([^Z]+Z)$');
   if (manifest.completed.some(done=>{
@@ -96,7 +99,17 @@ async function mutate(client, dir, manifest, op, from, to, log) {
     await client.query('COMMIT');
     manifest.completed.push(key); save(dir, manifest);
     if (item) log({ operation: op.name, through: to, changed: item.rows });
-  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    // A current packet can update the per-machine latest projection after
+    // this batch's backup snapshot. Retry with a new snapshot; never commit
+    // an unverified or partly applied repair.
+    if(['40001','40P01'].includes(error.code)&&attempt<4) {
+      await new Promise(resolve=>setTimeout(resolve,50*2**attempt));
+      return mutate(client,dir,manifest,op,from,to,log,attempt+1);
+    }
+    throw error;
+  }
 }
 async function clearDerived(client, dir, manifest) {
   if (manifest.derived_cleared) return;
@@ -111,9 +124,22 @@ async function clearDerived(client, dir, manifest) {
     await client.query('COMMIT'); manifest.derived_cleared = true; save(dir, manifest);
   } catch (error) { await client.query('ROLLBACK'); throw error; }
 }
-async function verify(pool, cutoff) {
+async function verify(pool, cutoff, rawRange = null) {
   const result = {};
   for (const op of operations()) {
+    if(op.name==='raw-old'&&rawRange?.first&&rawRange?.last) {
+      // The original certified minimum and write guards establish that no
+      // older receipt can contain expired energy. Verify its entire range in
+      // bounded statements instead of scanning years in one query.
+      let count=0n;
+      for(let from=Math.floor(Date.parse(rawRange.first)/DAY)*DAY;from<=Date.parse(rawRange.last);from+=DAY) {
+        const {rows:[row]}=await pool.query(`SELECT COUNT(*)::bigint AS n FROM telemetry_raw
+          WHERE company_id=$1 AND (${op.predicate}) AND received_at>=$3 AND received_at<$4`,
+        [COMPANY,cutoff,new Date(from),new Date(from+DAY)]);
+        count+=BigInt(row.n);
+      }
+      result[op.name]=count.toString();continue;
+    }
     const { rows: [row] } = await pool.query(`SELECT COUNT(*)::bigint AS n FROM ${op.table}
       WHERE company_id=$1 AND (${op.predicate})`, [COMPANY, cutoff]);
     result[op.name] = row.n;
@@ -149,7 +175,7 @@ async function execute(pool, o, log = console.log) {
   };
   if(o.stage==='verify') {
     if(!fs.existsSync(file))throw Error('Verified cleanup manifest is required');
-    return verify(pool,loadManifest().cutoff);
+    const m=loadManifest();return verify(pool,m.cutoff,m.ranges?.['raw-old']);
   }
   const client = await pool.connect(); let locked = false; let jobs = [];let manifest=null;
   try {
@@ -161,7 +187,7 @@ async function execute(pool, o, log = console.log) {
     manifest=loadManifest();save(o.backupDir,manifest);
     if (o.stage === 'cleanup') {
       // Versioned migration changes schema/guards only; it never enables or deletes history.
-      const code = await require('./migrate').run(pool, { args: ['--through', '070_energy_quality_retention.sql'] });
+      const code = await require('./migrate').run(pool, { args: ['--through', '072_energy_chunk_trigger_dispatch.sql'] });
       if (code) throw Error('Migration failed');
       await client.query(`INSERT INTO energy_history_policy(company_id,retention_days,enabled,maintenance,retained_from)
         VALUES($1,5,true,true,$2) ON CONFLICT(company_id) DO UPDATE SET retention_days=5,
@@ -204,7 +230,8 @@ async function execute(pool, o, log = console.log) {
           if(starts.length)range={first:starts[0],last:new Date().toISOString()};
         }
         if(!range) {
-          const result=await client.query(`SELECT MIN(${op.time}) AS first,MAX(${op.time}) AS last FROM ${op.table} WHERE company_id=$1 AND (${op.predicate})`, [COMPANY, manifest.cutoff]);
+          const boundsPredicate=op.name==='late-old'?'payload IS NOT NULL AND COALESCE(to_timestamp(device_time),received_at)<$2':op.predicate;
+          const result=await client.query(`SELECT MIN(${op.time}) AS first,MAX(${op.time}) AS last FROM ${op.table} WHERE company_id=$1 AND (${boundsPredicate})`, [COMPANY, manifest.cutoff]);
           range=result.rows[0];
         }
         manifest.ranges[op.name]=range;save(o.backupDir,manifest);
@@ -219,7 +246,7 @@ async function execute(pool, o, log = console.log) {
       // Source deletion alone leaves Timescale materializations intact.
       // Refresh the ENTIRE removed history, including its original buckets.
       await rebuild.refresh(pool,{companyId:COMPANY,from:manifest.aggregate_from,to:new Date().toISOString(),decompress:true});
-      manifest.cleanup = await verify(client, manifest.cutoff); save(o.backupDir, manifest);
+      manifest.cleanup = await verify(client, manifest.cutoff,manifest.ranges?.['raw-old']); save(o.backupDir, manifest);
       if (!manifest.cleanup.complete) throw Error('Cleanup verification incomplete');
       log({ stage: 'cleanup', ...manifest.cleanup });
       return manifest.cleanup;
@@ -257,5 +284,5 @@ if (require.main === module) {
     max: 3, connectionTimeoutMillis: 5000, statement_timeout: 120000, application_name: 'energy-five-day-maintenance',
     ...(!o.apply ? { options: '-c default_transaction_read_only=on' } : {}) });
   execute(pool, o, item => console.log(JSON.stringify(item))).then(result => console.log(JSON.stringify(result)))
-    .catch(error => { console.error(error.code || error.message); process.exitCode = 1; }).finally(() => pool.end());
+    .catch(error => { console.error(error.code ? error.code+': '+error.message : error.message); process.exitCode = 1; }).finally(() => pool.end());
 }

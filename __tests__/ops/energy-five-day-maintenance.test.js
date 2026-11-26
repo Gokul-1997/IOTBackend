@@ -87,6 +87,19 @@ test('a completed larger window also covers smaller resume batches',async()=>{
   await ops.mutate(client,dir,m,ops.operations().find(op=>op.name==='raw-old'),from,through,()=>{});
   expect(client.query).not.toHaveBeenCalled();
 });
+test('a concurrent latest update rolls back and retries with a fresh verified snapshot',async()=>{
+  const m=manifest(),calls=[];let updates=0;
+  const client={query:jest.fn(async sql=>{
+    calls.push(sql);
+    if(sql.includes('AS line FROM'))return{rows:[{line:'{"company_id":4,"kwh_total":22}'}]};
+    if(sql.startsWith('DELETE FROM energy_meter_readings')&&++updates===1)throw Object.assign(new Error('concurrent update'),{code:'40001'});
+    return{rows:[],rowCount:1};
+  })};
+  await ops.mutate(client,dir,m,ops.operations()[0],from,through,()=>{});
+  expect(calls.filter(sql=>sql==='ROLLBACK')).toHaveLength(1);
+  expect(calls.filter(sql=>sql==='COMMIT')).toHaveLength(1);
+  expect(m.completed).toHaveLength(1);expect(m.backups).toHaveLength(2);
+});
 test('a failed competing maintenance lock cannot change another run\'s manifest or paused jobs', async () => {
   const m = {...manifest(),jobs:[{job_id:1069,scheduled:true}]};
   const bytes = JSON.stringify(m,null,2);
@@ -117,4 +130,19 @@ test('verification checks old continuous aggregates as well as source history', 
   expect(result.complete).toBe(false);
   expect(result['energy_electrical_1m-old']).toBe('1');
   for(const c of calls)expect(c.params[0]).toBe(4);
+});
+test('CNC verification covers the certified history in bounded receipt windows',async()=>{
+  const calls=[];
+  const pool={query:async(sql,params)=>{
+    calls.push({sql,params});
+    if(sql.includes('AS retained'))return{rows:[{retained:'40'}]};
+    return{rows:[{n:sql.includes('AND received_at>=$3 AND received_at<$4')?'1':'0'}]};
+  }};
+  const result=await ops.verify(pool,manifest().cutoff,
+    {first:'2026-11-19T06:00:00.000Z',last:'2026-11-20T18:00:00.000Z'});
+  const windows=calls.filter(c=>c.sql.includes('AND received_at>=$3 AND received_at<$4'));
+  expect(windows).toHaveLength(2);
+  expect(windows[0].params.slice(2)).toEqual([new Date('2026-11-19T00:00:00Z'),new Date('2026-11-20T00:00:00Z')]);
+  expect(windows[1].params.slice(2)).toEqual([new Date('2026-11-20T00:00:00Z'),new Date('2026-11-21T00:00:00Z')]);
+  expect(result['raw-old']).toBe('2');expect(result.complete).toBe(false);
 });

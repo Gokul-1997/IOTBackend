@@ -52,6 +52,12 @@ async function verify(connectionString) {
         'INSERT INTO queued VALUES($1,$2,$3)';`);
     await client.query(migration);
     await client.query(migration);
+    const lateIndex=fs.readFileSync(path.join(__dirname,'../src/migrations/071_energy_late_observed_index.sql'),'utf8');
+    await client.query(lateIndex);await client.query(lateIndex);
+    assert.equal((await client.query('SELECT COUNT(*)::int AS n FROM pg_indexes WHERE schemaname=$1 AND indexname=$2',
+      [schema,'telemetry_late_company_observed_energy'])).rows[0].n,1);
+    const chunkFix=fs.readFileSync(path.join(__dirname,'../src/migrations/072_energy_chunk_trigger_dispatch.sql'),'utf8');
+    await client.query(chunkFix);await client.query(chunkFix);
     assert.equal((await client.query('SELECT COUNT(*)::int AS n FROM energy_history_policy')).rows[0].n, 0,
       'installation must not enable a retention policy or delete tenant data');
     await client.query(`INSERT INTO energy_history_policy(company_id,retention_days,enabled) VALUES(4,5,TRUE)`);
@@ -63,6 +69,23 @@ async function verify(connectionString) {
       energy,voltage,current,power,parts_count) VALUES
       (4,19,NOW(),EXTRACT(EPOCH FROM NOW()-INTERVAL '6 days'),100,415,1,2,37),
       (5,19,NOW(),EXTRACT(EPOCH FROM NOW()-INTERVAL '6 days'),200,416,2,-1,38)`);
+    await client.query(`CREATE TABLE meter_chunk_fixture(LIKE energy_meter_readings INCLUDING ALL);
+      CREATE TRIGGER energy_guard BEFORE INSERT OR UPDATE ON meter_chunk_fixture FOR EACH ROW EXECUTE FUNCTION energy_guard_measurements();
+      CREATE TABLE raw_chunk_fixture(LIKE telemetry_raw INCLUDING ALL);
+      CREATE TRIGGER energy_guard BEFORE INSERT OR UPDATE ON raw_chunk_fixture FOR EACH ROW EXECUTE FUNCTION energy_guard_measurements();
+      CREATE TABLE hourly_chunk_fixture(LIKE production_hourly INCLUDING ALL);
+      CREATE TRIGGER energy_guard BEFORE INSERT OR UPDATE ON hourly_chunk_fixture FOR EACH ROW EXECUTE FUNCTION energy_guard_shared_history();
+      INSERT INTO meter_chunk_fixture(company_id,machine_id,read_at,kwh_total,kw_total,v_ll_avg)
+      VALUES(4,19,NOW(),100,-0.199,1e31),(4,19,NOW()-INTERVAL '6 days',100,1,415);
+      INSERT INTO raw_chunk_fixture(company_id,machine_id,received_at,device_time,energy,parts_count)
+      VALUES(4,19,NOW(),EXTRACT(EPOCH FROM NOW()-INTERVAL '6 days'),100,37);
+      INSERT INTO hourly_chunk_fixture VALUES(4,19,NOW()-INTERVAL '6 days',100,12,3600);`);
+    assert.deepEqual((await client.query('SELECT kwh_total,kw_total,v_ll_avg FROM meter_chunk_fixture')).rows,
+      [{kwh_total:100,kw_total:-0.199,v_ll_avg:null}], 'meter chunks must use meter fields, not CNC device_time');
+    assert.deepEqual((await client.query('SELECT energy,parts_count FROM raw_chunk_fixture')).rows,
+      [{energy:null,parts_count:37}]);
+    assert.deepEqual((await client.query('SELECT energy_kwh,produced_qty,run_seconds FROM hourly_chunk_fixture')).rows,
+      [{energy_kwh:0,produced_qty:12,run_seconds:3600}]);
     const oldCnc = (await client.query('SELECT company_id,energy,voltage,current,power,parts_count FROM telemetry_raw ORDER BY company_id')).rows;
     assert.deepEqual(oldCnc, [
       { company_id: 4, energy: null, voltage: null, current: null, power: null, parts_count: 37 },
