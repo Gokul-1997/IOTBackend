@@ -568,7 +568,8 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
         avg_voltage: weighted('avg_voltage', 'voltage_readings'),
         avg_current: weighted('avg_current', 'current_readings'),
         kwh_vs_yesterday_pct: vsYesterday,
-        overload_alerts: machines.filter(m => m.is_overloaded).length,
+        overload_alerts: machines.some(m=>m.overload_kw!=null)&&!machines.some(m=>m.overload_kw!=null&&m.peak_kw!=null)
+          ? null : machines.filter(m => m.is_overloaded).length,
         // whether any machine has a limit to be judged against: 0 alerts with none set is no all-clear
         overload_limit_set: machines.some(m => m.overload_kw != null),
         overload_top: worst ? { machine_serial_no: worst.machine_serial_no, exceeded_kw: round(worst.peak_kw - worst.overload_kw, 1) } : null

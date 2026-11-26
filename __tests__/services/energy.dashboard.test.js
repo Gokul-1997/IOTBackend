@@ -631,6 +631,11 @@ describe('no invented full-period figures or invalid tariff settings', () => {
 
 
 describe('electrical corruption guard', () => {
+  test('a configured limit without valid power is unavailable rather than an all-clear zero',async()=>{
+    queueAll({machines:[machineRow({peak_kw:3.04e31})],settings:[{machine_id:null,overload_kw:50}]});
+    const result=await svc.getEnergy({company_id});
+    expect(result.kpis).toMatchObject({overload_alerts:null,overload_limit_set:true,overload_top:null});
+  });
   test('impossible finite readings never affect averages or create overloads, while measured energy stays unchanged', async () => {
     queueAll({ machines: [
       machineRow({ machine_id: 1, kwh: '30', avg_voltage: 1.5e15, avg_current: 2.5e27,
