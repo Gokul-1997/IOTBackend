@@ -51,7 +51,7 @@ async function preflight(pool,companyId) {
     (SELECT extversion FROM pg_extension WHERE extname='timescaledb') AS timescaledb,
     (SELECT COUNT(*) FROM energy_meter_readings r LEFT JOIN machines m ON m.id=r.machine_id
       WHERE (r.company_id=$1 OR r.company_id IS NULL) AND (r.company_id IS NULL OR m.company_id IS DISTINCT FROM r.company_id))::int AS invalid_owners,
-    (SELECT MIN(received_at) FROM telemetry_raw WHERE company_id=$1) AS legacy_from,
+    (SELECT MIN(received_at) FROM telemetry_raw WHERE company_id=$1 AND (energy IS NOT NULL OR voltage IS NOT NULL OR current IS NOT NULL OR power IS NOT NULL)) AS legacy_from,
     (SELECT MIN(read_at) FROM energy_meter_readings WHERE company_id=$1) AS meter_from,
     (SELECT MAX(read_at) FROM energy_meter_readings WHERE company_id=$1) AS meter_through,
     (SELECT COUNT(*) FROM energy_reconcile_queue WHERE company_id=$1)::int AS queued_machines`,[companyId]);
@@ -184,7 +184,11 @@ async function refresh(pool,o) {
       await pool.query(`CALL refresh_continuous_aggregate('${name}',$1::timestamptz,$2::timestamptz)`,[range.from,range.to]);
       refreshed.push({name,from:range.from.toISOString(),to:range.to.toISOString(),decompressed_chunks:chunks.length});
     }finally {
-      for(const jobId of paused)await pool.query('SELECT alter_job($1,scheduled=>TRUE)',[jobId]);
+      // Preserve the original storage layout after a historical repair.
+      // Use the public API; internal compressed tables are never edited.
+      try {
+        if(o.decompress)for(const chunk of chunks)await pool.query('SELECT compress_chunk($1::regclass,if_not_compressed=>TRUE)',[chunk.chunk]);
+      } finally {for(const jobId of paused)await pool.query('SELECT alter_job($1,scheduled=>TRUE)',[jobId]);}
     }
   }
   let cleared=0;
@@ -283,11 +287,13 @@ async function execute(pool,o,log=console.log) {
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
       const {rows:[clock]}=await client.query('SELECT CURRENT_TIMESTAMP AS as_of');
-      const through=new Date(new Date(clock.as_of).getTime()+1);
+      const asOf=new Date(new Date(clock.as_of).getTime()+1);
+      const through=o.certifiedThrough ? new Date(o.certifiedThrough) : asOf;
+      if(!Number.isFinite(through.getTime())||through>asOf||through<=new Date(o.from))throw Error('Invalid certified cutover boundary');
       // A bounded recent tail proves that the live collector has captured
       // every supplied scalar after the certified historical receipt window.
       // Older tails must be backfilled first, rather than scanning months here.
-      if(Date.parse(o.to)<through.getTime()-DAY)throw Error('Cutover refused: backfill --to must be within the last 24 hours');
+      if(Date.parse(o.to)<asOf.getTime()-DAY)throw Error('Cutover refused: backfill --to must be within the last 24 hours');
       const result=await verify(client,{...o,to:through.toISOString()});
       const pf=await preflight(client,o.companyId);
       if(!result.complete||pf.invalid_owners||
@@ -305,7 +311,7 @@ async function execute(pool,o,log=console.log) {
           AND COALESCE(to_timestamp(t.device_time),t.received_at)<$3
           AND (${[['energy','kwh_total'],['voltage','v_ll_avg'],['current','i_avg'],['power','kw_total']]
     .map(([source,target])=>`(t.${source} IS NOT NULL AND ABS(t.${source})<'Infinity'::float8 AND r.${target} IS NULL)`).join(' OR ')})`,
-      [o.companyId,new Date(o.to),through]);
+      [o.companyId,new Date(o.to),asOf]);
       if(BigInt(tail.missing_scalar_rows)!==0n)throw Error('Cutover refused: live collector has uncaptured scalar observations. Extend source backfill and drain before retrying.');
       await setReady(client,o.companyId,true,o.from,through);
       await client.query('COMMIT');

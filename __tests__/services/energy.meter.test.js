@@ -65,7 +65,7 @@ describe('meterReadings — input and tenancy', () => {
     expect(mockDb.calls()[1].params).toEqual([15, 99]);
   });
 
-  test('the meter list is this company\'s machines, read within 30 days', async () => {
+  test('the meter list is this company\'s machines, read within five days', async () => {
     given();
     await svc.meterReadings({ companyId: 4, nowMs: NOW });
     const q = mockDb.calls()[0];
@@ -74,7 +74,7 @@ describe('meterReadings — input and tenancy', () => {
     expect(q.text).toMatch(/WHERE m.company_id = \$1/);
     expect(q.text).toMatch(/r.read_at >= \$2 AND r.read_at <= \$3/);
     expect(q.text).toMatch(/ORDER BY r.read_at DESC LIMIT 1/);
-    expect(q.params).toEqual([4, new Date(NOW - 30 * 86400e3), new Date(NOW)]);
+    expect(q.params).toEqual([4, new Date(NOW - 5 * 86400e3), new Date(NOW)]);
   });
 
   test('with no machine named, the first machine with a meter is shown', async () => {
@@ -105,12 +105,12 @@ describe('meterReadings — input and tenancy', () => {
 });
 
 describe('meterReadings — the window', () => {
-  test('every read is this machine, bounded to the range; the latest within 30 days', async () => {
+  test('every read is this machine, bounded to the range; the latest within five days', async () => {
     given({ machine: [{ id: 15, machine_serial_no: 'VMC - 1 - F' }] });
     const d = await svc.meterReadings({ companyId: 4, machineId: 15, range: '4h', nowMs: NOW });
     expect(d.range).toEqual({ key: '4h', from: NOW - 4 * 3600e3, to: NOW, bucket_seconds: 300 });
     const latest = callMatching(/WITH latest_at AS MATERIALIZED/);
-    expect(latest.params).toEqual([15, new Date(NOW - 30 * 86400e3), new Date(NOW), 4]);
+    expect(latest.params).toEqual([15, new Date(NOW - 5 * 86400e3), new Date(NOW), 4]);
     const points = callMatching(/AS kw_avg,\s+MIN\(kw_total\)/);
     expect(points.params).toEqual([15, new Date(NOW - 4 * 3600e3), new Date(NOW), '300 seconds', 4]);
     expect(points.text).toMatch(/date_bin\(\$4::interval, read_at/);
@@ -132,7 +132,7 @@ describe('meterReadings — energy used', () => {
     expect(q.text).toMatch(/value > 0 OR \(register <> 'kwh' AND positive_before = 0\)/);
     expect(q.text).toMatch(/WHEN prev_value IS NULL OR value < prev_value THEN NULL/);
     expect(q.text).toMatch(/value - prev_value\s+> 2000 \* GREATEST\(EXTRACT\(EPOCH FROM read_at - prev_at\), 300\) \/ 3600\.0 THEN NULL/);
-    expect(q.text).toMatch(/value >= 0 AND value < 'Infinity'::float8/);
+    expect(q.text).toMatch(/value >= 0 AND value <= 1000000000000/);
   });
 
   test('the range\'s energy is the sum of its intervals, and each point carries its own', async () => {
@@ -226,16 +226,16 @@ describe('meterReadings — the latest reading', () => {
     expect(latest.frequency_hz).toBeNull();
   });
 
-  test('latest-channel SQL scans only the owned bounded interval, ignores absent/nonfinite channels, then fetches exact rows', async () => {
+  test('latest-channel SQL scans only the owned bounded interval, ignores absent and physically impossible channels, then fetches exact rows', async () => {
     given();
     await svc.meterReadings({ companyId: 4, nowMs: NOW });
     const { text, params } = callMatching(/WITH latest_at AS MATERIALIZED/);
-    expect(text).toContain("MAX(r.read_at) FILTER (WHERE r.kw_total IS NOT NULL AND ABS(r.kw_total::float8) < 'Infinity'::float8) AS kw_total_at");
+    expect(text).toContain("MAX(r.read_at) FILTER (WHERE r.kw_total IS NOT NULL AND r.kw_total BETWEEN -2000 AND 2000) AS kw_total_at");
     expect(text.match(/r\.machine_id = \$1 AND r\.read_at >= \$2 AND r\.read_at <= \$3/g)).toHaveLength(2);
     expect(text.match(/r\.company_id = \$4/g)).toHaveLength(2);
     expect(text).toContain('r.read_at = field.at');
     expect(text).toContain('jsonb_object_agg(field.name, EXTRACT(EPOCH FROM r.read_at) * 1000) AS field_observed_at');
-    expect(params).toEqual([15, new Date(NOW - 30 * 86400e3), new Date(NOW), 4]);
+    expect(params).toEqual([15, new Date(NOW - 5 * 86400e3), new Date(NOW), 4]);
   });
 
   test('stale negative power cannot turn fresh energy registers into a current wiring warning', async () => {
@@ -298,4 +298,23 @@ test('every query binds exactly the parameters it references', async () => {
     const refs = [...text.matchAll(/\$(\d+)/g)].map(m => Number(m[1]));
     expect(params.length).toBe(refs.length ? Math.max(...refs) : 0);
   }
+});
+
+
+test('finite corrupted meter fields lose freshness and chart values without discarding valid signed power or zero', async () => {
+  given({ latest: [{ field_values: { v_ll_avg: 1.5e15, i_avg: 2.5e27, kw_total: -0.199,
+      pf_avg: 4, thd_i1: 0, kwh_total: 681.4 },
+    field_observed_at: { v_ll_avg: NOW - 1000, i_avg: NOW - 1000, kw_total: NOW - 1000,
+      pf_avg: NOW - 1000, thd_i1: NOW - 1000, kwh_total: NOW - 1000 } }],
+    points: [{ t: NOW, kw_avg: -0.199, i_avg: 2.5e27, v_ll_avg: 1.5e15, pf_avg: 4 }],
+    summary: { kw_avg: -0.199, kw_peak: 3.04e31, v_ll_avg: 1.5e15, i_avg: 2.5e27 } });
+  const result = await svc.meterReadings({ companyId: 4, nowMs: NOW });
+  expect(result.latest).toMatchObject({ v_ll_avg: null, i_avg: null, pf_avg: null, kw_total: -0.199,
+    thd_i1: 0, kwh_total: 681.4 });
+  expect(result.latest.field_observed_at).toMatchObject({ v_ll_avg: null, i_avg: null,
+    pf_avg: null, kw_total: NOW - 1000, thd_i1: NOW - 1000 });
+  expect(result.points[0]).toMatchObject({ kw_avg: -0.199, i_avg: null, v_ll_avg: null, pf_avg: null });
+  expect(result.summary.kw).toMatchObject({ avg: -0.199, peak: null });
+  expect(result.summary.i.avg).toBeNull();
+  expect(result.summary.v_ll.avg).toBeNull();
 });

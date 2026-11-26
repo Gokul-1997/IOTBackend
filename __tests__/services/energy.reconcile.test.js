@@ -162,3 +162,34 @@ describe('shift classification',()=>{
     expect(shiftFor([],new Date(start))).toBeNull();
   });
 });
+
+
+test('automatic replay only claims and refreshes verified companies; explicit rebuild can prepare an unready company', async () => {
+  const previous = process.env.ENERGY_V2_ENABLED;
+  const db = require('../../src/db');
+  const client = { release: jest.fn(), query: jest.fn(async sql => ({
+    rows: sql.includes('pg_try_advisory_lock') ? [{ ok: true }] : []
+  })) };
+  const connection = db.connect.mockImplementation(async () => client);
+  try {
+    delete process.env.ENERGY_V2_ENABLED;
+    await job();
+    const automatic = client.query.mock.calls.filter(([sql]) =>
+      /SELECT company_id,machine_id FROM energy_(?:reconcile|refresh)_queue/.test(sql));
+    expect(automatic).toHaveLength(2);
+    for (const [sql] of automatic) expect(sql).toContain('EXISTS(SELECT 1 FROM energy_pipeline_state s WHERE');
+    client.query.mockClear();
+    await job.run({ pool: db, companyId: 4, touchCache: false });
+    const rebuild = client.query.mock.calls.filter(([sql]) =>
+      /SELECT company_id,machine_id FROM energy_(?:reconcile|refresh)_queue/.test(sql));
+    expect(rebuild).toHaveLength(2);
+    for (const [sql, params] of rebuild) {
+      expect(sql).not.toContain('energy_pipeline_state');
+      expect(params[0]).toBe(4);
+    }
+  } finally {
+    connection.mockReset();
+    if (previous === undefined) delete process.env.ENERGY_V2_ENABLED;
+    else process.env.ENERGY_V2_ENABLED = previous;
+  }
+});

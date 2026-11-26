@@ -268,7 +268,7 @@ describe('overload alerts', () => {
     // current transformers face the wrong way); MAX alone would never flag it
     queueAll();
     await svc.getEnergy({ company_id });
-    expect(allSql()).toMatch(/MAX\(ABS\(t\.power\)\) FILTER \(WHERE ABS\(t\.power\) < 'Infinity'::float8\) AS peak_kw/);
+    expect(allSql()).toMatch(/MAX\(ABS\(t\.power\)\) FILTER \(WHERE t\.power IS NOT NULL AND t\.power BETWEEN -2000 AND 2000\) AS peak_kw/);
   });
 
   test('never flags when no threshold is configured', async () => {
@@ -342,11 +342,11 @@ describe('input validation', () => {
       .rejects.toMatchObject({ status: 400 });
   });
 
-  test('defaults to the last 7 days', () => {
+  test('defaults to five plant-calendar days', () => {
     const { start, end } = svc.resolveRange({});
     const days = (new Date(end) - new Date(start)) / 86_400_000;
-    expect(days).toBeGreaterThan(5.5);
-    expect(days).toBeLessThan(7.5);
+    expect(days).toBeGreaterThan(4.5);
+    expect(days).toBeLessThan(5.5);
   });
 });
 
@@ -366,8 +366,8 @@ describe('export', () => {
   test('an unknown figure exports blank rather than a misleading zero', async () => {
     queueTable({ machines: [machineRow({ kwh: null, produced: '0', peak_kw: null })] });
     const rows = await svc.getExportRows({ company_id });
-    expect(rows[0]['Energy (kWh)']).toBe('');
-    expect(rows[0]['kWh per part']).toBe('');
+    expect(rows[0]['Energy (Units)']).toBe('');
+    expect(rows[0]['Units per part']).toBe('');
     expect(rows[0]['Peak kW']).toBe('');
   });
 });
@@ -540,9 +540,9 @@ describe('bounded, authorized Energy reads', () => {
     expect(d.machines).toMatchObject({ total: 205, limit: 200, totalPages: 2 });
   });
 
-  test('historical to-only ranges resolve seven plant days ending on the selected date', () => {
+  test('historical to-only ranges resolve five plant days ending on the selected date', () => {
     expect(svc.resolveRange({ to: '2020-01-07' })).toEqual({
-      start: '2020-01-01T00:00:00+05:30', end: '2020-01-07T23:59:59.999+05:30'
+      start: '2020-01-03T00:00:00+05:30', end: '2020-01-07T23:59:59.999+05:30'
     });
   });
 
@@ -578,9 +578,9 @@ describe('complete Energy exports', () => {
     queueTable({ machines: [machineRow({ kwh: '8', rejected_intervals: 1 })],
       settings: [{ machine_id: null, cost_per_kwh: 2, currency: 'INR' }] });
     const [r] = await svc.getExportRows({ company_id });
-    expect(r['Energy (kWh)']).toBe(8);
+    expect(r['Energy (Units)']).toBe(8);
     expect(r['Cost (INR)']).toBe('');
-    expect(r['kWh per part']).toBe('');
+    expect(r['Units per part']).toBe('');
     expect(r['Energy coverage']).toBe('Partial: meter gaps');
   });
 });
@@ -626,5 +626,26 @@ describe('no invented full-period figures or invalid tariff settings', () => {
     mockDb.queueResponse({ rows: [{ id: 1 }] });
     await svc.saveSettings({ company_id, cost_per_kwh: 0, overload_kw: 0, currency: 'inr' });
     expect(mockDb.calls()[0].params.slice(2, 5)).toEqual([0, 'INR', 0]);
+  });
+});
+
+
+describe('electrical corruption guard', () => {
+  test('impossible finite readings never affect averages or create overloads, while measured energy stays unchanged', async () => {
+    queueAll({ machines: [
+      machineRow({ machine_id: 1, kwh: '30', avg_voltage: 1.5e15, avg_current: 2.5e27,
+        voltage_readings: 500, current_readings: 500, peak_kw: 3.04e31 }),
+      machineRow({ machine_id: 2, kwh: '8', avg_voltage: 415, avg_current: 0,
+        voltage_readings: 4, current_readings: 4, peak_kw: 0 })
+    ], settings: [{ machine_id: null, overload_kw: 50 }] });
+    const result = await svc.getEnergy({ company_id });
+    expect(result.kpis).toMatchObject({ total_kwh: 38, avg_voltage: 415, avg_current: 0,
+      overload_alerts: 0, overload_top: null });
+    expect(result.machines.data.find(m => m.machine_id === 1)).toMatchObject({
+      kwh: 30, avg_voltage: null, avg_current: null, peak_kw: null, is_overloaded: false
+    });
+    expect(result).toMatchObject({ display_unit: 'Units', unit_definition: '1 Unit = 1 kWh' });
+    expect(allSql()).toContain('AVG(t.voltage) FILTER (WHERE t.voltage IS NOT NULL AND t.voltage BETWEEN 0 AND 2000)');
+    expect(allSql()).toContain('AVG(t.current) FILTER (WHERE t.current IS NOT NULL AND t.current BETWEEN 0 AND 10000)');
   });
 });

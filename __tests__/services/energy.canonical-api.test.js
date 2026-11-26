@@ -105,6 +105,13 @@ test('an empty canonical range stays unknown and never reads legacy meter histor
   expect(calls.some(call => /energy_observations/.test(call.text))).toBe(false);
 });
 
+test('canonical shift charts receive the exact energy snapshot used by cached KPI figures', async()=>{
+  const snapshot=[{machine_id:25,shift_id:6,kwh:3}];
+  energyStore.figures.mockResolvedValue({machines:[],trend:[],machineDays:[],months:[],shiftEnergy:snapshot});
+  await energy.getEnergy({company_id:4,from:day,to:day});
+  expect(energyStore.byShift).toHaveBeenCalledWith(expect.objectContaining({companyId:4}),snapshot);
+});
+
 test('machine detail uses canonical intervals independently from status telemetry', async () => {
   givenMachine();
   const result = await machine.machineDetail(null, 25, 4);

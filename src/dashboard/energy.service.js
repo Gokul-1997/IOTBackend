@@ -39,6 +39,7 @@ const cache = require('./cache');
 const { machineOrder } = require('../lib/machine-order');
 const { tableRows } = require('../lib/table-query');
 const energyStore = require('./energy-store');
+const { cleanElectrical, validSql, VERSION: QUALITY_VERSION } = require('../lib/energy-quality');
 
 /* The Machine Detail table's header (lib/table-query.js, 29 Oct 2026): sort
    any column, filter overload; built here, so read from each row. */
@@ -86,7 +87,7 @@ function resolveRange({ from, to }) {
 
   const last = to || plantToday();
   const end = `${last}T23:59:59.999${IST}`;
-  const first = from || new Date(Date.parse(`${last}T00:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10);
+  const first = from || new Date(Date.parse(`${last}T00:00:00Z`) - 4 * 86_400_000).toISOString().slice(0, 10);
   const start = `${first}T00:00:00${IST}`;
   if (new Date(start) > new Date(end)) throw httpError('from must not be after to', 400);
   if (Date.parse(end) - Date.parse(start) >= 366 * 86_400_000) throw httpError('Energy date range must not exceed 366 days', 400);
@@ -135,7 +136,7 @@ const DAILY_ENERGY_CTE = `
        AND t.received_at <= $3::timestamptz + INTERVAL '5 minutes' AND t.received_at <= NOW()
        AND t.observed_at >= $2::timestamptz
        AND t.observed_at <= $3::timestamptz AND t.observed_at <= NOW()
-       AND t.energy > 0 AND t.energy < 'Infinity'::float8
+       AND t.energy > 0 AND t.energy <= 1000000000000
        %MACHINE%
     WINDOW w AS (PARTITION BY t.machine_id ORDER BY t.observed_at, t.received_at)
   ),
@@ -233,11 +234,11 @@ async function machineFigures({ companyId, machineId, search, start, end }) {
           The size of the power, not its sign: a meter whose current
           transformers face the wrong way reports a running machine as
           negative kW (VMC - 1 - F did), which MAX alone would never flag. */
-       SELECT t.machine_id, MAX(ABS(t.power)) FILTER (WHERE ABS(t.power) < 'Infinity'::float8) AS peak_kw,
-              AVG(t.voltage) FILTER (WHERE ABS(t.voltage) < 'Infinity'::float8) AS avg_voltage,
-              AVG(t.current) FILTER (WHERE ABS(t.current) < 'Infinity'::float8) AS avg_current,
-              COUNT(t.voltage) FILTER (WHERE ABS(t.voltage) < 'Infinity'::float8)::bigint AS voltage_readings,
-              COUNT(t.current) FILTER (WHERE ABS(t.current) < 'Infinity'::float8)::bigint AS current_readings
+       SELECT t.machine_id, MAX(ABS(t.power)) FILTER (WHERE ${validSql('power', 't.power')}) AS peak_kw,
+              AVG(t.voltage) FILTER (WHERE ${validSql('voltage', 't.voltage')}) AS avg_voltage,
+              AVG(t.current) FILTER (WHERE ${validSql('current', 't.current')}) AS avg_current,
+              COUNT(t.voltage) FILTER (WHERE ${validSql('voltage', 't.voltage')})::bigint AS voltage_readings,
+              COUNT(t.current) FILTER (WHERE ${validSql('current', 't.current')})::bigint AS current_readings
          FROM energy_observations t
          JOIN machines m ON m.id = t.machine_id AND m.company_id = $1 AND m.is_active = TRUE
         WHERE t.company_id = $1${plantSql('t.machine_id')}
@@ -409,10 +410,19 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
 
   const canonicalEnergy = await energyStore.enabled(companyId);
   const source = canonicalEnergy ? energyStore : { figures, byShift };
+  const opts={ companyId, machineId, search, start, end };
+  const figureRequest=cache.remember('energy:figures', companyId,
+    { machineId, search, start, end, pipeline: canonicalEnergy ? 'v2' : 'legacy', quality: QUALITY_VERSION }, cache.ttlFor(q),
+    () => source.figures(opts));
   const [figs, shifts, settings] = await Promise.all([
-    cache.remember('energy:figures', companyId, { machineId, search, start, end, pipeline: canonicalEnergy ? 'v2' : 'legacy' }, cache.ttlFor(q),
-      () => source.figures({ companyId, machineId, search, start, end })),
-    when(want.charts, () => source.byShift({ companyId, machineId, search, start, end }), []),
+    figureRequest,
+    when(want.charts, async () => {
+      if(canonicalEnergy) {
+        const snapshot=await figureRequest;
+        if(Array.isArray(snapshot.shiftEnergy))return source.byShift(opts,snapshot.shiftEnergy);
+      }
+      return source.byShift(opts);
+    }, []),
     settingsFor(companyId)
   ]);
   const rows = figs.machines;
@@ -421,7 +431,7 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
     const cfg  = settings.forMachine(r.machine_id);
     const kwh  = round(r.kwh, 8);
     const rate = round(cfg?.cost_per_kwh, 8);
-    const peak = round(r.peak_kw, 8);
+    const peak = cleanElectrical('power', r.peak_kw);
     const overloadKw = round(cfg?.overload_kw, 8);
     const produced = Number(r.produced);
     const machineComplete = r.energy_complete !== false && kwh != null && !Number(r.rejected_intervals || 0)
@@ -443,8 +453,8 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
       kwh_per_part: (machineComplete && produced > 0) ? round(kwh / produced, 4) : null,
       cost: (machineComplete && rate != null && cfg?.currency === settings.currency) ? round(kwh * rate) : null,
       peak_kw: round(peak),
-      avg_voltage: r.avg_voltage == null ? null : round(r.avg_voltage, 1),
-      avg_current: r.avg_current == null ? null : round(r.avg_current, 1),
+      avg_voltage: round(cleanElectrical('voltage', r.avg_voltage), 1),
+      avg_current: round(cleanElectrical('current', r.avg_current), 1),
       voltage_readings: Number(r.voltage_readings || 0),
       current_readings: Number(r.current_readings || 0),
       overload_kw: overloadKw,
@@ -542,6 +552,7 @@ async function getEnergy(q = {}, { exportAll = false } = {}) {
     },
     currency: settings.currency,
     cost_basis: 'current_tariff_estimate',
+    display_unit: 'Units', unit_definition: '1 Unit = 1 kWh', quality_version: QUALITY_VERSION,
     energy_source: canonicalEnergy ? 'canonical_energy_intervals' : 'telemetry_counter_deltas',
     by_shift_source: canonicalEnergy ? 'canonical_energy_intervals' : 'production_hourly',
     // Company-default metadata only. Trend costs are priced per machine
@@ -676,10 +687,10 @@ exports.getExportRows = async (q = {}) => {
 
   return d.machines.data.map(r => ({
     'Machine':        r.machine_serial_no,
-    'Energy (kWh)':   nz(r.kwh),
+    'Energy (Units)':   nz(r.kwh),
     'Operating time': hhmm(r.run_seconds),
     'Production':     r.produced,
-    'kWh per part':   nz(r.kwh_per_part),
+    'Units per part':   nz(r.kwh_per_part),
     [`Cost (${d.currency})`]: r.currency === d.currency ? nz(r.cost) : '',
     'Cost currency':  r.currency,
     'Energy coverage': r.energy_complete ? 'Measured intervals' : (r.kwh == null ? 'Not reported' : 'Partial: meter gaps'),

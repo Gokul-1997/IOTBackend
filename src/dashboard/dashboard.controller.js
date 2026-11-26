@@ -48,7 +48,7 @@ const { current: readAuthorization } = require('../lib/read-scope');
  */
 async function sendShared(res, name, req, compute, { live = false } = {}) {
   const ttl = live ? dashCache.LIVE_TTL : dashCache.ttlFor(req.query);
-  const params=name==='energy'?{...req.query,energy_pipeline:await energyStore.enabled(req.user.company_id)?'v2':'legacy'}:req.query;
+  const params=name==='energy'?{...req.query,energy_pipeline:await energyStore.enabled(req.user.company_id)?'v2':'legacy',energy_quality:1}:req.query;
   const body = await dashCache.json(name, req.user.company_id, params, ttl,
     async () => ({ status: 'success', data: await compute() }));
   return res.type('application/json').send(body);

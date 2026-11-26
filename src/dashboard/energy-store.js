@@ -69,7 +69,7 @@ function splitRange(start, end, maxGrain = 'month') {
 function invalidate(companyId) { if (companyId == null) readiness.clear(); else readiness.delete(Number(companyId)); }
 async function enabled(companyId) {
   // Deliberately no database access while deployment/backfill is disabled.
-  if (process.env.ENERGY_V2_ENABLED !== 'true') return false;
+  if (process.env.ENERGY_V2_ENABLED === 'false') return false;
   const company = id(companyId, 'Company');
   const old = readiness.get(company);
   if (old && old.until > Date.now()) return old.ready;
@@ -224,21 +224,35 @@ async function machineFigures(opts, bounds) {
     r.v_ln_avg AS vn_sum,(r.v_ln_avg IS NOT NULL)::int AS vn_count,r.i_avg AS i_sum,(r.i_avg IS NOT NULL)::int AS i_count
     FROM energy_meter_readings r JOIN selected m ON m.machine_id=r.machine_id WHERE r.company_id=$1
     AND r.read_at >= $2::timestamptz AND r.read_at < $3::timestamptz`;
+  // A correlated dirty-range OR over the complete raw range made every
+  // request revisit all five days of readings. Probe the affected minute
+  // ranges by machine/time instead; each unrefreshed minute replaces exactly
+  // one rollup, and the disjoint partial edges cannot be counted twice.
+  const dirtyEdges = `SELECT e.* FROM energy_refresh_queue d JOIN selected m ON m.machine_id=d.machine_id
+    CROSS JOIN LATERAL (SELECT r.machine_id,ABS(r.kw_total) AS peak_kw,
+      r.v_ll_avg AS vl_sum,(r.v_ll_avg IS NOT NULL)::int AS vl_count,
+      r.v_ln_avg AS vn_sum,(r.v_ln_avg IS NOT NULL)::int AS vn_count,
+      r.i_avg AS i_sum,(r.i_avg IS NOT NULL)::int AS i_count
+      FROM energy_meter_readings r WHERE r.company_id=$1 AND r.machine_id=d.machine_id
+        AND r.read_at>=GREATEST($2::timestamptz,'${iso(lower)}'::timestamptz,${bucketSQL('minute','d.from_at')})
+        AND r.read_at<LEAST($3::timestamptz,'${iso(upper)}'::timestamptz,${bucketSQL('minute','d.through_at')}+INTERVAL '1 minute')
+      OFFSET 0) e WHERE d.company_id=$1`;
   const electrical = lower < upper
     ? `SELECT r.machine_id,r.kw_peak AS peak_kw,r.v_ll_avg_sum AS vl_sum,r.v_ll_avg_count AS vl_count,
         r.v_ln_avg_sum AS vn_sum,r.v_ln_avg_count AS vn_count,r.i_avg_sum AS i_sum,r.i_avg_count AS i_count
        FROM energy_electrical_1m r JOIN selected m ON m.machine_id=r.machine_id WHERE r.company_id=$1
        AND r.bucket >= $${params.push(iso(lower))}::timestamptz AND r.bucket < $${params.push(iso(upper))}::timestamptz
        AND NOT ${dirty('r.bucket')}
-       UNION ALL ${edge} AND (r.read_at < '${iso(lower)}'::timestamptz OR r.read_at >= '${iso(upper)}'::timestamptz OR ${dirty('r.read_at')})`
+       UNION ALL ${edge} AND (r.read_at < '${iso(lower)}'::timestamptz OR r.read_at >= '${iso(upper)}'::timestamptz)
+       UNION ALL ${dirtyEdges}`
     : edge;
   const { rows } = await db.query(`/* energy:v2:machine-figures */ WITH selected AS (${selected}),
     run AS (SELECT p.machine_id,SUM(p.run_seconds)::bigint AS run_seconds,SUM(p.produced_qty)::bigint AS produced
       FROM production_hourly p JOIN selected m ON m.machine_id=p.machine_id
       WHERE p.company_id=$1 AND p.hour_start >= $2::timestamptz AND p.hour_start < $3::timestamptz GROUP BY p.machine_id),
     electrical AS (${electrical}), supply AS (SELECT machine_id,MAX(peak_kw) AS peak_kw,
-      CASE WHEN SUM(vl_count)>0 THEN SUM(vl_sum)/SUM(vl_count) ELSE SUM(vn_sum)/NULLIF(SUM(vn_count),0) END AS avg_voltage,
-      CASE WHEN SUM(vl_count)>0 THEN SUM(vl_count) ELSE SUM(vn_count) END AS voltage_readings,
+      SUM(vl_sum)/NULLIF(SUM(vl_count),0) AS avg_voltage,
+      SUM(vl_count) AS voltage_readings,
       SUM(i_sum)/NULLIF(SUM(i_count),0) AS avg_current,SUM(i_count) AS current_readings FROM electrical GROUP BY machine_id)
     SELECT m.*,COALESCE(run.run_seconds,0) AS run_seconds,COALESCE(run.produced,0) AS produced,
       supply.peak_kw,supply.avg_voltage,supply.voltage_readings,supply.avg_current,supply.current_readings,
@@ -272,13 +286,13 @@ async function figures(opts) {
     return { day, ...total,
       machines: rows.filter(r => r.kwh != null && r.energy_complete).length };
   });
-  return { machines: mapped, machineDays, trend,
+  return { machines: mapped, machineDays, trend, shiftEnergy: energy,
     months: [...grouped(trend, r => r.day.slice(0, 7)).entries()].map(([month, rows]) => ({ month: `${month}-01`, ...combine(rows) })) };
 }
-async function byShift(opts) {
+async function byShift(opts, frozenEnergy = null) {
   const bounds = range(opts.start, opts.end);
   const [energy, production] = await Promise.all([
-    counters(opts, [{ ...bounds }], 'total'),
+    Array.isArray(frozenEnergy) ? Promise.resolve(frozenEnergy) : counters(opts, [{ ...bounds }], 'total'),
     (() => {
       const params = [id(opts.companyId, 'Company'), iso(bounds.start), iso(bounds.end)];
       const selected = selectedSQL(opts, params);

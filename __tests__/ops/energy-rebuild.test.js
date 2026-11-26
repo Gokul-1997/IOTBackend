@@ -144,6 +144,23 @@ test('cutover verifies source/fact history through a frozen recent snapshot, the
   expect(db.calls.at(-1).text).toBe('COMMIT');
 });
 
+test('an explicit certified cutover boundary allows newer live work without claiming it is reconciled',async()=>{
+  const db=cutoverDB();
+  const result=await ops.execute(db.pool,{...valid('enable'),certifiedThrough:TO});
+  expect(result.ready).toBe(true);
+  expect(result.verified_through).toBe(new Date(TO).toISOString());
+  const verification=db.calls.find(call=>call.text.includes('WITH source_points'));
+  expect(verification.params[2].toISOString()).toBe(new Date(TO).toISOString());
+  const liveTail=db.calls.find(call=>call.text.includes('energy:verify:live-tail'));
+  expect(liveTail.params[2].toISOString()).toBe('2026-10-01T19:45:00.001Z');
+});
+test.each(['invalid','2026-10-03T00:00:00Z',FROM])('cutover refuses invalid, future, or empty certified bounds: %s',async certifiedThrough=>{
+  const db=cutoverDB();
+  await expect(ops.execute(db.pool,{...valid('enable'),certifiedThrough})).rejects.toThrow('Invalid certified cutover boundary');
+  expect(db.calls.some(call=>call.text.startsWith('INSERT INTO energy_pipeline_state'))).toBe(false);
+  expect(db.calls.at(-1).text).toBe('ROLLBACK');
+});
+
 test('drain cannot report completion merely because another worker holds the lock',async()=>{
   const db=database(async text=>({rows:[text.includes('pg_try_advisory_lock')?{ok:false}:{remaining:2}]}));
   await expect(ops.execute(db.pool,valid('drain'),()=>{})).rejects.toThrow('busy in another worker');

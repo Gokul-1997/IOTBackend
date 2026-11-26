@@ -126,6 +126,21 @@ test('shift names are available for energy-only machines without CNC production 
   expect(result).toEqual([expect.objectContaining({ shift_id: 6, shift_name: 'Night', kwh: 3, produced: 0 })]);
 });
 
+test('shift energy reuses the cached dashboard snapshot when newer facts have arrived', async () => {
+  const opts={companyId:4,start:ist('00:00:00'),end:ist('23:59:59.999')};
+  answers.push([/energy:v2:counters/,[fact({kwh:3})]],
+    [/energy:v2:machine-figures/,[{machine_id:25,pending:false}]],
+    [/energy:v2:shift-production/,[{shift_id:6,shift_name:'Night'}]]);
+  const snapshot=await store.figures(opts);
+  answers[0][1]=[fact({kwh:9})]; // Database changes after figures were cached.
+  db.query.mockClear();
+  const shifts=await store.byShift(opts,snapshot.shiftEnergy);
+  expect(snapshot.machines[0].kwh).toBe(3);
+  expect(shifts.reduce((n,row)=>n+row.kwh,0)).toBe(3);
+  expect(db.query.mock.calls.some(([sql])=>sql.includes('energy:v2:counters'))).toBe(false);
+  expect((await store.byShift(opts))[0].kwh).toBe(9); // A fresh snapshot sees new work.
+});
+
 test('overnight shift periods start on selected date and future shifts contribute no expected time', () => {
   const shift = { id: 6, start_time: '20:00:00', end_time: '08:00:00' };
   const ranges = periodRanges('2026-10-28', '2026-10-28', [shift], 6, ms(ist('12:00:00')));
@@ -209,4 +224,16 @@ test('reports expose energy without production rows rather than silently adding 
   const coverage = await store.attachReportEnergy(4, rows);
   expect(rows[0]).toMatchObject({ energy_kwh: 2, energy_complete: true });
   expect(coverage).toMatchObject({ energy_without_production_rows_kwh: 3, energy_complete: false });
+});
+
+
+test('an unset deployment flag discovers verified readiness per company and never opts an unready tenant into summaries', async () => {
+  delete process.env.ENERGY_V2_ENABLED;
+  answers.push([/SELECT ready/, params => [{ ready: params[0] === 4 }]]);
+  expect(await store.enabled(4)).toBe(true);
+  expect(await store.enabled(5)).toBe(false);
+  expect(db.query.mock.calls.map(([, params]) => params)).toEqual([[4], [5]]);
+  process.env.ENERGY_V2_ENABLED = 'false';
+  expect(await store.enabled(4)).toBe(false);
+  expect(db.query).toHaveBeenCalledTimes(2);
 });

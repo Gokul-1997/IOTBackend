@@ -194,7 +194,8 @@ function latestMeterSQL(root) {
   if (!columns.length) throw new Error('Meter columns unavailable');
   // Compile only the pure SQL builder; never load application db.js or .env.
   const build = vm.runInNewContext(`(${implementation[0]})`, {
-    plantSql: () => '', READING_COLUMNS: columns, process: { env: {} }
+    plantSql: () => '', READING_COLUMNS: columns, process: { env: {} },
+    validSql: require(path.join(root, 'src/lib/energy-quality')).validSql
   }, { timeout: 100 });
   return build(columns, { legacyOnly: true });
 }

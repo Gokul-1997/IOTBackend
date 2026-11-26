@@ -147,7 +147,7 @@ async function reconcileMachine(client,{companyId,machineId,from,maxPoints=MAX_P
   }
 }
 
-async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null,touchCache=true,refreshAggregates=true}={}) {
+async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null,touchCache=true,refreshAggregates=true,onlyReady=false}={}) {
   pool=pool||require('../db');
   if (!Number.isInteger(maxMachines) || maxMachines<1 || maxMachines>1000) throw new RangeError('maxMachines must be between 1 and 1000');
   const client=await pool.connect();
@@ -158,6 +158,7 @@ async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null
     try {
       const {rows:queue}=await client.query(`SELECT company_id,machine_id FROM energy_reconcile_queue
         WHERE ($1::int IS NULL OR company_id=$1) AND COALESCE(claimed_from,from_at)<=NOW()
+        ${onlyReady ? 'AND EXISTS(SELECT 1 FROM energy_pipeline_state s WHERE s.company_id=energy_reconcile_queue.company_id AND s.ready)' : ''}
         ORDER BY updated_at,company_id,machine_id LIMIT $2`,[companyId,maxMachines]);
       for(const item of queue) {
         try {
@@ -169,7 +170,7 @@ async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null
         }catch(error){summary.errors.push({company_id:item.company_id,machine_id:item.machine_id,code:error.code||error.name});}
       }
       const {rows:refresh}=refreshAggregates?await client.query(`SELECT company_id,machine_id FROM energy_refresh_queue
-        WHERE ($1::int IS NULL OR company_id=$1) ORDER BY updated_at LIMIT $2`,[companyId,maxMachines])
+        WHERE ($1::int IS NULL OR company_id=$1) ${onlyReady ? 'AND EXISTS(SELECT 1 FROM energy_pipeline_state s WHERE s.company_id=energy_refresh_queue.company_id AND s.ready)' : ''} ORDER BY updated_at LIMIT $2`,[companyId,maxMachines])
         :{rows:[]};
       for(const item of refresh) {
         const result=await require('../lib/energy-refresh').refreshQueued(client,item.company_id,item.machine_id);
@@ -180,9 +181,9 @@ async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null
   return summary;
 }
 module.exports=async()=>{
-  if(process.env.ENERGY_V2_ENABLED!=='true')return;
+  if(process.env.ENERGY_V2_ENABLED==='false')return;
   try {
-    const result=await run();
+    const result=await run({onlyReady:true});
     if(result.errors.length)console.error('[energy-reconcile] incomplete devices',JSON.stringify(result.errors));
   }catch(error){if(error.code!=='42P01')console.error('[energy-reconcile]',error.code||error.name);}
 };

@@ -21,6 +21,7 @@
  */
 const db = require('./energy-db');
 const energyStore = require('./energy-store');
+const { cleanElectrical, validSql } = require('../lib/energy-quality');
 const { plantSql } = require('../lib/read-scope');
 const { machineOrder } = require('../lib/machine-order');
 
@@ -29,6 +30,7 @@ const RANGES = {
   '4h':  { seconds: 4 * 3600,   bucket: 300 },
   '12h': { seconds: 12 * 3600,  bucket: 900 },
   '24h': { seconds: 24 * 3600,  bucket: 1800 },
+  '5d':  { seconds: 5 * 86400,  bucket: 2 * 3600 },
   '7d':  { seconds: 7 * 86400,  bucket: 3 * 3600 }
 };
 
@@ -37,7 +39,7 @@ const RANGES = {
 const STALE_MS = 120e3;
 /* How far back a meter and its latest reading are looked for: bounded so
    the hypertable prunes chunks. */
-const LOOKBACK_MS = 30 * 86400e3;
+const LOOKBACK_MS = 5 * 86400e3;
 /* The same misread rule as the Energy screen and the collector: a rise
    faster than this since the last real reading counts nothing. */
 const MAX_KW = 2000;
@@ -93,12 +95,12 @@ function latestMeterFieldsSQL(columns, {
   activeOnly = false, upperExclusive = false, legacyOnly = false
 } = {}) {
   if (!columns.length || columns.some(column => !READING_COLUMNS.includes(column))) throw new TypeError('Invalid meter fields');
-  const projected = process.env.ENERGY_V2_ENABLED === 'true' && !legacyOnly;
+  const projected = process.env.ENERGY_V2_ENABLED !== 'false' && !legacyOnly;
   const bound = `r.machine_id = ${machine} AND r.read_at >= ${from} AND r.read_at ${upperExclusive ? '<' : '<='} ${to}
           AND r.read_at <= NOW() AND r.company_id = ${company}${plantSql('r.machine_id')}${projected ? ' AND NOT (SELECT ready FROM readiness)' : ''}`;
   const owned = activeOnly ? `JOIN machines m ON m.id = r.machine_id AND m.company_id = ${company} AND m.is_active` : '';
   const legacy = `WITH latest_at AS MATERIALIZED (
-    SELECT ${columns.map(c => `MAX(r.read_at) FILTER (WHERE r.${c} IS NOT NULL AND ABS(r.${c}::float8) < 'Infinity'::float8) AS ${c}_at`).join(',\n           ')}
+    SELECT ${columns.map(c => `MAX(r.read_at) FILTER (WHERE ${validSql(c, 'r.' + c)}) AS ${c}_at`).join(',\n           ')}
       FROM energy_meter_readings r
       ${owned}
      WHERE ${bound}
@@ -143,7 +145,7 @@ function latestMeterSnapshot(row, columns, nowMs, staleMs = STALE_MS) {
   const times = {};
   const stale = {};
   for (const column of columns) {
-    let value = num(values[column]);
+    let value = cleanElectrical(column, values[column]);
     const candidate = observed ? num(observed[column]) : ms(row.read_at);
     if (candidate !== null && candidate > nowMs) value = null;
     latest[column] = value;
@@ -355,7 +357,7 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
            ) AS counter(register, value)
           WHERE machine_id = $1 AND read_at >= $2 AND read_at <= $3
             AND company_id = $5${plantSql('machine_id')}
-            AND value >= 0 AND value < 'Infinity'::float8
+            AND value >= 0 AND value <= 1000000000000
        ), observed AS (
          SELECT *, COUNT(*) FILTER (WHERE value > 0) OVER (
                     PARTITION BY register ORDER BY read_at
@@ -412,12 +414,12 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
   const kwhByT = new Map(energyQ.rows.map(e => [Number(e.t), num(e.kwh)]));
   const points = pointsQ.rows.map(p => ({
     t: Number(p.t), samples: p.samples,
-    kw_avg: num(p.kw_avg), kw_min: num(p.kw_min), kw_max: num(p.kw_max),
-    kva_avg: num(p.kva_avg), kva_max: num(p.kva_max),
-    i_avg: num(p.i_avg), i_max: num(p.i_max),
-    v_ll_avg: num(p.v_ll_avg), v_ll_min: num(p.v_ll_min), v_ll_max: num(p.v_ll_max),
-    pf_avg: num(p.pf_avg), pf_min: num(p.pf_min),
-    hz_avg: num(p.hz_avg),
+    kw_avg: cleanElectrical('kw_total', p.kw_avg), kw_min: cleanElectrical('kw_total', p.kw_min), kw_max: cleanElectrical('kw_total', p.kw_max),
+    kva_avg: cleanElectrical('kva_total', p.kva_avg), kva_max: cleanElectrical('kva_total', p.kva_max),
+    i_avg: cleanElectrical('i_avg', p.i_avg), i_max: cleanElectrical('i_avg', p.i_max),
+    v_ll_avg: cleanElectrical('v_ll_avg', p.v_ll_avg), v_ll_min: cleanElectrical('v_ll_avg', p.v_ll_min), v_ll_max: cleanElectrical('v_ll_avg', p.v_ll_max),
+    pf_avg: cleanElectrical('pf_avg', p.pf_avg), pf_min: cleanElectrical('pf_avg', p.pf_min),
+    hz_avg: cleanElectrical('frequency_hz', p.hz_avg),
     kwh: kwhByT.has(Number(p.t)) ? kwhByT.get(Number(p.t)) : null
   }));
 
@@ -435,13 +437,13 @@ exports.meterReadings = async ({ companyId, machineId, range = '24h', nowMs = Da
     kvah:       measuredSum(energyQ.rows, 'kvah'),
     energy_intervals: energyQ.rows.reduce((total, row) => total + (num(row.energy_intervals) || 0), 0),
     energy_rejected_intervals: energyQ.rows.reduce((total, row) => total + (num(row.energy_rejected_intervals) || 0), 0),
-    kw:   { avg: num(s.kw_avg), min: num(s.kw_min), max: num(s.kw_max), peak: num(s.kw_peak) },
-    kva:  { avg: num(s.kva_avg), max: num(s.kva_max) },
-    i:    { avg: num(s.i_avg), max: num(s.i_max) },
-    v_ll: { min: num(s.v_ll_min), avg: num(s.v_ll_avg), max: num(s.v_ll_max) },
-    v_ln: { min: num(s.v_ln_min), avg: num(s.v_ln_avg), max: num(s.v_ln_max) },
-    pf:   { avg: num(s.pf_avg), min: num(s.pf_min) },
-    hz:   { min: num(s.hz_min), avg: num(s.hz_avg), max: num(s.hz_max) }
+    kw:   { avg: cleanElectrical('kw_total', s.kw_avg), min: cleanElectrical('kw_total', s.kw_min), max: cleanElectrical('kw_total', s.kw_max), peak: cleanElectrical('kw_total', s.kw_peak) },
+    kva:  { avg: cleanElectrical('kva_total', s.kva_avg), max: cleanElectrical('kva_total', s.kva_max) },
+    i:    { avg: cleanElectrical('i_avg', s.i_avg), max: cleanElectrical('i_avg', s.i_max) },
+    v_ll: { min: cleanElectrical('v_ll_avg', s.v_ll_min), avg: cleanElectrical('v_ll_avg', s.v_ll_avg), max: cleanElectrical('v_ll_avg', s.v_ll_max) },
+    v_ln: { min: cleanElectrical('v_ln_avg', s.v_ln_min), avg: cleanElectrical('v_ln_avg', s.v_ln_avg), max: cleanElectrical('v_ln_avg', s.v_ln_max) },
+    pf:   { avg: cleanElectrical('pf_avg', s.pf_avg), min: cleanElectrical('pf_avg', s.pf_min) },
+    hz:   { min: cleanElectrical('frequency_hz', s.hz_min), avg: cleanElectrical('frequency_hz', s.hz_avg), max: cleanElectrical('frequency_hz', s.hz_max) }
   };
   if (canonical) {
     summary.energy_source = 'canonical_energy_intervals';

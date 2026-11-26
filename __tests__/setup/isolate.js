@@ -20,6 +20,7 @@
  */
 Object.assign(process.env, {
   NODE_ENV: 'test',
+  ENERGY_V2_ENABLED: 'false',
   PHASE3_LICENSING_ENABLED: 'false',
   DEPLOYMENT_MODE: 'cloud',
   DOTENV_CONFIG_QUIET: 'true',
