@@ -10,6 +10,20 @@ const COLUMNS=['company_id','machine_id','register','observed_at','interval_star
 const allDay=[{id:4,start_time:'00:00:00',end_time:'00:00:00'}];
 const point=(at,value,extra={})=>({read_at:new Date(at),source_at:at,kwh_total:value,...extra});
 const start='2026-10-29T10:00:00.000Z';
+test('a certified historical drain leaves newer live packets queued',async()=>{
+  const calls=[];
+  const client={release:jest.fn(),query:jest.fn(async(sql,params)=>{
+    calls.push({sql,params});
+    return{rows:sql.includes('pg_try_advisory_lock')?[{ok:true}]:[]};
+  })};
+  const pool={connect:async()=>client};
+  await job.run({pool,companyId:4,before:start,touchCache:false,refreshAggregates:false});
+  const selection=calls.find(c=>c.sql.includes('SELECT company_id,machine_id FROM energy_reconcile_queue'));
+  expect(selection.sql).toContain('LEAST(claimed_from,from_at)<$3::timestamptz');
+  expect(selection.params).toEqual([4,20,start]);
+  expect(calls.some(c=>/^(UPDATE|DELETE FROM) energy_reconcile_queue/.test(c.sql))).toBe(false);
+  await expect(job.run({pool,before:'bad'})).rejects.toThrow('valid timestamp');
+});
 
 function fixture({points=[],rules=[],events=[],shifts=allDay,prior={},pending=null,failInsert=false}={}) {
   const state={facts:[],queue:true,pending,claimed:start,sql:[],checkpoints:[]};

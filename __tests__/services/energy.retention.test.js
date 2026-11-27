@@ -53,6 +53,14 @@ function fixture({ policies = [policy], lock = true, active = true, extension = 
 }
 
 beforeEach(() => jest.useFakeTimers().setSystemTime(new Date('2026-11-26T12:30:00Z')));
+test('manual retention can select exactly one company and rejects an invalid owner',async()=>{
+  const f=fixture({policies:[]});
+  await job.run({pool:f.pool,companyId:4,touchCache:false});
+  const selection=f.calls.find(q=>q.sql.includes('FROM energy_history_policy WHERE enabled'));
+  expect(selection.sql).toContain('AND company_id=$3');
+  expect(selection.params).toEqual([10,3600000,4]);
+  await expect(job.run({pool:f.pool,companyId:0})).rejects.toThrow('positive integer');
+});
 afterEach(() => jest.useRealTimers());
 
 test('an inert or absent initial policy watermark never triggers historical deletion', async () => {

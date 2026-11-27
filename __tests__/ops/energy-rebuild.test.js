@@ -32,6 +32,17 @@ test('a dry run performs no writes or hidden database reads',async()=>{
   expect(await ops.execute(db.pool,{...valid('source'),apply:false})).toMatchObject({dry_run:true,stage:'source'});
   expect(db.calls).toHaveLength(0);
 });
+test('only an explicitly certified cleanup bound prunes legacy receipt history during preflight',async()=>{
+  const db=database(async()=>({rows:[{}]}));
+  await ops.preflight(db.pool,4,FROM);
+  expect(db.calls[0].text).toContain('AND received_at>=$2::timestamptz');
+  expect(db.calls[0].params).toEqual([4,FROM]);
+  db.calls.length=0;
+  await ops.preflight(db.pool,4);
+  expect(db.calls[0].text).not.toContain('AND received_at>=$2::timestamptz');
+  expect(db.calls[0].params).toEqual([4]);
+  await expect(ops.preflight(db.pool,4,'bad')).rejects.toThrow('Invalid certified legacy receipt bound');
+});
 
 test('each source window commits its sparse merge and certificate atomically',async()=>{
   const db=database(async text=>({rows:[],rowCount:text.startsWith('INSERT INTO energy_meter_readings')?3:1}));
@@ -164,4 +175,11 @@ test.each(['invalid','2026-10-03T00:00:00Z',FROM])('cutover refuses invalid, fut
 test('drain cannot report completion merely because another worker holds the lock',async()=>{
   const db=database(async text=>({rows:[text.includes('pg_try_advisory_lock')?{ok:false}:{remaining:2}]}));
   await expect(ops.execute(db.pool,valid('drain'),()=>{})).rejects.toThrow('busy in another worker');
+});
+test('a live cutover finishes when its certified prefix is drained, without waiting for future packets',async()=>{
+  const db=database(async text=>({rows:text.includes('pg_try_advisory_lock')?[{ok:true}]:text.includes('AS remaining')?[{remaining:0}]:[]}));
+  expect(await ops.execute(db.pool,{...valid('drain'),certifiedThrough:TO},()=>{})).toMatchObject({remaining:0});
+  const pending=db.calls.find(call=>call.text.includes('AS remaining'));
+  expect(pending.text).toContain('LEAST(claimed_from,from_at)<$2::timestamptz');
+  expect(pending.params).toEqual([4,TO]);
 });

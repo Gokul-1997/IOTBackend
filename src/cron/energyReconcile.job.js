@@ -147,9 +147,10 @@ async function reconcileMachine(client,{companyId,machineId,from,maxPoints=MAX_P
   }
 }
 
-async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null,touchCache=true,refreshAggregates=true,onlyReady=false}={}) {
+async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null,touchCache=true,refreshAggregates=true,onlyReady=false,before=null}={}) {
   pool=pool||require('../db');
   if (!Number.isInteger(maxMachines) || maxMachines<1 || maxMachines>1000) throw new RangeError('maxMachines must be between 1 and 1000');
+  if(before!==null&&!Number.isFinite(Date.parse(before)))throw new RangeError('before must be a valid timestamp');
   const client=await pool.connect();
   const summary={machines:0,points:0,facts:0,errors:[]};
   try {
@@ -158,8 +159,9 @@ async function run({pool=null,maxMachines=20,maxPoints=MAX_POINTS,companyId=null
     try {
       const {rows:queue}=await client.query(`SELECT company_id,machine_id FROM energy_reconcile_queue
         WHERE ($1::int IS NULL OR company_id=$1) AND COALESCE(claimed_from,from_at)<=NOW()
+        ${before===null?'':'AND LEAST(claimed_from,from_at)<$3::timestamptz'}
         ${onlyReady ? 'AND EXISTS(SELECT 1 FROM energy_pipeline_state s WHERE s.company_id=energy_reconcile_queue.company_id AND s.ready)' : ''}
-        ORDER BY updated_at,company_id,machine_id LIMIT $2`,[companyId,maxMachines]);
+        ORDER BY updated_at,company_id,machine_id LIMIT $2`,before===null?[companyId,maxMachines]:[companyId,maxMachines,before]);
       for(const item of queue) {
         try {
           const from=await claim(client,item.company_id,item.machine_id);

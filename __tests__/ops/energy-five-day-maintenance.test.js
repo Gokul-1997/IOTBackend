@@ -146,3 +146,12 @@ test('CNC verification covers the certified history in bounded receipt windows',
   expect(windows[1].params.slice(2)).toEqual([new Date('2026-11-20T00:00:00Z'),new Date('2026-11-21T00:00:00Z')]);
   expect(result['raw-old']).toBe('2');expect(result.complete).toBe(false);
 });
+test('a resumed rebuild preserves the completed source window instead of reseeding all history',async()=>{
+  const m={...manifest(),source:{changed:0}};
+  const pool={query:jest.fn(async()=>({rows:[{first:from,last:through}]}))};
+  expect(await ops.rebuildWindow(pool,m)).toEqual({from,to:through});
+  expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('energy_backfill_windows'),[4]);
+  pool.query.mockClear();
+  expect(await ops.rebuildWindow(pool,m)).toEqual({from,to:through});
+  expect(pool.query).not.toHaveBeenCalled();
+});

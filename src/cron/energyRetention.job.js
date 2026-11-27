@@ -145,9 +145,10 @@ async function sweep(client, policy) {
   return { company_id: companyId, from, through, counts };
 }
 
-async function run({ pool = null, maxPolicies = 10, windowMs = HOUR, touchCache = true } = {}) {
+async function run({ pool = null, maxPolicies = 10, windowMs = HOUR, touchCache = true, companyId = null } = {}) {
   if (!Number.isInteger(maxPolicies) || maxPolicies < 1 || maxPolicies > 100) throw new RangeError('maxPolicies must be between 1 and 100');
   if (!Number.isInteger(windowMs) || windowMs < 60000 || windowMs > HOUR) throw new RangeError('windowMs must be between one minute and one hour');
+  if(companyId!==null&&(!Number.isSafeInteger(companyId)||companyId<=0))throw new RangeError('companyId must be a positive integer');
   pool = pool || require('../db');
   const client = await pool.connect();
   const summary = { policies: 0, sweeps: [], errors: [] };
@@ -160,8 +161,9 @@ async function run({ pool = null, maxPolicies = 10, windowMs = HOUR, touchCache 
         LEAST(COALESCE(last_swept_at,retained_from)+$2::bigint*INTERVAL '1 millisecond',
           energy_history_cutoff(company_id))::text AS through_at
         FROM energy_history_policy WHERE enabled AND NOT maintenance
+          ${companyId===null?'':'AND company_id=$3'}
           AND COALESCE(last_swept_at,retained_from) < energy_history_cutoff(company_id)
-        ORDER BY COALESCE(last_swept_at,retained_from),company_id LIMIT $1`, [maxPolicies, windowMs]);
+        ORDER BY COALESCE(last_swept_at,retained_from),company_id LIMIT $1`, companyId===null?[maxPolicies,windowMs]:[maxPolicies,windowMs,companyId]);
       for (const policy of policies) {
         try {
           const result = await sweep(client, policy);

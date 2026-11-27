@@ -153,6 +153,24 @@ async function verify(pool, cutoff, rawRange = null) {
   }
   return { ...result, ...row, complete: Object.values(result).every(n => BigInt(n) === 0n) };
 }
+async function rebuildWindow(pool,manifest) {
+  if(manifest.rebuild_window)return manifest.rebuild_window;
+  if(manifest.source) {
+    // Adopt the already completed source certificate on a resumed operation.
+    // A fresh tail must not force another full-history seed/reconciliation.
+    const {rows:[range]}=await pool.query(`SELECT MIN(from_at) AS first,MAX(through_at) AS last
+      FROM energy_backfill_windows WHERE company_id=$1`,[COMPANY]);
+    if(!range?.first||!range?.last)throw Error('Completed source stage has no receipt certificate');
+    manifest.rebuild_window={from:new Date(range.first).toISOString(),to:new Date(range.last).toISOString()};
+  }else {
+    const legacyReceiptFrom=new Date(Date.parse(manifest.cutoff)-5*60000).toISOString();
+    const pf=await rebuild.preflight(pool,COMPANY,legacyReceiptFrom);
+    const from=new Date(Math.min(Date.parse(manifest.cutoff),pf.legacy_from?new Date(pf.legacy_from).getTime():Infinity,
+      pf.meter_from?new Date(pf.meter_from).getTime():Infinity)-1).toISOString();
+    manifest.rebuild_window={from,to:new Date().toISOString()};
+  }
+  return manifest.rebuild_window;
+}
 async function execute(pool, o, log = console.log) {
   if (!o.apply) {
     const { rows: [row] } = await pool.query(`SELECT current_database() AS database,now() AS as_of,
@@ -252,13 +270,18 @@ async function execute(pool, o, log = console.log) {
       return manifest.cleanup;
     }
     if (!manifest.cleanup?.complete) throw Error('Run verified cleanup before rebuilding');
-    const pf = await rebuild.preflight(pool, COMPANY);
-    const from = new Date(Math.min(Date.parse(manifest.cutoff), pf.legacy_from ? new Date(pf.legacy_from).getTime() : Infinity,
-      pf.meter_from ? new Date(pf.meter_from).getTime() : Infinity) - 1).toISOString();
-    const to = new Date().toISOString();
-    const ro = { companyId: COMPANY, apply: true, from, to, stepMinutes: 15, decompress: true, certifiedThrough: to };
+    // Cleanup already certified the expired prefix and write guards prevent
+    // its return. Do not rescan years of CNC history to rediscover its absence.
+    const legacyReceiptFrom=new Date(Date.parse(manifest.cutoff)-5*60000).toISOString();
+    const {from,to}=await rebuildWindow(pool,manifest);save(o.backupDir,manifest);
+    const ro = { companyId: COMPANY, apply: true, from, to, stepMinutes: 15, decompress: true, certifiedThrough: to,legacyReceiptFrom };
     for (const stage of ['source', 'seed', 'drain', 'refresh', 'enable']) {
-      const result = await rebuild.execute(pool, { ...ro, stage }, log);
+      if(['source','seed'].includes(stage)&&manifest[stage])continue;
+      // Drain can include packets newer than the certified source boundary.
+      // Refresh their closed buckets too, while cutover still certifies only
+      // the frozen historical prefix and checks the live tail separately.
+      const stageOptions=stage==='refresh'?{...ro,to:new Date().toISOString()} : ro;
+      const result = await rebuild.execute(pool, { ...stageOptions, stage }, log);
       manifest[stage] = result; save(o.backupDir, manifest); log({ stage, result });
     }
     await client.query(`UPDATE energy_history_policy SET maintenance=false,last_swept_at=$2,updated_at=NOW() WHERE company_id=$1`, [COMPANY, manifest.cutoff]);
@@ -275,7 +298,7 @@ async function execute(pool, o, log = console.log) {
     if(unrestored.length)throw Error('Energy jobs require schedule recovery: '+unrestored.join(','));
   }
 }
-module.exports = { options, operations, backup, mutate, verify, execute };
+module.exports = { options, operations, backup, mutate, verify, rebuildWindow, execute };
 if (require.main === module) {
   let o; try { o = options(process.argv.slice(2)); } catch (e) { console.error(e.message); process.exit(1); }
   const env = require('dotenv').parse(fs.readFileSync(o.envFile));

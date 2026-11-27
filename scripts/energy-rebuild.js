@@ -45,16 +45,17 @@ function options(args) {
   }
   return out;
 }
-async function preflight(pool,companyId) {
+async function preflight(pool,companyId,legacyReceiptFrom=null) {
+  if(legacyReceiptFrom!=null&&!Number.isFinite(Date.parse(legacyReceiptFrom)))throw Error('Invalid certified legacy receipt bound');
   const {rows:[row]}=await pool.query(`SELECT
     (SELECT version()) AS postgres,
     (SELECT extversion FROM pg_extension WHERE extname='timescaledb') AS timescaledb,
     (SELECT COUNT(*) FROM energy_meter_readings r LEFT JOIN machines m ON m.id=r.machine_id
       WHERE (r.company_id=$1 OR r.company_id IS NULL) AND (r.company_id IS NULL OR m.company_id IS DISTINCT FROM r.company_id))::int AS invalid_owners,
-    (SELECT MIN(received_at) FROM telemetry_raw WHERE company_id=$1 AND (energy IS NOT NULL OR voltage IS NOT NULL OR current IS NOT NULL OR power IS NOT NULL)) AS legacy_from,
+    (SELECT MIN(received_at) FROM telemetry_raw WHERE company_id=$1 ${legacyReceiptFrom?'AND received_at>=$2::timestamptz':''} AND (energy IS NOT NULL OR voltage IS NOT NULL OR current IS NOT NULL OR power IS NOT NULL)) AS legacy_from,
     (SELECT MIN(read_at) FROM energy_meter_readings WHERE company_id=$1) AS meter_from,
     (SELECT MAX(read_at) FROM energy_meter_readings WHERE company_id=$1) AS meter_through,
-    (SELECT COUNT(*) FROM energy_reconcile_queue WHERE company_id=$1)::int AS queued_machines`,[companyId]);
+    (SELECT COUNT(*) FROM energy_reconcile_queue WHERE company_id=$1)::int AS queued_machines`,legacyReceiptFrom?[companyId,legacyReceiptFrom]:[companyId]);
   return row;
 }
 async function source(pool,o,log) {
@@ -238,7 +239,8 @@ async function verify(pool,o) {
       SELECT machine_id,read_at,register,value FROM energy_meter_readings r
       CROSS JOIN LATERAL(VALUES ${REGISTERS.map(r=>`('${r}',r.${r})`).join(',')}) v(register,value)
       WHERE company_id=$1 AND read_at>=$2 AND read_at<$3 AND value IS NOT NULL),
-    fact_points AS(SELECT * FROM energy_counter_intervals WHERE company_id=$1 AND observed_at>=$2 AND observed_at<$3),
+    fact_points AS(SELECT company_id,machine_id,register,observed_at,raw_value,delta
+      FROM energy_counter_intervals WHERE company_id=$1 AND observed_at>=$2 AND observed_at<$3),
     source AS(SELECT COUNT(*)::bigint n FROM source_points),
     facts AS(SELECT COUNT(*)::bigint n,SUM(delta) FILTER(WHERE register='kwh_total') AS kwh FROM fact_points),
     bad_source AS(SELECT COUNT(*)::bigint n FROM source_points s LEFT JOIN fact_points f
@@ -267,14 +269,16 @@ async function execute(pool,o,log=console.log) {
   if(o.stage==='seed')return seed(pool,o.companyId);
   if(o.stage==='drain') {
     const {run}=require('../src/cron/energyReconcile.job');
+    const before=o.certifiedThrough||null;
     let pages=0;
     for(;;) {
-      const result=await run({pool,companyId:o.companyId,maxMachines:10,maxPoints:2000,touchCache:false,refreshAggregates:false});
+      const result=await run({pool,companyId:o.companyId,maxMachines:10,maxPoints:2000,touchCache:false,refreshAggregates:false,before});
       log({stage:'drain',page:++pages,...result});
       if(result.errors.length)throw Error('Reconciliation failed; queue retained. Inspect last_error before retrying.');
       if(!result.machines) {
         const {rows:[left]}=await pool.query(`SELECT COUNT(*)::int AS remaining FROM energy_reconcile_queue
-          WHERE company_id=$1 AND COALESCE(claimed_from,from_at)<=NOW()`,[o.companyId]);
+          WHERE company_id=$1 AND COALESCE(claimed_from,from_at)<=NOW()
+          ${before===null?'':'AND LEAST(claimed_from,from_at)<$2::timestamptz'}`,before===null?[o.companyId]:[o.companyId,before]);
         if(Number(left.remaining))throw Error('Reconciliation is busy in another worker; retry drain after it finishes. Pending work is retained.');
         return {pages,remaining:0};
       }
@@ -295,7 +299,7 @@ async function execute(pool,o,log=console.log) {
       // Older tails must be backfilled first, rather than scanning months here.
       if(Date.parse(o.to)<asOf.getTime()-DAY)throw Error('Cutover refused: backfill --to must be within the last 24 hours');
       const result=await verify(client,{...o,to:through.toISOString()});
-      const pf=await preflight(client,o.companyId);
+      const pf=await preflight(client,o.companyId,o.legacyReceiptFrom||null);
       if(!result.complete||pf.invalid_owners||
         (pf.legacy_from&&Date.parse(o.from)>new Date(pf.legacy_from).getTime())||
         (pf.meter_from&&Date.parse(o.from)>new Date(pf.meter_from).getTime()))throw Error('Cutover refused: incomplete history, mismatched aggregates, invalid ownership or queued work');
