@@ -5,6 +5,7 @@ const answers = [];
 jest.mock('../../src/db', () => ({
   query: jest.fn(async (text) => {
     const hit = answers.find(([re]) => re.test(text));
+    if (hit?.[2]) await new Promise(resolve => setTimeout(resolve, hit[2]));   // a slow query, in ms
     return hit ? { rows: hit[1], rowCount: hit[1].length } : { rows: [], rowCount: 0 };
   })
 }));
@@ -72,3 +73,30 @@ test('editing the current component factor never changes recorded historical cou
   expect(after.trend).toEqual(before.trend);
   expect(after.energy.cost_per_part).toBe(before.energy.cost_per_part);
 });
+
+/* 27 Nov 2026: "[dashboard] factory took 11.9 s" on production, and which part
+   was slow was not known. A slow answer now names each part's time. */
+describe('the slow-answer log', () => {
+  afterEach(() => { jest.useRealTimers(); jest.restoreAllMocks(); });
+
+  test('a slow answer names the part that was slow', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-26T06:00:00Z') });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    answers.unshift([/FROM counted c/, [{ total: 2, running: 1, idle: 1, breakdown: 0, offline: 0 }], 3100]);
+    const pending = svc.getFactoryDashboard(req);
+    await jest.advanceTimersByTimeAsync(3200);
+    const d = await pending;
+    expect(d.production.produced).toBe(232);                                   // the answer itself is unchanged
+    const line = warn.mock.calls.map(c => String(c[0])).find(t => t.includes('factory parts'));
+    expect(line).toMatch(/\(company 4, 2026-10-26\)/);
+    expect(line).toMatch(/live 3\.1/);
+    expect(line).toMatch(/shifts 0\.0/);
+  });
+
+  test('a quick answer logs nothing', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    await svc.getFactoryDashboard(req);
+    expect(warn.mock.calls.some(c => String(c[0]).includes('factory parts'))).toBe(false);
+  });
+});
+

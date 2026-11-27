@@ -384,7 +384,10 @@ async function factoryEnergy(opts) {
   // and are fetched in the same database round trip as the day branches.
   const dailyRanges = ranges.filter(r => ['day', 'yesterday'].includes(r.label));
   const monthlyRanges = ranges.filter(r => !['day', 'yesterday'].includes(r.label));
-  const [shortRows, longRows] = await Promise.all([counters(opts, dailyRanges, 'hour'), counters(opts, monthlyRanges, 'total')]);
+  // opts.time: the Factory dashboard's stopwatch, naming these two in its slow-answer log
+  const time = opts.time || ((_name, work) => work);
+  const [shortRows, longRows] = await Promise.all([time('energy_day', counters(opts, dailyRanges, 'hour')),
+    time('energy_month', counters(opts, monthlyRanges, 'total'))]);
   const all = [...shortRows, ...longRows];
   const defaultSetting = settingRes.rows.find(r => r.machine_id == null);
   const overrides = new Map(settingRes.rows.filter(r => r.machine_id != null).map(r => [Number(r.machine_id), r]));

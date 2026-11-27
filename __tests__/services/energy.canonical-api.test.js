@@ -170,7 +170,7 @@ test('factory consumes the same ledger while preserving every production count a
   givenFactory();
   const result = await factory.getFactoryDashboard({ user: { company_id: 4 }, query: { date: day } });
   expect(energyStore.factoryEnergy).toHaveBeenCalledWith({ companyId: 4, machineId: null,
-    date: day, shiftId: null, asOf: new Date(`${day}T12:00:00+05:30`).toISOString() });
+    date: day, shiftId: null, asOf: new Date(`${day}T12:00:00+05:30`).toISOString(), time: expect.any(Function) });
   expect(result.energy).toMatchObject({ kwh: 1, month_kwh: 5, cost_day: 10, cost_month: 50,
     day_vs_yesterday_pct: -50, month_vs_last_pct: 25, cost_per_part: 1.25,
     energy_complete: true, accepted_intervals: 2 });

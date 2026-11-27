@@ -18,6 +18,26 @@ const energyStore = require('./energy-store');
 /* Critical / Non-Critical / Information — one definition, see severity.js. */
 const SEVERITY_CLASS = severityClass('severity');
 
+/* How long each part of the answer took, logged when the whole took 3 s or
+   more (27 Nov 2026: "[dashboard] factory took 11.9 s" on production, and
+   which part was not known). Times the queries only; changes nothing. */
+const SLOW_MS = 3000;
+function stopwatch() {
+  const started = Date.now();
+  const parts = {};
+  return {
+    time(name, work) {
+      const t = Date.now();
+      return Promise.resolve(work).finally(() => { parts[name] = Date.now() - t; });
+    },
+    report(context) {
+      if (Date.now() - started < SLOW_MS) return;
+      const list = Object.entries(parts).map(([name, ms]) => `${name} ${(ms / 1000).toFixed(1)}`).join(', ');
+      console.warn(`[dashboard] factory parts in s (${context}): ${list}`);
+    }
+  };
+}
+
 /**
  * Resolve the reporting window.
  * Production uses the Production Report's shift START date. One bounded
@@ -27,10 +47,11 @@ const SEVERITY_CLASS = severityClass('severity');
  */
 exports.getFactoryDashboard = async (req) => {
   const asOf       = new Date();
+  const watch      = stopwatch();
   const companyId  = req.user.company_id;
   const machineId  = parseMachineId(req.query.machine_id);
-  const win        = await resolveWindow(companyId, req.query);
-  const canonicalEnergy = await energyStore.enabled(companyId);
+  const win        = await watch.time('window', resolveWindow(companyId, req.query));
+  const canonicalEnergy = await watch.time('energy_switch', energyStore.enabled(companyId));
 
   const [
     settingsRes, machineRes, shiftRes, targetRes, yesterdayRes, measuredEnergy
@@ -203,10 +224,10 @@ exports.getFactoryDashboard = async (req) => {
       [companyId, win.day, asOf.toISOString(), ...(machineId ? [machineId] : []), ...(win.shift ? [win.shift.id] : [])]
     ),
     canonicalEnergy
-      ? energyStore.factoryEnergy({ companyId, machineId, date: win.day,
-        shiftId: win.shift?.id || null, asOf: asOf.toISOString() })
+      ? watch.time('energy', energyStore.factoryEnergy({ companyId, machineId, date: win.day,
+        shiftId: win.shift?.id || null, asOf: asOf.toISOString(), time: watch.time }))
       : Promise.resolve(null)
-  ]);
+  ].map((work, i) => i === 5 ? work : watch.time(['settings', 'live', 'shifts', 'targets', 'yesterday'][i], work)));
 
   const settings   = settingsRes.rows[0] || {};
   const rate       = Number(settings.energy_rate_per_kwh || 0);
@@ -281,7 +302,7 @@ exports.getFactoryDashboard = async (req) => {
         ${eventShift ? `AND shift_id = ${eventShift}` : ''}
       GROUP BY 1`, eventParams),
     monthRequest
-  ]);
+  ].map((work, i) => watch.time(['oee', 'downtime', 'alarms', 'month_kwh'][i], work)));
 
   /* Keep the existing OEE derivation/cycle/quality method, but its production
      inputs must be the exact same shift-day rows as the other factory tiles.
@@ -438,6 +459,7 @@ exports.getFactoryDashboard = async (req) => {
   const alarmBy = Object.fromEntries(alarmRes.rows.map(r => [r.class, r]));
   const dtRows  = downtimeRes.rows;
   const dtTotal = dtRows.reduce((a, r) => a + r.seconds, 0);
+  watch.report(`company ${companyId}, ${win.day}${win.shift ? `, shift ${win.shift.id}` : ''}${machineId ? `, machine ${machineId}` : ''}`);
 
   return {
     filters: {
