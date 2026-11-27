@@ -9,7 +9,7 @@ function conditionHealth(row, nowMs = Date.now()) {
   const observed = row.received_at == null ? NaN : new Date(row.received_at).getTime();
   if (!Number.isFinite(observed) || observed > nowMs) return null;
   const checks = [];
-  const add = (label, score) => checks.push({ label, score, band: score === 100 ? 'Normal' : score === 50 ? 'Warning' : 'Critical' });
+  const add = (label, score) => checks.push({ label, score, band: score === 100 ? 'Healthy' : score === 50 ? 'Normal' : 'Critical' });
   const high = (key, label, warning, critical, zeroValid = true) => {
     const value = numeric(row[key]);
     if (value !== null && (zeroValid ? value >= 0 : value > 0)) add(label, value >= critical ? 0 : value >= warning ? 50 : 100);
@@ -18,11 +18,11 @@ function conditionHealth(row, nowMs = Date.now()) {
     const value = numeric(row[key]);
     if (value !== null && value >= 0) add(label, value < 10 ? 0 : value < 100 ? 50 : 100);
   };
-  high('spindle_load', 'Spindle load', 60, 85);
+  high('spindle_load', 'Spindle load', 60, 80);
   high('spindle_motor_temp', 'Spindle temperature', 60, 80, false);
   low('spindle_insulation_res', 'Spindle insulation resistance');
   for (const axis of ['x', 'y', 'z']) {
-    high(`servo_load_${axis}`, `Servo ${axis.toUpperCase()} load`, 60, 85);
+    high(`servo_load_${axis}`, `Servo ${axis.toUpperCase()} load`, 60, 80);
     high(`servo_temp_${axis}`, `Servo ${axis.toUpperCase()} temperature`, 60, 80, false);
     high(`encoder_temp_${axis}`, `Encoder ${axis.toUpperCase()} temperature`, 60, 80, false);
     low(`servo_insulation_res_${axis}`, `Servo ${axis.toUpperCase()} insulation resistance`);
@@ -61,7 +61,7 @@ function conditionHealth(row, nowMs = Date.now()) {
     score, status: score >= 70 ? 'Good' : 'Bad', threshold: 70,
     observed_at: new Date(observed).toISOString(), stale: nowMs - observed > 60_000,
     reported_checks: checks.length, checks,
-    basis: 'Mean of reported checks: normal 100, warning 50, critical 0. Any critical check caps the score below 70. An active machine alarm sets the score to 0. Missing checks and zero temperature placeholders are excluded.'
+    basis: 'Mean of reported checks: healthy 100, normal 50, critical 0. Any critical check caps the score below 70. An active machine alarm sets the score to 0. Missing checks and zero temperature placeholders are excluded.'
   };
 }
 

@@ -10,6 +10,14 @@ beforeEach(resetDb);
 const now = Date.parse('2026-11-24T10:00:00Z');
 const at = { received_at: new Date(now).toISOString() };
 
+test.each(['spindle_load', 'servo_load_x', 'servo_load_y', 'servo_load_z', 'spindle_motor_temp'])(
+  '%s uses the requested 60 and 80 boundaries consistently in the health score', key => {
+    for (const [value, score, band] of [[59.9, 100, 'Healthy'], [60, 50, 'Normal'], [79.9, 50, 'Normal'], [80, 0, 'Critical'], [100, 0, 'Critical']]) {
+      expect(conditionHealth({ ...at, [key]: value }, now).checks).toEqual([{ label: expect.any(String), score, band }]);
+    }
+  }
+);
+
 test('health uses reported condition checks and the 70% Good boundary', () => {
   expect(conditionHealth({ ...at, servo_temp_x: 25, servo_temp_y: 65 }, now)).toMatchObject({ score: 75, status: 'Good', reported_checks: 2 });
   expect(conditionHealth({ ...at, servo_temp_x: 25, servo_temp_y: 85 }, now)).toMatchObject({ score: 50, status: 'Bad' });

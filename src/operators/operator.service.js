@@ -1,10 +1,11 @@
 const db = require('../db');
 const { ownedOrThrow } = require('../lib/tenant');
 const { tableQuery } = require('../lib/table-query');
-const { validateCreate } = require('../helpers/validators/operator.validator');
+const { validateCreate, normalizeOptionalDetails } = require('../helpers/validators/operator.validator');
 
 exports.create = async (data, plant_id, company_id) => {
   validateCreate(data);
+  data = normalizeOptionalDetails(data);
   // the shift and machines come from the request: they must be this company's
   await ownedOrThrow(company_id, { shift_id: data.shift_id, machine_ids: data.machine_ids });
 
@@ -15,10 +16,10 @@ exports.create = async (data, plant_id, company_id) => {
 
     const { rows } = await client.query(
       `INSERT INTO operators
-       (plant_id, company_id, operator_code, operator_name, skill_level)
-       VALUES (NULL,$1,$2,$3,$4)
+       (plant_id, company_id, operator_code, operator_name, skill_level, phone_number, date_of_birth)
+       VALUES (NULL,$1,$2,$3,$4,$5,$6)
        RETURNING id`,
-      [company_id, data.operator_code, data.operator_name, data.skill_level]
+      [company_id, data.operator_code, data.operator_name, data.skill_level, data.phone_number ?? null, data.date_of_birth ?? null]
     );
 
     const operatorId = rows[0].id;
@@ -148,6 +149,7 @@ exports.list = async (plant_id, query, company_id) => {
 // operator.service.js
 
 exports.update = async (id, data, plant_id, company_id) => {
+  data = normalizeOptionalDetails(data);
   /* The field update below is scoped to the company, but the assignment
      changes after it were keyed on the operator id alone: another company's
      operator could be moved to other machines and shifts. */
@@ -167,6 +169,8 @@ exports.update = async (id, data, plant_id, company_id) => {
       'operator_code',
       'operator_name',
       'skill_level',
+      'phone_number',
+      'date_of_birth',
       'is_active'
     ];
 
@@ -255,7 +259,8 @@ exports.getById = async (id, plant_id, company_id) => {
 
   // Basic operator
   const operator = await db.query(
-    `SELECT id, operator_code, operator_name, skill_level, is_active
+    `SELECT id, operator_code, operator_name, skill_level, is_active,
+            phone_number, date_of_birth::text AS date_of_birth
      FROM operators
      WHERE id = $1 AND company_id = $2`,
     [id, company_id]
