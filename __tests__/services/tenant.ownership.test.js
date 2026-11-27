@@ -49,10 +49,11 @@ describe('ownedOrThrow', () => {
     await expect(ownedOrThrow(4, { machine_id: '7 OR 1=1' }, c)).rejects.toMatchObject({ status: 400 });
   });
 
-  test('the built-in downtime reasons (no company) are everyone\'s', async () => {
-    const c = client([{ k: 0, n: 1 }]);
-    await ownedOrThrow(4, { downtime_reason_id: 2 }, c);
-    expect(c.query.mock.calls[0][0]).toMatch(/\(company_id = \$1 OR company_id IS NULL\)/);
+  test('a downtime reason must be the company\'s own — the built-in ones (no company) are retired', async () => {
+    const c = client([{ k: 0, n: 0 }]);
+    await expect(ownedOrThrow(4, { downtime_reason_id: 2 }, c)).rejects.toMatchObject({ status: 404, message: 'Downtime reason not found' });
+    expect(c.query.mock.calls[0][0]).toMatch(/FROM downtime_reasons WHERE id = ANY\(\$2::int\[\]\)\s+AND company_id = \$1/);
+    expect(c.query.mock.calls[0][0]).not.toMatch(/IS NULL/);
   });
 });
 

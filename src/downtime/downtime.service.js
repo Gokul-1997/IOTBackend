@@ -6,18 +6,16 @@ const { addMachinePlantScope } = require('../lib/plant-scope');
 const { tableQuery } = require('../lib/table-query');
 const { machineOrder } = require('../lib/machine-order');
 
-// One row per code per owner. The built-in codes (no company) are in the
-// table twice — migration 007 ran twice, and its unique index treats every
-// NULL company as different — so the oldest copy of each is the one shown.
+/* The company's own reason codes only (27 Nov 2026, the user: "default reason
+   codes are not needed for every company — each creates what it needs"). The
+   built-in ones (no company, migration 007) are no longer offered, accepted or
+   matched; their rows stay, so any downtime already booked on one keeps its name. */
 exports.getReasons = async (company_id) => {
   const res = await db.query(
-    `SELECT * FROM (
-       SELECT DISTINCT ON (company_id, code) * FROM downtime_reasons
-        WHERE (company_id = $1 OR company_id IS NULL) AND is_active = true
-        ORDER BY company_id, code, id
-     ) r
-     ORDER BY category, name`,
-    [company_id]
+    `SELECT * FROM downtime_reasons
+      WHERE company_id = $1 AND is_active = true
+      ORDER BY category, name`,
+    [companyOf(company_id)]
   );
   return res.rows;
 };
@@ -108,8 +106,7 @@ exports.logEvent = async ({ company_id, machine_id, shift_id, downtime_reason_id
     `INSERT INTO downtime_events (company_id, machine_id, shift_id, downtime_reason_id, started_at, ended_at, notes, entered_by)
      SELECT $1,$2,$3,$4,$5,$6,$7,$8
       WHERE ($4::integer IS NULL OR EXISTS (
-        SELECT 1 FROM downtime_reasons WHERE id=$4 AND is_active = TRUE
-          AND (company_id=$1 OR company_id IS NULL)
+        SELECT 1 FROM downtime_reasons WHERE id=$4 AND is_active = TRUE AND company_id=$1
       ))
       ${plant_id == null ? '' : 'AND EXISTS (SELECT 1 FROM machines WHERE id=$2 AND company_id=$1 AND plant_id=$9)'} RETURNING *`,
     [company_id, machine_id, shift_id || null, downtime_reason_id || null,

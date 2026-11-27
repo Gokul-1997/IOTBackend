@@ -14,13 +14,24 @@ const svc = require('../../src/downtime/downtime.service');
 
 beforeEach(() => resetDb());
 
-test('reason codes: one row per code per owner, the oldest copy, then by category and name', async () => {
+/* 27 Nov 2026, the user: the default reason codes are not wanted for every
+   company — each company creates the codes it needs. */
+test('reason codes: the company\'s own only — no built-in codes — by category and name', async () => {
   await svc.getReasons(13);
   const [{ text, params }] = mockDb.calls();
-  expect(text).toMatch(/SELECT DISTINCT ON \(company_id, code\) \* FROM downtime_reasons/);
-  expect(text).toMatch(/ORDER BY company_id, code, id\s*\)\s*r\s*ORDER BY category, name/);
-  expect(text).toMatch(/company_id = \$1 OR company_id IS NULL/);
+  expect(text).toMatch(/WHERE company_id = \$1 AND is_active = true\s+ORDER BY category, name/);
+  expect(text).not.toMatch(/IS NULL/);
   expect(params).toEqual([13]);
+  await expect(svc.getReasons(null)).rejects.toMatchObject({ status: 403 });
+});
+
+test('downtime cannot be booked on a built-in code: only the company\'s own active reasons', async () => {
+  mockDb.queueResponse({ rows: [], rowCount: 0 });                  // the built-in reason 2 is not the company's
+  await expect(svc.logEvent({ company_id: 13, machine_id: 7, downtime_reason_id: 2, started_at: '2026-11-27T05:00:00Z',
+    ended_at: '2026-11-27T05:10:00Z', entered_by: 1 })).rejects.toMatchObject({ status: 404 });
+  const [insert] = mockDb.calls();
+  expect(insert.text).toMatch(/WHERE id=\$4 AND is_active = TRUE AND company_id=\$1/);
+  expect(insert.text).not.toMatch(/company_id IS NULL/);
 });
 
 test('summary without dates: the last 7 days, worked out by the database', async () => {
@@ -121,7 +132,7 @@ test('an account without a company cannot create, edit or delete reasons', async
   expect(mockDb.calls()).toHaveLength(0);
 });
 
-test('new manual events atomically require an active company/shared reason while historical links remain untouched', async () => {
+test('new manual events atomically require the company\'s own active reason while historical links remain untouched', async () => {
   const input = { company_id: 4, machine_id: 81, downtime_reason_id: 25,
     started_at: '2026-11-25T04:00:00Z', ended_at: '2026-11-25T04:01:00Z', entered_by: 7 };
   await expect(svc.logEvent(input)).rejects.toEqual({ status: 404, message: 'Active downtime reason not found' });
@@ -129,7 +140,7 @@ test('new manual events atomically require an active company/shared reason while
   expect(query.text).toMatch(/INSERT INTO downtime_events[\s\S]*SELECT \$1,\$2,\$3,\$4/);
   expect(query.text).toMatch(/\$4::integer IS NULL OR EXISTS/);
   expect(query.text).toMatch(/FROM downtime_reasons WHERE id=\$4 AND is_active = TRUE/);
-  expect(query.text).toMatch(/company_id=\$1 OR company_id IS NULL/);
+  expect(query.text).toMatch(/is_active = TRUE AND company_id=\$1\s*\)\)/);
   expect(query.params.slice(0, 4)).toEqual([4, 81, null, 25]);
   expect(mockDb.calls()).toHaveLength(1);
   resetDb();

@@ -29,8 +29,9 @@ const LABELS = {
   users: 'User', line: 'Line', plants: 'Plant', downtime_reasons: 'Downtime reason',
   maintenance_schedules: 'Maintenance schedule', machine_alarms: 'Alarm', maintenance_tickets: 'Ticket'
 };
-// rows with no company are shared by every company (the built-in downtime reasons)
-const SHARED = new Set(['downtime_reasons']);
+// No table has rows shared by every company: the built-in downtime reasons
+// (no company) were retired on 27 Nov 2026 — each company keeps its own.
+const SHARED = new Set();
 
 /**
  * @param {number} companyId  the caller's company (req.user.company_id)
