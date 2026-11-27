@@ -3,6 +3,9 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const { sendEmail } = require('../utils/nodemailer');
 
+/** Longest a new company waits for its admin's welcome email to be accepted by the mail server. */
+const WELCOME_WAIT_MS = 20_000;
+
 /**
  * Generate a secure random password: 2 upper + 2 lower + 2 digits + 2 special = 10 chars
  */
@@ -95,9 +98,12 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
 
     await client.query('COMMIT');
 
-    // Send login credentials email (fire and forget)
+    /* The welcome email is the admin's only copy of the password, so S&T is
+       told when it did not go out (27 Nov 2026: Gmail refused the server's
+       login, and a new admin was left with no way to sign in). Waited for at
+       most WELCOME_WAIT_MS; slower than that, it carries on and is "unknown". */
     const loginUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
-    sendEmail({
+    const welcome = sendEmail({
       to: admin_email,
       subject: `Your Admin Account for ${company_name} — STM Mexa IoT`,
       html: `
@@ -114,7 +120,11 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
           <p style="color:#999;font-size:12px;">STM Mexa IoT Platform</p>
         </div>
       `
-    }).catch(err => console.error('Failed to send admin welcome email:', err.message));
+    }).then(() => 'sent', err => { console.error('Failed to send admin welcome email:', err.message); return 'failed'; });
+    let waited;
+    company.welcome_email = await Promise.race([
+      welcome, new Promise(resolve => { waited = setTimeout(resolve, WELCOME_WAIT_MS, 'unknown'); })
+    ]).finally(() => clearTimeout(waited));
 
     company.admin_user = adminUser;
     company.default_roles = defaultRoles.map(r => r.role);

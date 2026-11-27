@@ -46,7 +46,13 @@ async function sendBulkEmails({ recipients = [], subject, html, text, attachment
   );
 }
 
+/** Sign in to the mail server without sending anything (scripts/email-check.js). */
+function verify() {
+  return transporter.verify();
+}
+
 module.exports = {
   sendEmail,
-  sendBulkEmails
+  sendBulkEmails,
+  verify
 };

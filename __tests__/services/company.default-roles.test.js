@@ -151,3 +151,46 @@ describe('S&T creating a company', () => {
     spy.mockRestore();
   });
 });
+
+/* 27 Nov 2026: Gmail refused the server's login; the company and its admin
+   were created, the welcome email with the only copy of the password was not
+   sent, and S&T was told "Company created". */
+describe('the new admin\'s welcome email', () => {
+  const { sendEmail } = require('../../src/utils/nodemailer');
+  function queueCreate() {
+    mockDb.queueResponse(
+      {}, { rows: [], rowCount: 0 }, { rows: [{ id: 42, company_name: 'NEWCO' }] },
+      { rows: [{ id: 77, username: 'newadmin', email: 'a@newco.com' }] }, { rows: [{ id: 7 }], rowCount: 1 }, {}, { rows: [] });
+  }
+  const create = () => require('../../src/companies/company.service')
+    .create({ company_code: 'NC', company_name: 'NEWCO', admin_username: 'newadmin', admin_email: 'a@newco.com' });
+
+  beforeEach(() => jest.spyOn(roleSvc, 'createDefaultRolesForCompany').mockResolvedValue([]));
+  afterEach(() => jest.restoreAllMocks());
+
+  test('says it was sent when the mail server took it', async () => {
+    sendEmail.mockResolvedValueOnce('250 OK');
+    queueCreate();
+    expect((await create()).welcome_email).toBe('sent');
+  });
+
+  test('says it failed when the mail server refused it — the company is still created', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    sendEmail.mockRejectedValueOnce(new Error('Invalid login: 535-5.7.8 Username and Password not accepted'));
+    queueCreate();
+    const co = await create();
+    expect(co).toMatchObject({ id: 42, welcome_email: 'failed' });
+    expect(mockDb.calls().map(c => c.text)).toContain('COMMIT');
+  });
+
+  test('a mail server that does not answer cannot hold the request: "unknown" after 20 s', async () => {
+    jest.useFakeTimers();
+    sendEmail.mockReturnValueOnce(new Promise(() => {}));
+    queueCreate();
+    const pending = create();
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect((await pending).welcome_email).toBe('unknown');
+    jest.useRealTimers();
+  });
+});
+
