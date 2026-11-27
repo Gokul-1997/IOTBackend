@@ -171,6 +171,29 @@ test('factory uses per-machine tariffs, preserves measured totals, and rejects i
     .toMatchObject({ kwh: 5, cost_day: null, energy_complete: false, cost_complete: false });
 });
 
+/* 27 Nov 2026, production: "energy_month 8.6–16.6 s". The daily and monthly
+   summaries are real-time aggregates: their not-yet-materialized part (today,
+   the current month, all history until a month is complete) was aggregated
+   from raw intervals on every read. Month totals now read the hourly summary
+   (same sums; on a local copy 0.58–1.26 s became 0.08–0.13 s). */
+test('factory month totals read only the hourly summary, never the real-time daily or monthly ones', async () => {
+  factoryFixture([{ machine_id: null, cost_per_kwh: 10, currency: 'INR' }]);
+  const result = await store.factoryEnergy({ companyId: 4, date: day, asOf: ist('12:00:00') });
+  expect(result).toMatchObject({ month_kwh: 2, prev_month_kwh: 2 });
+  const reads = db.query.mock.calls.map(([sql]) => sql).filter(sql => /energy:v2:counters/.test(sql));
+  expect(reads).toHaveLength(2);
+  for (const sql of reads) {
+    expect(sql).not.toMatch(/energy_counter_(daily|monthly)/);
+    expect(sql).toMatch(/energy_counter_hourly/);
+  }
+});
+
+test('a summary coarser than the grain asked for is refused', async () => {
+  const range = [{ start: ms(ist('00:00:00')), end: ms(ist('12:00:00')) }];
+  await expect(store.counters({ companyId: 4 }, range, 'day', 'month')).rejects.toThrow('granularity');
+  await expect(store.counters({ companyId: 4 }, range, 'total', 'week')).rejects.toThrow('granularity');
+});
+
 test('factory currency follows selected effective tariffs and does not mix different currencies', async () => {
   factoryFixture([{ machine_id: null, cost_per_kwh: 10, currency: 'INR' }, { machine_id: 25, cost_per_kwh: 0, currency: 'USD' }]);
   expect(await store.factoryEnergy({ companyId: 4, date: day, machineId: 25, asOf: ist('12:00:00') }))

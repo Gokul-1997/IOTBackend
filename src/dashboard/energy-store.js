@@ -140,13 +140,18 @@ function counterSourceSQL(view) {
       AND f.observed_at<${bucket('dirty.through_at')}+INTERVAL '1 ${grain}'
     GROUP BY 1,f.company_id,f.machine_id,f.register,f.shift_id)`;
 }
-/** One bounded query for any number of requested periods (never per machine). */
-async function counters(opts, ranges, grain = 'day') {
+/** One bounded query for any number of requested periods (never per machine).
+ *  `coarsest`: the coarsest summary it may read ('hour' | 'day' | 'month'); by
+ *  default the grain itself, or monthly for a total. */
+async function counters(opts, ranges, grain = 'day', coarsest = null) {
   if (!['total', ...levels].includes(grain)) throw new TypeError('Invalid energy aggregate granularity');
+  const maxGrain = coarsest ?? (grain === 'total' ? 'month' : grain);
+  if (!levels.includes(maxGrain) || (grain !== 'total' && levels.indexOf(maxGrain) < levels.indexOf(grain))) {
+    throw new TypeError('Invalid energy aggregate granularity');
+  }
   const params = [id(opts.companyId, 'Company')];
   const selected = selectedSQL(opts, params);
   const branches = [];
-  const maxGrain = grain === 'total' ? 'month' : grain;
   for (const r of ranges) {
     for (const span of splitRange(r.start, r.end, maxGrain)) {
       const a = `$${params.push(iso(span.start))}::timestamptz`;
@@ -380,14 +385,19 @@ async function factoryEnergy(opts) {
   for (const [label, [first, last]] of Object.entries(periods)) {
     ranges.push(...periodRanges(first, last, shiftRes.rows, opts.shiftId, asOf, label));
   }
-  // Day needs hourly chart points. Month summaries use daily/monthly buckets
-  // and are fetched in the same database round trip as the day branches.
+  // Day needs hourly chart points. The month totals are read from the hourly
+  // summary too (27 Nov 2026): the daily and monthly ones are real-time
+  // aggregates, and the part of them not yet materialized — today, the whole
+  // current month, and all history until a first month is complete — was
+  // aggregated from raw intervals on every read, through a filter no index
+  // can use: "energy_month 8.6–16.6 s" on production. The hourly summary is
+  // materialized to within minutes, and its sums are the same.
   const dailyRanges = ranges.filter(r => ['day', 'yesterday'].includes(r.label));
   const monthlyRanges = ranges.filter(r => !['day', 'yesterday'].includes(r.label));
   // opts.time: the Factory dashboard's stopwatch, naming these two in its slow-answer log
   const time = opts.time || ((_name, work) => work);
   const [shortRows, longRows] = await Promise.all([time('energy_day', counters(opts, dailyRanges, 'hour')),
-    time('energy_month', counters(opts, monthlyRanges, 'total'))]);
+    time('energy_month', counters(opts, monthlyRanges, 'total', 'hour'))]);
   const all = [...shortRows, ...longRows];
   const defaultSetting = settingRes.rows.find(r => r.machine_id == null);
   const overrides = new Map(settingRes.rows.filter(r => r.machine_id != null).map(r => [Number(r.machine_id), r]));
