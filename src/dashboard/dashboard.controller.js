@@ -48,10 +48,17 @@ const { current: readAuthorization } = require('../lib/read-scope');
  */
 async function sendShared(res, name, req, compute, { live = false } = {}) {
   const ttl = live ? dashCache.LIVE_TTL : dashCache.ttlFor(req.query);
-  const params=name==='energy'?{...req.query,energy_pipeline:await energyStore.enabled(req.user.company_id)?'v2':'legacy',energy_quality:1}:req.query;
+  const params = await keyParams(name, req);
   const body = await dashCache.json(name, req.user.company_id, params, ttl,
     async () => ({ status: 'success', data: await compute() }));
   return res.type('application/json').send(body);
+}
+
+/** An answer that reads energy depends on which energy store the company is on: that is part of its key. */
+async function keyParams(name, req) {
+  if (name !== 'energy' && name !== 'factory') return req.query;
+  const energy_pipeline = await energyStore.enabled(req.user.company_id) ? 'v2' : 'legacy';
+  return name === 'energy' ? { ...req.query, energy_pipeline, energy_quality: 1 } : { ...req.query, energy_pipeline };
 }
 
 /* =====================================================
@@ -599,10 +606,15 @@ exports.maintenance = async (req, res) => {
   }
 };
 
+/* Shared like the other dashboards (27 Nov 2026): it was worked out afresh for
+   every request, and a reload while it was still being worked out — the browser
+   shows the old request "(canceled)", but the server carries on — started it
+   all again beside the first. Now a reload, a second person or the minute's
+   refresh joins the answer being worked out, or takes the one from the last
+   30 s (5 minutes for a past day). */
 exports.factory = async (req, res) => {
   try {
-    const data = await factorySvc.getFactoryDashboard(req);
-    return res.json({ status: 'success', data });
+    return await sendShared(res, 'factory', req, () => factorySvc.getFactoryDashboard(req));
   } catch (err) {
     console.error('Factory dashboard error:', err);
     return sendError(err, req, res, { status: 'error' });

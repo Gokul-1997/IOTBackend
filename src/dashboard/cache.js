@@ -32,6 +32,8 @@ const PAST_TTL = 300;
 const READ_TIMEOUT_MS = 250;
 /** Answers bigger than this are not worth a round trip to Redis. */
 const MAX_BYTES = 2 * 1024 * 1024;
+/** An answer slower than this to work out is logged, so a slow dashboard can be found in the server log. */
+const SLOW_MS = 3000;
 
 const inflight = new Map();
 
@@ -108,7 +110,10 @@ async function json(name, companyId, params, ttl, compute) {
 
   if (inflight.has(key)) return inflight.get(key);
   const work = (async () => {
+    const started = Date.now();
     const text = JSON.stringify(await compute());
+    const took = Date.now() - started;
+    if (took >= SLOW_MS) console.warn(`[dashboard] ${name} took ${(took / 1000).toFixed(1)} s to work out (company ${companyId}, ${JSON.stringify(params)})`);
     if (version !== null && text.length <= MAX_BYTES) {
       redis.set(key, text, 'EX', ttl).catch(() => {});
     }

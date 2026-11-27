@@ -102,3 +102,36 @@ test('meter readers share bounded sparse-channel work only within their company 
   const foreign=mockDb.calls().length;
   await request(a).get('/api/dashboard/energy/meter?range=4h');expect(mockDb.calls().length).toBeGreaterThan(foreign);
 });
+
+/* 27 Nov 2026: the Factory board was worked out afresh for every request, so a
+   reload while it was still being worked out started it all again beside the
+   first (the browser showed the old request "(canceled)"; the server carried on). */
+describe('the Factory dashboard', () => {
+  const factory = '/api/dashboard/factory?date=2026-11-27';
+  const live = () => mockDb.calls().filter(c => /telemetry_raw/.test(c.text)).length;
+
+  test('a reload while it is being worked out joins that answer instead of starting another', async () => {
+    const a = app();
+    const [first, reload] = await Promise.all([request(a).get(factory), request(a).get(factory)]);
+    expect([first.status, reload.status]).toEqual([200, 200]);
+    expect(first.body.status).toBe('success');
+    expect(reload.text).toBe(first.text);
+    const both = live();
+    await request(a).get(factory.replace('2026-11-27', '2026-11-26'));     // one answer worked out, for comparison
+    expect(live() - both).toBe(both);
+  });
+
+  test('shared for a while; another day, machine or company is its own answer', async () => {
+    const a = app();
+    await request(a).get(factory);
+    const once = live();
+    expect(once).toBeGreaterThan(0);
+    await request(a).get(factory);
+    expect(live()).toBe(once);
+    await request(a).get(factory.replace('2026-11-27', '2026-11-26'));
+    await request(a).get(`${factory}&machine_id=7`);
+    await request(a).get(factory).set('x-company', '5');
+    expect(live()).toBe(once * 4);
+  });
+});
+
