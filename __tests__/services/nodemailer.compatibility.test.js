@@ -20,6 +20,7 @@ test('email helper uses the supported transport API and sends a real attachment 
     });
     expect(response).toBe('saved in memory');
     expect(delivered.envelope).toEqual({ from: 'sender@example.test', to: ['operator@example.test'] });
+    expect(delivered.message.toString()).toContain('From: STM Mexa IoT <sender@example.test>');
     expect(delivered.message.toString()).toContain('filename=production.xlsx');
     expect(delivered.message.toString()).toContain(Buffer.from('sample workbook bytes').toString('base64'));
   } finally {

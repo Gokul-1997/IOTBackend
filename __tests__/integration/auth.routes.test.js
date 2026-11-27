@@ -55,10 +55,6 @@ jest.mock('jsonwebtoken', () => ({
 jest.mock('../../src/utils/nodemailer', () => ({
   sendBulkEmails: jest.fn(async () => {})
 }));
-jest.mock(
-  '../../src/utils/nodemailer/emailTemplates/generateResetPasswordTemplate',
-  () => ({ generateResetPasswordTemplate: () => '<html>reset</html>' })
-);
 
 process.env.JWT_SECRET = 'test-secret';
 
@@ -83,10 +79,6 @@ function makeApp() {
     verify: jest.fn()
   }));
   jest.doMock('../../src/utils/nodemailer', () => ({ sendBulkEmails: jest.fn() }));
-  jest.doMock(
-    '../../src/utils/nodemailer/emailTemplates/generateResetPasswordTemplate',
-    () => ({ generateResetPasswordTemplate: () => '<html/>' })
-  );
 
   const router = require('../../src/auth/auth.routes');
   const app    = express();
@@ -506,8 +498,9 @@ describe('POST /api/auth/reset-password', () => {
   });
 
   test('TC-AR-53 200 on valid token + password reset', async () => {
-    // Atomic transaction: BEGIN, claim token, update password, revoke sessions, COMMIT
+    // Atomic transaction: BEGIN, find owner, lock, claim token, change password, invalidate links/sessions, COMMIT
     mockDb.queueResponse({ rows: [] });
+    mockDb.queueResponse({ rows: [{ user_id: 1 }], rowCount: 1 }); // owner
     mockDb.queueResponse({
       rows: [{ user_id: 1, expires_at: new Date(Date.now() + 60000).toISOString() }],
       rowCount: 1

@@ -18,10 +18,6 @@ jest.mock('jsonwebtoken', () => ({
   verify: jest.fn()
 }));
 jest.mock('../../src/utils/nodemailer', () => ({ sendBulkEmails: jest.fn() }));
-jest.mock(
-  '../../src/utils/nodemailer/emailTemplates/generateResetPasswordTemplate',
-  () => ({ generateResetPasswordTemplate: () => '<html/>' })
-);
 
 process.env.JWT_SECRET = 'test-secret';
 

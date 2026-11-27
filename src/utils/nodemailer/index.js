@@ -15,7 +15,7 @@ const transporter = nodemailer.createTransport({
 async function sendEmail({ to, subject, html, text, attachments = [] }) {
   try {
     const mailOptions = {
-      from: process.env.EMAIL_USER,
+      from: { name: 'STM Mexa IoT', address: process.env.EMAIL_USER },
       to,
       subject,
       html,

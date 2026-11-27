@@ -2,27 +2,15 @@ const db = require('../db');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const { sendEmail } = require('../utils/nodemailer');
+const { createPasswordLink, savePasswordLink } = require('../lib/password-links');
+const { generatePasswordEmail } = require('../utils/nodemailer/emailTemplates/passwordEmail');
 
 /** Longest a new company waits for its admin's welcome email to be accepted by the mail server. */
 const WELCOME_WAIT_MS = 20_000;
 
 /**
- * Generate a secure random password: 2 upper + 2 lower + 2 digits + 2 special = 10 chars
- */
-function generatePassword() {
-  const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const lower = 'abcdefghijklmnopqrstuvwxyz';
-  const digits = '0123456789';
-  const special = '@#$&!';
-  const pick = (s, n) => Array.from({ length: n }, () => s[crypto.randomInt(s.length)]).join('');
-  const parts = pick(upper, 2) + pick(lower, 3) + pick(digits, 2) + pick(special, 1);
-  // Shuffle
-  return parts.split('').sort(() => crypto.randomInt(3) - 1).join('');
-}
-
-/**
  * Create a new company + its first admin user.
- * Password is auto-generated and emailed.
+ * The administrator chooses their password through a single-use setup link.
  * Only SNT_SUPER can call this.
  */
 exports.create = async ({ company_code, company_name, contact_email, contact_phone, address, plan_id, admin_username, admin_email }) => {
@@ -33,6 +21,9 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
     throw { status: 400, message: 'Admin username and email are required' };
   }
 
+  // Validate the public URL before creating an account.
+  const setupLink = createPasswordLink({ setup: true });
+  const welcomeEmail = generatePasswordEmail({ link: setupLink.url, email: admin_email, companyName: company_name, setup: true });
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -58,9 +49,8 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
       );
     }
 
-    // Create admin user for this company (auto-generated password)
-    const admin_password = generatePassword();
-    const hash = await bcrypt.hash(admin_password, 10);
+    // No usable initial password is disclosed; only the recipient can set it.
+    const hash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
     const userRes = await client.query(
       `INSERT INTO users (username, email, password_hash, plant_id, company_id, user_type, is_active)
        VALUES ($1, $2, $3, NULL, $4, 'company_user', true)
@@ -96,30 +86,14 @@ exports.create = async ({ company_code, company_name, contact_email, contact_pho
     const defaultRoles = await require('../roles/role.service')
       .createDefaultRolesForCompany(client, company.id);
 
+    await savePasswordLink(client, adminUser.id, setupLink);
     await client.query('COMMIT');
 
-    /* The welcome email is the admin's only copy of the password, so S&T is
-       told when it did not go out (27 Nov 2026: Gmail refused the server's
-       login, and a new admin was left with no way to sign in). Waited for at
-       most WELCOME_WAIT_MS; slower than that, it carries on and is "unknown". */
-    const loginUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
+    // Delivery status remains visible to S&T; no password or token is returned.
     const welcome = sendEmail({
       to: admin_email,
-      subject: `Your Admin Account for ${company_name} — STM Mexa IoT`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;">
-          <h2 style="color:#2B3990;">Welcome to STM Mexa IoT Platform</h2>
-          <p>Your company <strong>${company_name}</strong> has been created. You are the Company Admin.</p>
-          <div style="background:#f5f5f5;border-radius:8px;padding:16px;margin:16px 0;">
-            <p style="margin:4px 0;"><strong>Login URL:</strong> <a href="${loginUrl}/login">${loginUrl}/login</a></p>
-            <p style="margin:4px 0;"><strong>Email:</strong> ${admin_email}</p>
-            <p style="margin:4px 0;"><strong>Password:</strong> ${admin_password}</p>
-          </div>
-          <p style="color:#666;font-size:13px;">Please change your password after first login.</p>
-          <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
-          <p style="color:#999;font-size:12px;">STM Mexa IoT Platform</p>
-        </div>
-      `
+      subject: 'Set up your STM Mexa IoT account',
+      ...welcomeEmail
     }).then(() => 'sent', err => { console.error('Failed to send admin welcome email:', err.message); return 'failed'; });
     let waited;
     company.welcome_email = await Promise.race([

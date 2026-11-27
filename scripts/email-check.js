@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * Can this server send email — password resets, a new company admin's
- * welcome with their password, emailed reports, alarm emails?
+ * password setup invitation, emailed reports, alarm emails?
  *
  *   cd <the API folder> && node scripts/email-check.js
  *   cd <the API folder> && node scripts/email-check.js --to you@example.com   (also sends one test email)

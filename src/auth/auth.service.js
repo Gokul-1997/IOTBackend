@@ -4,7 +4,9 @@ const db = require('../db');
 const crypto = require('crypto');
 const { revisionOf, invalidateUsers } = require('../lib/auth-revision');
 const { sendBulkEmails } = require('../utils/nodemailer');
-const { generateResetPasswordTemplate } = require('../utils/nodemailer/emailTemplates/generateResetPasswordTemplate');
+const { generateResetPasswordEmail } = require('../utils/nodemailer/emailTemplates/generateResetPasswordTemplate');
+
+const { createPasswordLink, savePasswordLink, lockPasswordLinks } = require('../lib/password-links');
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_TIME_MINUTES = 15;
@@ -330,7 +332,7 @@ exports.sendResetLink = async (email) => {
   const userRes = await db.query(
     `SELECT u.id, u.email FROM users u
        LEFT JOIN companies c ON c.id = u.company_id
-      WHERE u.email = $1 AND COALESCE(c.is_active, true)`,
+      WHERE u.email = $1 AND u.is_active = true AND COALESCE(c.is_active, true)`,
     [email]
   );
 
@@ -338,32 +340,25 @@ exports.sendResetLink = async (email) => {
 
   const user = userRes.rows[0];
 
-  // optional: invalidate old unused tokens
-  await db.query(
-    `UPDATE password_reset_tokens
-     SET used = true
-     WHERE user_id = $1 AND used = false`,
-    [user.id]
-  );
+  const link = createPasswordLink();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await savePasswordLink(client, user.id, link);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 
-  const token = crypto.randomBytes(32).toString('hex');
-  const hashedResetToken = hashToken(token);
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
-  // Store hashed token in DB; send raw token to user via email
-  await db.query(
-    `INSERT INTO password_reset_tokens (user_id, token, expires_at)
-     VALUES ($1, $2, $3)`,
-    [user.id, hashedResetToken, expiresAt]
-  );
-
-  const resetLink = `${process.env.FRONTEND_URL}/reset-password/${token}`;
-  const html = generateResetPasswordTemplate(resetLink, user.email);
-
+  // Bulk delivery keeps the public response identical for unknown accounts
+  // and SMTP failures. The mail helper records delivery errors for support.
   await sendBulkEmails({
     recipients: [user.email],
-    subject: 'Reset Your Password',
-    html
+    subject: 'Reset your STM Mexa IoT password',
+    ...generateResetPasswordEmail(link.url, user.email)
   });
 };
 
@@ -376,6 +371,9 @@ exports.resetPassword = async (token, password) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    const owner = await client.query('SELECT user_id FROM password_reset_tokens WHERE token = $1', [hashedToken]);
+    if (!owner.rowCount) throw { status: 400, message: 'Invalid or expired token' };
+    await lockPasswordLinks(client, owner.rows[0].user_id);
     // Claim the token atomically. Two requests can no longer both read it
     // as unused and set two different passwords from the same reset link.
     const result = await client.query(
@@ -391,6 +389,9 @@ exports.resetPassword = async (token, password) => {
       'UPDATE users SET password_hash = $1, auth_revision = auth_revision + 1 WHERE id = $2',
       [hash, userId]
     );
+
+    // Changing the password invalidates every outstanding setup/reset link.
+    await client.query('UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false', [userId]);
 
     // revoke all sessions after password change
     await client.query(
