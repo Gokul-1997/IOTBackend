@@ -399,3 +399,21 @@ describe('the due filter', () => {
     expect(res.filters.due).toBe('overdue');
   });
 });
+
+/* 27 Nov 2026, the user: a schedule just saved showed in no list — Upcoming
+   read raised tickets only, and a ticket is raised only when it comes due. */
+describe('Upcoming Maintenance', () => {
+  test('lists open schedule tickets and each active schedule\'s next occurrence not yet raised', async () => {
+    queueDashboard();
+    await svc.getPeriodic({ company_id });
+    const upcoming = mockDb.calls().find(c => /next_up/.test(c.text));
+    expect(upcoming).toBeDefined();
+    expect(upcoming.text).toMatch(/FROM maintenance_tickets t/);
+    expect(upcoming.text).toMatch(/FROM maintenance_schedules s/);
+    expect(upcoming.text).toMatch(/s\.is_active = TRUE/);
+    expect(upcoming.text).toMatch(/s\.next_due_at < NOW\(\) \+ INTERVAL '32 days'/);
+    // an occurrence already raised and open is listed once, as its ticket
+    expect(upcoming.text).toMatch(/NOT EXISTS \(SELECT 1 FROM maintenance_tickets mt\s+WHERE mt\.schedule_id = s\.id AND mt\.due_date = s\.next_due_at AND mt\.status = ANY\(\$3\)\)/);
+    expect(upcoming.params).toEqual([company_id, null, ['OPEN', 'ASSIGNED', 'IN_PROGRESS'], 50]);
+  });
+});

@@ -65,9 +65,10 @@ const MAX_CATCHUP_PER_PASS = 12;
  * @param {number} companyId
  * @param {object} [opts]
  * @param {number} [opts.createdBy] user id recorded as the ticket author
+ * @param {number} [opts.scheduleId] only this schedule — the one just saved
  * @returns {Promise<{created: number, advanced: number}>}
  */
-exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
+exports.evaluateCompany = async (companyId, { createdBy = null, scheduleId = null } = {}) => {
   const client = await pool.connect();
   let created = 0;
   let advanced = 0;
@@ -93,9 +94,10 @@ exports.evaluateCompany = async (companyId, { createdBy = null } = {}) => {
           AND frequency IS NOT NULL
           AND next_due_at IS NOT NULL
           AND next_due_at <= NOW()
+          AND ($2::int IS NULL OR id = $2)
         ORDER BY next_due_at
         FOR UPDATE SKIP LOCKED`,
-      [companyId]
+      [companyId, scheduleId]
     );
 
     for (const schedule of due) {

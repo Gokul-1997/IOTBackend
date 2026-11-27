@@ -135,3 +135,40 @@ describe('the Factory dashboard', () => {
   });
 });
 
+/* 27 Nov 2026, the user: "once ticket create but not showing" — a schedule
+   saved with its first occurrence due waited up to 15 minutes for the cron
+   to raise its ticket. */
+describe('saving a periodic schedule', () => {
+  const body = { machine_id: 7, title: 'Way lube', frequency: 'WEEKLY', next_due_at: '2026-11-27', grace_days: 0 };
+  const saved = { id: 11, company_id: 4, machine_id: 7, title: 'Way lube', frequency: 'WEEKLY',
+    next_due_at: '2026-11-27T00:00:00.000Z', assigned_user_id: null, grace_days: 0 };
+
+  test('an occurrence already due is raised at once, for this schedule only', async () => {
+    mockDb.queueResponse(
+      { rows: [{}], rowCount: 1 },                                   // the machine is the company's
+      { rows: [saved], rowCount: 1 },                                // INSERT schedule
+      { rows: [], rowCount: 0 },                                     // BEGIN
+      { rows: [{ ...saved, description: null, maintenance_type: 'PREVENTIVE' }] },   // due: this schedule
+      { rows: [{ id: 99, status: 'OPEN' }], rowCount: 1 },          // ticket raised
+      { rows: [{ next: '2099-01-01T00:00:00.000Z' }] },             // next occurrence
+      { rows: [], rowCount: 1 },                                     // schedule advanced
+      { rows: [], rowCount: 1 },                                     // status history
+      { rows: [], rowCount: 0 }                                      // COMMIT
+    );
+    const res = await request(app()).post('/api/dashboard/periodic/schedules').send(body);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ id: 11, raised: 1 });
+    const due = mockDb.calls().find(c => /FOR UPDATE SKIP LOCKED/.test(c.text));
+    expect(due.params).toEqual([4, 11]);
+  });
+
+  test('if raising fails, the schedule is still saved (the 15-minute tick raises it)', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockDb.queueResponse({ rows: [{}], rowCount: 1 }, { rows: [saved], rowCount: 1 });
+    mockDb.queueError(new Error('connection reset'));                 // BEGIN fails
+    const res = await request(app()).post('/api/dashboard/periodic/schedules').send(body);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ id: 11, raised: 0 });
+    console.error.mockRestore();
+  });
+});

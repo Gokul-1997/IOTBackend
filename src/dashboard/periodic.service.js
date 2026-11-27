@@ -230,22 +230,44 @@ async function technicianWorkload(companyId, machineId) {
   }));
 }
 
-/** The next occurrences due, whether or not they have slipped yet. */
+/**
+ * The next occurrences due, whether or not they have slipped yet: the tickets
+ * raised and still open, and each active schedule's next occurrence that has
+ * no ticket yet (ticket_id null) — within the page's This Month and This Week
+ * views. Tickets are raised only when an occurrence comes due, so before
+ * (27 Nov 2026) a schedule just saved, or due next week, was in no list.
+ */
 async function upcoming(companyId, machineId, limit = 50) {   // enough for the page's This Month view
   const { rows } = await pool.query(
-    `SELECT t.id, t.title, t.due_date, t.priority, t.status,
-            s.frequency, m.machine_serial_no,
-            COALESCE(u.username, NULL) AS assigned_to_name,
-            (t.due_date + make_interval(days => COALESCE(s.grace_days,0)) < NOW()) AS is_overdue
-       FROM maintenance_tickets t
-       JOIN maintenance_schedules s ON s.id = t.schedule_id
-       JOIN machines m ON m.id = t.machine_id
-       LEFT JOIN users u ON u.id = t.assigned_to
-      WHERE t.company_id = $1${plantSql('t.machine_id')}
-        AND t.schedule_id IS NOT NULL
-        AND ($2::int IS NULL OR t.machine_id = $2)
-        AND t.status = ANY($3)
-      ORDER BY t.due_date, t.id
+    `SELECT * FROM (
+       SELECT t.id, t.id AS ticket_id, t.schedule_id, t.title, t.due_date, t.priority, t.status,
+              s.frequency, m.machine_serial_no,
+              COALESCE(u.username, NULL) AS assigned_to_name,
+              (t.due_date + make_interval(days => COALESCE(s.grace_days,0)) < NOW()) AS is_overdue
+         FROM maintenance_tickets t
+         JOIN maintenance_schedules s ON s.id = t.schedule_id
+         JOIN machines m ON m.id = t.machine_id
+         LEFT JOIN users u ON u.id = t.assigned_to
+        WHERE t.company_id = $1${plantSql('t.machine_id')}
+          AND t.schedule_id IS NOT NULL
+          AND ($2::int IS NULL OR t.machine_id = $2)
+          AND t.status = ANY($3)
+       UNION ALL
+       SELECT NULL::int, NULL::int, s.id, s.title, s.next_due_at, NULL, NULL,
+              s.frequency, m.machine_serial_no,
+              COALESCE(u.username, NULL),
+              (s.next_due_at + make_interval(days => COALESCE(s.grace_days,0)) < NOW())
+         FROM maintenance_schedules s
+         JOIN machines m ON m.id = s.machine_id
+         LEFT JOIN users u ON u.id = s.assigned_user_id
+        WHERE s.company_id = $1${plantSql('s.machine_id')}
+          AND s.is_active = TRUE AND s.frequency IS NOT NULL
+          AND s.next_due_at IS NOT NULL AND s.next_due_at < NOW() + INTERVAL '32 days'
+          AND ($2::int IS NULL OR s.machine_id = $2)
+          AND NOT EXISTS (SELECT 1 FROM maintenance_tickets mt
+                           WHERE mt.schedule_id = s.id AND mt.due_date = s.next_due_at AND mt.status = ANY($3))
+     ) next_up
+      ORDER BY due_date, ticket_id NULLS LAST, schedule_id
       LIMIT $4`,
     [companyId, machineId, LIVE_STATUSES, limit]
   );

@@ -218,3 +218,21 @@ describe('evaluateAll', () => {
     expect(res.companies).toBe(2);
   });
 });
+
+/* 27 Nov 2026: saving a schedule whose first occurrence is already due
+   raises that ticket at once — and only for that schedule. */
+describe('evaluateCompany for one schedule', () => {
+  test('only the schedule just saved is selected', async () => {
+    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [] }, { rows: [], rowCount: 0 });
+    await engine.evaluateCompany(company_id, { createdBy: 9, scheduleId: 11 });
+    const select = mockDb.calls()[1];
+    expect(select.text).toMatch(/\(\$2::int IS NULL OR id = \$2\)/);
+    expect(select.params).toEqual([company_id, 11]);
+  });
+
+  test('without one, every due schedule of the company is selected, as the cron does', async () => {
+    mockDb.queueResponse({ rows: [], rowCount: 0 }, { rows: [] }, { rows: [], rowCount: 0 });
+    await engine.evaluateCompany(company_id);
+    expect(mockDb.calls()[1].params).toEqual([company_id, null]);
+  });
+});

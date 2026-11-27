@@ -469,7 +469,17 @@ exports.savePeriodicSchedule = async (req, res) => {
       company_id: req.user.company_id,
       user_id:    req.user.id
     });
-    return res.json({ status: 'success', data });
+    /* An occurrence already due (the first due date today, or past) is raised
+       now, not at the next 15-minute tick: "Create Ticket" left no ticket in
+       any list until then (27 Nov 2026). This schedule only; the plan is
+       saved either way — if raising fails, the tick raises it. */
+    let raised = 0;
+    try {
+      raised = (await periodicEngine.evaluateCompany(req.user.company_id, { createdBy: req.user.id, scheduleId: data.id })).created;
+    } catch (err) {
+      console.error('Periodic engine after saving a schedule:', err.message);
+    }
+    return res.json({ status: 'success', data: { ...data, raised } });
   } catch (err) {
     return sendError(err, req, res, { status: 'error' });
   }
