@@ -21,9 +21,9 @@ describe('cleanSpecs', () => {
   });
 
   test('numbers are stored as whole numbers, text trimmed, switches as booleans', () => {
-    expect(cleanSpecs({ x_axis: 1050, fourth_axis: ' 360 ', spindle_rpm: '12000', model: ' Mazak VCN-530C ',
+    expect(cleanSpecs({ x_axis: 1050, fourth_axis: ' 360 ', spindle_rpm: '12000', model: ' STM VL850 ',
       atc_tool_capacity: '20+1', twin_spindle: true, twin_table: 'false' })).toEqual({
-      x_axis: 1050, fourth_axis: 360, spindle_rpm: 12000, model: 'Mazak VCN-530C',
+      x_axis: 1050, fourth_axis: 360, spindle_rpm: 12000, model: 'STM VL850',
       atc_tool_capacity: '20+1', twin_spindle: true, twin_table: false
     });
     expect(cleanSpecs({ fifth_axis: 0, y_axis: INT_MAX })).toEqual({ fifth_axis: 0, y_axis: INT_MAX });
@@ -48,6 +48,12 @@ describe('cleanSpecs', () => {
     expect(() => cleanSpecs({ model: { name: 'x' } })).toThrow(expect.objectContaining({ status: 400, message: 'Model must be text.' }));
     expect(() => cleanSpecs({ twin_table: 'maybe' })).toThrow(expect.objectContaining({ status: 400, message: 'Twin table must be on or off.' }));
   });
+
+  // 28 Nov 2026, the user: "MMC no" is the machine's Serial No, as on the form and the table
+  test('a bad Serial No (stored as mmc_no) is named as the form names it', () => {
+    expect(() => cleanSpecs({ mmc_no: ['x'] })).toThrow(expect.objectContaining({ status: 400, message: 'Serial No must be text.' }));
+    expect(cleanSpecs({ mmc_no: ' SN-0412 ' })).toEqual({ mmc_no: 'SN-0412' });
+  });
 });
 
 describe('the machine API with the form as it is sent', () => {
@@ -68,6 +74,17 @@ describe('the machine API with the form as it is sent', () => {
       false, false, null, null, null, null, null, null, null]);
     expect(insert.params).not.toContain('');
     expect(mockDb.calls().at(-1).text).toBe('COMMIT');
+  });
+
+  // 28 Nov 2026, the user: "Machine serial no" is the Machine No
+  test('a missing or too long Machine No is a 400 that says Machine No, before anything is read or written', async () => {
+    for (const machine_serial_no of ['', '   ', 'M'.repeat(101)]) {
+      await expect(machines.createMachine({ user, body: { ...form, machine_serial_no } }))
+        .rejects.toEqual({ status: 400, message: 'Machine No is required (maximum 100 characters)' });
+      await expect(machines.updateMachine({ user, params: { id: '7' }, body: { machine_serial_no } }))
+        .rejects.toEqual({ status: 400, message: 'Machine No is required (maximum 100 characters)' });
+    }
+    expect(mockDb.calls()).toHaveLength(0);
   });
 
   test('a bad number is refused before anything is read or written', async () => {

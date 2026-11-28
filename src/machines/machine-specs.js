@@ -18,7 +18,8 @@ const WHOLE_NUMBERS = {
   fourth_axis: '4th axis', fifth_axis: '5th axis', spindle_rpm: 'Spindle speed'
 };
 // ATC capacity stays free text: capacities are written like "20+1".
-const TEXT = { model: 'Model', controller: 'Controller', mmc_no: 'MMC no', atc_tool_capacity: 'ATC tool capacity' };
+// mmc_no is the machine's Serial No on the form and the table (the user, 28 Nov 2026)
+const TEXT = { model: 'Model', controller: 'Controller', mmc_no: 'Serial No', atc_tool_capacity: 'ATC tool capacity' };
 const SWITCHES = { twin_spindle: 'Twin spindle', twin_table: 'Twin table' };
 // Program Transfer: where the machine keeps its programs, e.g. //CNC_MEM/USER/PATH1/
 // on a Fanuc — given to the company's gateway in GET /status (23 Oct 2026)

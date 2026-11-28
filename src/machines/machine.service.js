@@ -70,7 +70,7 @@ async function placement(client, data, user, current = {}) {
 /* Quota, placement, machine and its shift links are one atomic change. */
 exports.createMachine = async (req) => {
   const serial = String(req.body.machine_serial_no || '').trim();
-  if (!serial || serial.length > 100) throw { status: 400, message: 'Machine serial number is required (maximum 100 characters)' };
+  if (!serial || serial.length > 100) throw { status: 400, message: 'Machine No is required (maximum 100 characters)' };
   const hourRate = cleanHourRate(req.body.hour_rate);
   const specs = cleanSpecs(req.body);
   const client = await pool.connect();
@@ -268,7 +268,7 @@ exports.updateMachine = async (req) => {
   if (!Object.keys(patch).length) throw { status: 400, message: 'No fields provided for update' };
   if ('machine_serial_no' in patch) {
     patch.machine_serial_no = String(patch.machine_serial_no || '').trim();
-    if (!patch.machine_serial_no || patch.machine_serial_no.length > 100) throw { status: 400, message: 'Machine serial number is required (maximum 100 characters)' };
+    if (!patch.machine_serial_no || patch.machine_serial_no.length > 100) throw { status: 400, message: 'Machine No is required (maximum 100 characters)' };
   }
   const needsPlacement = 'plant_id' in patch || 'line_id' in patch;
   const needsTransaction = needsPlacement || 'image_url' in patch;
