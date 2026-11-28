@@ -5,8 +5,9 @@ const auth = require('../middleware/auth.middleware');
 const validate = require('../middleware/validate.middleware');
 
 
+// The machines — machine_ids (one component each), or one machine_id — are
+// checked by the service, which says which are missing (28 Nov 2026).
 router.post('/', auth, access('page:component:create'), validate({
-  machine_id:   { required: true, label: 'Machine' },
   part_name:    { required: true, maxLength: 100, label: 'Part name' },
   part_number:  { required: true, maxLength: 50,  label: 'Part number' },
   cycle_time:   { required: true, type: 'string', time_hms: true, label: 'Cycle time' },

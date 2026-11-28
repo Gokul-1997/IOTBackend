@@ -32,23 +32,135 @@ async function switchActive(client, component, machine, companyId, onlyComponent
   }
 }
 
+/* ── One part on many machines ─────────────────────────────────────────────
+   28 Nov 2026, the user: "in component entry I need to select multiple
+   machines". The form sends machine_ids and gets one component per machine
+   back — all made together, or none. A client that sends one machine_id
+   gets its one component, as before. Each machine's component is its own
+   row: edited, run and reported on per machine, as if added one by one. */
+const MAX_MACHINES = 500;
+const INT_MAX = 2147483647;
+
+/** The machines asked for, once each, in id order. */
+function machineIdsOf(data) {
+  const many = data.machine_ids !== undefined && data.machine_ids !== null;
+  const raw = many ? data.machine_ids : [data.machine_id];
+  if (!Array.isArray(raw)) throw { status: 400, message: 'Machines must be a list of machines' };
+  const ids = raw.filter(v => v !== undefined && v !== null && v !== '')
+    .map(v => (typeof v === 'number' || (typeof v === 'string' && /^\s*\d+\s*$/.test(v)) ? Number(v) : NaN));
+  if (!ids.length) throw { status: 400, message: 'Choose at least one machine' };
+  if (ids.some(n => !Number.isInteger(n) || n <= 0 || n > INT_MAX)) throw { status: 400, message: 'Machine id is not valid' };
+  const unique = [...new Set(ids)].sort((a, b) => a - b);
+  if (unique.length > MAX_MACHINES) throw { status: 400, message: `Choose at most ${MAX_MACHINES} machines at a time` };
+  return { ids: unique, many };
+}
+
+/** Every machine, locked in id order — two saves over the same machines wait for each other, never deadlock. All of them, or a 404. */
+async function lockMachines(client, ids, companyId, plantId) {
+  const { rows } = await client.query(
+    `SELECT id, plant_id FROM machines
+      WHERE id = ANY($1::int[]) AND company_id = $2 AND is_active = TRUE
+        AND ($3::int IS NULL OR plant_id = $3)
+      ORDER BY id FOR UPDATE`, [ids, companyId, plantId ?? null]
+  );
+  const missing = ids.length - rows.length;
+  if (missing > 0) {
+    throw { status: 404, message: ids.length === 1 ? 'Machine not found'
+      : `${missing} of the chosen machines ${missing === 1 ? 'is' : 'are'} no longer available. Reload the page and choose again.` };
+  }
+  return rows;
+}
+
+const words = names => names.length > 4 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more`
+  : names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0];
+
+/**
+ * The same part twice on one machine — its name, number and operation alike,
+ * whatever the case or spaces — is refused, naming the machines that have it.
+ * Picking many machines makes this easy to do by accident.
+ */
+async function refuseDuplicates(client, ids, part, companyId) {
+  const { rows } = await client.query(
+    `SELECT m.machine_serial_no FROM machines m
+      WHERE m.id = ANY($2::int[]) AND m.company_id = $1
+        AND EXISTS (SELECT 1 FROM components c
+                     WHERE c.machine_id = m.id AND c.company_id = $1
+                       AND lower(btrim(COALESCE(c.part_name, ''))) = lower(btrim(COALESCE($3::text, '')))
+                       AND lower(btrim(COALESCE(c.part_number, ''))) = lower(btrim(COALESCE($4::text, '')))
+                       AND lower(btrim(COALESCE(c.operation_number, ''))) = lower(btrim(COALESCE($5::text, ''))))
+      ORDER BY ${machineOrder('m.machine_serial_no')}`,
+    [companyId, ids, part.part_name, part.part_number, part.operation_number]
+  );
+  if (!rows.length) return;
+  const names = rows.map(r => r.machine_serial_no);
+  const what = [part.part_number, part.operation_number].filter(Boolean).join(' · ');
+  throw {
+    status: 409, code: 'COMPONENT_EXISTS',
+    message: `${words(names)} already ${names.length === 1 ? 'has' : 'have'} ${part.part_name}${what ? ` (${what})` : ''}`
+      + ` — edit ${names.length === 1 ? 'that one' : 'theirs'}, or leave ${names.length === 1 ? 'that machine' : 'those machines'} out.`
+  };
+}
+
+/** One row per machine, in one statement; the shared values are bound once. */
+async function insertComponents(client, machines, part, companyId) {
+  const params = [companyId, part.part_name, part.part_number, part.operation_number,
+    part.cycle_time, part.target, part.multiplication_factor];
+  const values = machines.map(m => {
+    params.push(m.plant_id, m.id);
+    return `($${params.length - 1}, $1, $${params.length}, $2, $3, $4, $5, $6, $7)`;
+  });
+  const { rows } = await client.query(
+    `INSERT INTO components
+       (plant_id, company_id, machine_id, part_name, part_number, operation_number, cycle_time, target, multiplication_factor)
+     VALUES ${values.join(', ')}
+     RETURNING *, EXTRACT(EPOCH FROM cycle_time) AS cycle_time_seconds`, params
+  );
+  return rows;
+}
+
+/** A machine that was running a job moves on to its new component, as adding one always did; the old occurrence is ended, never rewritten. */
+async function switchToNew(client, components, companyId) {
+  const ended = await client.query(
+    `UPDATE machine_current_job SET is_active = FALSE, ended_at = NOW(), setting_time_end = NOW()
+      WHERE machine_id = ANY($1::int[]) AND company_id = $2 AND is_active = TRUE
+      RETURNING machine_id`,
+    [components.map(c => c.machine_id), companyId]
+  );
+  const running = new Set(ended.rows.map(r => Number(r.machine_id)));
+  const next = components.filter(c => running.has(Number(c.machine_id)));
+  if (!next.length) return;
+  await client.query(
+    `INSERT INTO machine_current_job
+       (plant_id, company_id, machine_id, component_id, part_name, target_qty, started_at, cycle_time_seconds)
+     SELECT c.plant_id, c.company_id, c.machine_id, c.id, c.part_name, c.target, NOW(), EXTRACT(EPOCH FROM c.cycle_time)
+       FROM components c
+      WHERE c.id = ANY($1::int[]) AND c.company_id = $2
+      ORDER BY c.machine_id`,
+    [next.map(c => c.id), companyId]
+  );
+}
+
+const trimmed = v => (typeof v === 'string' ? v.trim() : v ?? null);
+
 exports.create = async (data, plant_id, company_id) => {
-  await ownedOrThrow(company_id, { machine_id: data.machine_id });
+  const { ids, many } = machineIdsOf(data);
+  const part = {
+    part_name: trimmed(data.part_name), part_number: trimmed(data.part_number),
+    operation_number: trimmed(data.operation_number), cycle_time: trimmed(data.cycle_time),
+    target: data.target, multiplication_factor: data.multiplication_factor || 1
+  };
+  if (!part.part_name) throw { status: 400, message: 'Part name is required' };
+  if (!part.part_number) throw { status: 400, message: 'Part number is required' };
+  await ownedOrThrow(company_id, { machine_ids: ids });
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    const machine = await lockMachine(client, data.machine_id, company_id, plant_id);
-    const { rows } = await client.query(
-      `INSERT INTO components
-         (plant_id, company_id, machine_id, part_name, part_number, operation_number, cycle_time, target, multiplication_factor)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING *, EXTRACT(EPOCH FROM cycle_time) AS cycle_time_seconds`,
-      [machine.plant_id, company_id, data.machine_id, data.part_name, data.part_number,
-       data.operation_number, data.cycle_time, data.target, data.multiplication_factor || 1]
-    );
-    await switchActive(client, rows[0], machine, company_id);
+    const machines = await lockMachines(client, ids, company_id, plant_id);
+    await refuseDuplicates(client, ids, part, company_id);
+    const made = await insertComponents(client, machines, part, company_id);
+    await switchToNew(client, made, company_id);
     await client.query('COMMIT');
-    return { status: 'success', data: rows[0] };
+    return { status: 'success', data: many ? made : made[0] };
   } catch (err) { await client.query('ROLLBACK').catch(() => {}); throw err; }
   finally { client.release(); }
 };
