@@ -48,12 +48,18 @@ describe('one answer, shared', () => {
     const gate = new Promise(r => { release = r; });
     const slow = async () => { n += 1; await gate; return { rows: [1, 2, 3] }; };
 
-    const all = Promise.all([1, 2, 3, 4, 5].map(() => cache.json('energy', 4, week, 30, slow)));
-    await new Promise(r => setImmediate(r));
-    release();
-    const texts = await all;
-    expect(n).toBe(1);
-    expect(new Set(texts).size).toBe(1);
+    const get = jest.spyOn(redis, 'get');
+    try {
+      const all = Promise.all([1, 2, 3, 4, 5].map(() => cache.json('energy', 4, week, 30, slow)));
+      await new Promise(r => setImmediate(r));
+      release();
+      const texts = await all;
+      expect(n).toBe(1);
+      expect(new Set(texts).size).toBe(1);
+      expect(get.mock.calls.filter(([key]) => key.startsWith('dash:energy:'))).toHaveLength(1);
+    } finally {
+      get.mockRestore();
+    }
   });
 
   test('an error is never kept: the next request works it out again', async () => {

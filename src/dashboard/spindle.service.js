@@ -43,7 +43,7 @@ exports.RANGES = RANGES;
 exports.machineSpindle = async (machineId, companyId, range = '1h', nowMs = Date.now()) => {
   const id = Number(machineId);
   if (!Number.isInteger(id) || id <= 0) throw httpError('machine_id must be a positive integer', 400);
-  const r = RANGES[range];
+  const r = Object.hasOwn(RANGES, range) && RANGES[range];
   if (!r) throw httpError(`range must be one of ${Object.keys(RANGES).join(', ')}`, 400);
 
   const { rows: m } = await db.query(
@@ -53,52 +53,58 @@ exports.machineSpindle = async (machineId, companyId, range = '1h', nowMs = Date
   const from = new Date(nowMs - r.ms);
   const to = new Date(nowMs);
 
-  const [points, summary, latest] = await Promise.all([
+  // Group the same bounded scan by chart bucket and across the whole window.
+  // The overall averages still use samples directly, including partial buckets.
+  const [history, latest] = await Promise.all([
     db.query(`
-      SELECT (EXTRACT(EPOCH FROM time_bucket($4::interval, received_at)) * 1000)::bigint AS t,
-             ROUND(AVG(spindle_load)::numeric, 1)::float AS load_avg,
-             MAX(spindle_load)::float                    AS load_max,
-             ROUND(AVG(spindle_speed))::int              AS rpm_avg,
-             MAX(spindle_speed)::int                     AS rpm_max,
-             ROUND(AVG(feed_rate))::int                  AS feed_avg,
-             MAX(feed_rate)::float                       AS feed_max,
-             COUNT(*)::int                               AS samples
-        FROM telemetry_raw
-       WHERE machine_id = $1 AND received_at >= $2 AND received_at < $3
-       GROUP BY 1
-       ORDER BY 1`, [id, from, to, r.bucket]),
-    db.query(`
-      SELECT COUNT(*)::int                                                          AS samples,
-             COUNT(*) FILTER (WHERE spindle_speed > 0)::int                         AS turning,
-             MIN(spindle_load) FILTER (WHERE spindle_speed > 0)::float              AS load_min,
-             ROUND((AVG(spindle_load) FILTER (WHERE spindle_speed > 0))::numeric, 1)::float AS load_avg,
-             MAX(spindle_load)::float                                               AS load_max,
-             COUNT(*) FILTER (WHERE spindle_speed > 0 AND spindle_load >= $4)::int  AS load_high,
-             COUNT(*) FILTER (WHERE spindle_speed > 0 AND spindle_load > $5)::int   AS load_over,
-             MIN(spindle_speed) FILTER (WHERE spindle_speed > 0)::int               AS rpm_min,
-             ROUND(AVG(spindle_speed) FILTER (WHERE spindle_speed > 0))::int        AS rpm_avg,
-             MAX(spindle_speed)::int                                                AS rpm_max,
-             COUNT(*) FILTER (WHERE feed_rate > 0)::int                             AS feeding,
-             MIN(feed_rate) FILTER (WHERE feed_rate > 0)::float                     AS feed_min,
-             ROUND(AVG(feed_rate) FILTER (WHERE feed_rate > 0))::int                AS feed_avg,
-             MAX(feed_rate)::float                                                  AS feed_max,
-             (EXTRACT(EPOCH FROM MIN(received_at)) * 1000)::bigint                  AS first_at,
-             (EXTRACT(EPOCH FROM MAX(received_at)) * 1000)::bigint                  AS last_at
-        FROM telemetry_raw
-       WHERE machine_id = $1 AND received_at >= $2 AND received_at < $3`,
-      [id, from, to, LOAD_HIGH, LOAD_OVERLOAD]),
+      WITH readings AS (
+        SELECT time_bucket($4::interval, received_at) AS bucket,
+               received_at, spindle_load, spindle_speed, feed_rate
+          FROM telemetry_raw
+         WHERE machine_id = $1 AND received_at >= $2 AND received_at < $3
+           AND (company_id = $7 OR company_id IS NULL)
+      )
+      SELECT (EXTRACT(EPOCH FROM bucket) * 1000)::bigint                      AS t,
+             COUNT(*)::int                                                     AS samples,
+             COUNT(*) FILTER (WHERE spindle_speed > 0)::int                    AS turning,
+             MIN(spindle_load) FILTER (WHERE spindle_speed > 0)::float          AS load_min,
+             ROUND((CASE WHEN GROUPING(bucket) = 0 THEN AVG(spindle_load)
+                         ELSE AVG(spindle_load) FILTER (WHERE spindle_speed > 0)
+                    END)::numeric, 1)::float                                    AS load_avg,
+             MAX(spindle_load)::float                                            AS load_max,
+             COUNT(*) FILTER (WHERE spindle_speed > 0 AND spindle_load >= $5)::int AS load_high,
+             COUNT(*) FILTER (WHERE spindle_speed > 0 AND spindle_load > $6)::int  AS load_over,
+             MIN(spindle_speed) FILTER (WHERE spindle_speed > 0)::int            AS rpm_min,
+             ROUND(CASE WHEN GROUPING(bucket) = 0 THEN AVG(spindle_speed)
+                        ELSE AVG(spindle_speed) FILTER (WHERE spindle_speed > 0)
+                   END)::int                                                   AS rpm_avg,
+             CASE WHEN GROUPING(bucket) = 0 THEN MAX(spindle_speed)::int
+                  ELSE MAX(spindle_speed)::float END                            AS rpm_max,
+             COUNT(*) FILTER (WHERE feed_rate > 0)::int                          AS feeding,
+             MIN(feed_rate) FILTER (WHERE feed_rate > 0)::float                  AS feed_min,
+             ROUND(CASE WHEN GROUPING(bucket) = 0 THEN AVG(feed_rate)
+                        ELSE AVG(feed_rate) FILTER (WHERE feed_rate > 0)
+                   END)::int                                                   AS feed_avg,
+             MAX(feed_rate)::float                                              AS feed_max,
+             (EXTRACT(EPOCH FROM MIN(received_at)) * 1000)::bigint                AS first_at,
+             (EXTRACT(EPOCH FROM MAX(received_at)) * 1000)::bigint                AS last_at
+        FROM readings
+       GROUP BY GROUPING SETS ((bucket), ())
+       ORDER BY bucket NULLS LAST`,
+      [id, from, to, r.bucket, LOAD_HIGH, LOAD_OVERLOAD, companyId]),
     db.query(`
       SELECT (EXTRACT(EPOCH FROM received_at) * 1000)::bigint AS at,
              spindle_load::float AS load, spindle_speed::int AS rpm,
              feed_rate::float AS feed, machine_status AS status
         FROM telemetry_raw
        WHERE machine_id = $1 AND received_at > $2 AND received_at <= $3
+         AND (company_id = $4 OR company_id IS NULL)
        ORDER BY received_at DESC
-       LIMIT 1`, [id, new Date(nowMs - LATEST_LOOKBACK_MS), to])
+       LIMIT 1`, [id, new Date(nowMs - LATEST_LOOKBACK_MS), to, companyId])
   ]);
 
   const rated = num(m[0].spindle_rpm) || null;
-  const s = summary.rows[0] || {};
+  const s = history.rows.find(row => row.t === null) || {};
   const turning = Number(s.turning) || 0;
   const l = latest.rows[0];
   const rpmMax = num(s.rpm_max);
@@ -111,7 +117,7 @@ exports.machineSpindle = async (machineId, companyId, range = '1h', nowMs = Date
       at: Number(l.at), load: num(l.load), rpm: num(l.rpm), feed: num(l.feed), status: l.status || null,
       stale: nowMs - Number(l.at) > STALE_MS
     } : null,
-    points: points.rows.map(p => ({
+    points: history.rows.filter(row => row.t !== null).map(p => ({
       t: Number(p.t),
       load_avg: num(p.load_avg), load_max: num(p.load_max),
       rpm_avg: num(p.rpm_avg), rpm_max: num(p.rpm_max),

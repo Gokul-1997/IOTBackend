@@ -119,14 +119,21 @@ function bucketSQL(grain, column) {
 // CAGG invalidations outside its policy window must never serve old totals.
 // Only affected device/calendar buckets fall back to compact validated facts;
 // all other history still uses materialized summaries.
-function counterSourceSQL(view) {
+function counterSourceSQL(view, start, end, registers = ['kwh_total']) {
   const grain=Object.keys(views).find(key=>views[key]===view);
   if(!grain)throw new TypeError('Invalid counter aggregate');
   const bucket=column=>bucketSQL(grain,column);
+  const registerList = registers.map(register => `'${register}'`).join(',');
+  // Advance a calendar bucket in plant time. Adding a month to a
+  // timestamptz at IST midnight can use the previous date in the session zone.
+  const dirtyEnd = `(date_trunc('${grain}',dirty.through_at AT TIME ZONE 'Asia/Kolkata')
+    + INTERVAL '1 ${grain}') AT TIME ZONE 'Asia/Kolkata'`;
   const dirty=alias=>`EXISTS(SELECT 1 FROM energy_refresh_queue dirty WHERE dirty.company_id=${alias}.company_id
     AND dirty.machine_id=${alias}.machine_id AND ${alias}.bucket>=${bucket('dirty.from_at')}
     AND ${alias}.bucket<=${bucket('dirty.through_at')})`;
-  return `(SELECT a.* FROM ${view} a WHERE NOT ${dirty('a')}
+  return `(SELECT a.* FROM ${view} a
+    WHERE a.company_id=$1 AND a.register IN (${registerList})
+      AND a.bucket>=${start} AND a.bucket<${end} AND NOT ${dirty('a')}
     UNION ALL SELECT ${bucket('f.observed_at')} AS bucket,f.company_id,f.machine_id,f.register,f.shift_id,
       SUM(f.delta)::double precision AS kwh,COUNT(f.delta) AS accepted_intervals,
       COUNT(*) FILTER(WHERE f.quality NOT IN ${good}) AS rejected_intervals,
@@ -137,7 +144,10 @@ function counterSourceSQL(view) {
     FROM energy_counter_intervals f JOIN energy_refresh_queue dirty
       ON dirty.company_id=f.company_id AND dirty.machine_id=f.machine_id
       AND f.observed_at>=${bucket('dirty.from_at')}
-      AND f.observed_at<${bucket('dirty.through_at')}+INTERVAL '1 ${grain}'
+      AND f.observed_at<(${dirtyEnd})
+    WHERE dirty.company_id=$1 AND f.register IN (${registerList})
+      AND f.observed_at>=${start} AND f.observed_at<${end}
+      AND dirty.machine_id IN (SELECT machine_id FROM selected)
     GROUP BY 1,f.company_id,f.machine_id,f.register,f.shift_id)`;
 }
 /** One bounded query for any number of requested periods (never per machine).
@@ -168,7 +178,7 @@ async function counters(opts, ranges, grain = 'day', coarsest = null) {
         (e.delta IS NOT NULL AND NOT e.allocated)::int AS unallocated_intervals,
         e.interval_start AS first_interval_start,e.observed_at AS last_observed_at,e.measured_seconds`
         : 'e.kwh,e.accepted_intervals,e.rejected_intervals,e.unallocated_kwh,e.unallocated_intervals,e.first_interval_start,e.last_observed_at,e.measured_seconds'}
-        FROM ${raw ? 'energy_counter_intervals' : counterSourceSQL(span.source)} e
+        FROM ${raw ? 'energy_counter_intervals' : counterSourceSQL(span.source, a, b)} e
         JOIN selected m ON m.machine_id=e.machine_id
         WHERE e.company_id=$1 AND e.register='kwh_total' AND ${point}>=${a} AND ${point}<${b}${shift}`);
     }
@@ -451,7 +461,7 @@ async function meterEnergy(opts) {
       (e.quality NOT IN ${good})::int AS rejected_intervals,
       (e.delta IS NOT NULL AND NOT e.allocated)::int AS unallocated_intervals,e.measured_seconds`
       : 'e.kwh,e.accepted_intervals,e.rejected_intervals,e.unallocated_intervals,e.measured_seconds'}
-      FROM ${raw ? 'energy_counter_intervals' : counterSourceSQL(span.source)} e JOIN selected m ON m.machine_id=e.machine_id
+      FROM ${raw ? 'energy_counter_intervals' : counterSourceSQL(span.source, lower, upper, REGISTERS)} e JOIN selected m ON m.machine_id=e.machine_id
       WHERE e.company_id=$1 AND e.machine_id=$2 AND e.register IN (${REGISTERS.map(r => `'${r}'`).join(',')})
         AND ${point}>=${lower} AND ${point}<${upper}`;
   });

@@ -80,9 +80,9 @@ exports.getFactoryDashboard = async (req) => {
      * DISTINCT ON walks every chunk. Measured against production: unbounded
      * had not finished after 227 seconds, bounded returns in ~20ms.
      *
-     * An hour is far more than the 60s freshness cut-off below, so it cannot
-     * change which machines count as fresh — it only stops the scan reading
-     * data that could never win the DISTINCT ON. Do not remove it.
+     * Filter by the same 60-second freshness limit before selecting the
+     * latest row. An older row cannot win for a fresh machine, and the
+     * dashboard counts a machine without a fresh row as offline.
      *
      * offline is derived rather than counted so the four states are mutually
      * exclusive and always sum to total. Counting it separately meant a
@@ -95,20 +95,17 @@ exports.getFactoryDashboard = async (req) => {
         FROM telemetry_raw t
         JOIN machines m ON m.id = t.machine_id
         WHERE m.company_id = $1 AND t.company_id = $1 AND m.is_active${plantSql('m.id')}
-          AND t.received_at > NOW() - INTERVAL '1 hour'
+          AND t.received_at > NOW() - INTERVAL '60 seconds'
           AND t.received_at <= NOW()
           ${machineId ? 'AND t.machine_id = $2' : ''}
         ORDER BY t.machine_id, t.received_at DESC
-      ),
-      fresh AS (
-        SELECT * FROM latest WHERE received_at > NOW() - INTERVAL '60 seconds'
       ),
       counted AS (
         SELECT
           COUNT(*) FILTER (WHERE alarm IS TRUE)::int AS breakdown,
           COUNT(*) FILTER (WHERE alarm IS NOT TRUE AND machine_status = 'RUNNING')::int AS running,
           COUNT(*) FILTER (WHERE alarm IS NOT TRUE AND machine_status = 'IDLE')::int    AS idle
-        FROM fresh
+        FROM latest
       )
       SELECT
         tot.total,

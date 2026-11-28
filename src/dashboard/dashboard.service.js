@@ -254,7 +254,7 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
   /*
    * The received_at bound is load-bearing. telemetry_raw is a Timescale
    * hypertable with ~180 chunks over months of data; with no time predicate
-   * the planner cannot prune chunks and this DISTINCT ON walks all of them.
+   * the planner cannot prune chunks even when an indexed lookup returns one row.
    * Measured against production, the same shape of query on the factory
    * dashboard had not finished after 227 seconds; bounded it returns in ~20ms.
    *
@@ -267,14 +267,18 @@ exports.dashboard = async (plant_id, company_id, pageOptions = null) => {
   const { rows: liveRows } = pageResult
     ? { rows: machines.map(m => ({ ...m, machine_id: m.id })) }
     : await db.query(`
-    SELECT DISTINCT ON (machine_id)
-      machine_id, machine_status, alarm, received_at
-    FROM telemetry_raw
-    WHERE machine_id = ANY($1)
-      AND company_id = $2
-      AND received_at > NOW() - INTERVAL '1 hour'
-      AND received_at <= NOW()
-    ORDER BY machine_id, received_at DESC
+    SELECT target.machine_id, latest.machine_status, latest.alarm, latest.received_at
+    FROM unnest($1::int[]) AS target(machine_id)
+    CROSS JOIN LATERAL (
+      SELECT machine_status, alarm, received_at
+      FROM telemetry_raw
+      WHERE machine_id = target.machine_id
+        AND company_id = $2
+        AND received_at > NOW() - INTERVAL '1 hour'
+        AND received_at <= NOW()
+      ORDER BY received_at DESC
+      LIMIT 1
+    ) latest
   `, [machineIds, company_id]);
 
   const liveMap = {};

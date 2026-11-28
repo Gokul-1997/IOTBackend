@@ -11,7 +11,7 @@ const NOW = Date.parse('2026-10-01T10:00:00+05:30');
 const machine = { id: 25, machine_serial_no: 'HMC - 7 - F', spindle_rpm: 10000 };
 
 function given({ m = [machine], points = [], summary = {}, latest = [] } = {}) {
-  mockDb.queueResponse({ rows: m }, { rows: points }, { rows: [summary] }, { rows: latest });
+  mockDb.queueResponse({ rows: m }, { rows: [...points, { ...summary, t: null }] }, { rows: latest });
 }
 
 beforeEach(() => resetDb());
@@ -20,6 +20,7 @@ describe('machineSpindle', () => {
   test('a bad id or range is a 400 before any query', async () => {
     await expect(svc.machineSpindle('abc', 4, '1h', NOW)).rejects.toMatchObject({ status: 400 });
     await expect(svc.machineSpindle(25, 4, '7d', NOW)).rejects.toMatchObject({ status: 400 });
+    await expect(svc.machineSpindle(25, 4, 'constructor', NOW)).rejects.toMatchObject({ status: 400 });
     expect(mockDb.calls()).toHaveLength(0);
   });
 
@@ -34,10 +35,14 @@ describe('machineSpindle', () => {
     given();
     const d = await svc.machineSpindle(25, 4, '4h', NOW);
     const trend = mockDb.calls().find(c => /time_bucket/.test(c.text));
-    expect(trend.params).toEqual([25, new Date(NOW - 4 * 3600e3), new Date(NOW), '3 minutes']);
+    expect(mockDb.calls()).toHaveLength(3);
+    expect(trend.params).toEqual([25, new Date(NOW - 4 * 3600e3), new Date(NOW), '3 minutes', 80, 100, 4]);
+    expect(trend.text.match(/FROM telemetry_raw/g)).toHaveLength(1);
+    expect(trend.text).toContain('GROUP BY GROUPING SETS ((bucket), ())');
+    expect(trend.text).toContain('(company_id = $7 OR company_id IS NULL)');
     const latest = mockDb.calls().find(c => /LIMIT 1/.test(c.text));
     // the latest reading is looked for within a bounded window too
-    expect(latest.params).toEqual([25, new Date(NOW - 24 * 3600e3), new Date(NOW)]);
+    expect(latest.params).toEqual([25, new Date(NOW - 24 * 3600e3), new Date(NOW), 4]);
     expect(d.range).toEqual({ key: '4h', from: NOW - 4 * 3600e3, to: NOW, bucket_seconds: 180 });
   });
 
@@ -47,7 +52,7 @@ describe('machineSpindle', () => {
                        feeding: 150, feed_min: 20, feed_avg: 900, feed_max: 30000 } });
     const d = await svc.machineSpindle(25, 4, '1h', NOW);
     const q = mockDb.calls().find(c => /FILTER \(WHERE spindle_speed > 0\)/.test(c.text));
-    expect(q.params.slice(3)).toEqual([80, 100]);
+    expect(q.params.slice(4, 6)).toEqual([80, 100]);
     expect(d.summary.load).toEqual({ min: 3, avg: 41.5, max: 118, high_pct: 15, overload_pct: 2 });
     expect(d.summary.rpm).toEqual({ min: 800, avg: 2400, max: 8000, max_of_rated_pct: 80 });
     expect(d.summary.feed).toEqual({ min: 20, avg: 900, max: 30000, feeding: 150 });

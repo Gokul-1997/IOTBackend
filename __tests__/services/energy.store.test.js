@@ -80,6 +80,19 @@ test('counter reads bind company/machine/search and enforce plant authorization 
   expect(sql).not.toMatch(/telemetry_raw|energy_observations/);
 });
 
+test('dirty monthly buckets read only the authorized range and use IST calendar boundaries', async () => {
+  const start = ms('2026-03-01T00:00:00+05:30');
+  const end = ms('2026-04-01T00:00:00+05:30');
+  await store.counters({ companyId: 4, machineId: 25 }, [{ start, end }], 'total');
+  const [sql, params] = db.query.mock.calls[0];
+  expect(sql).toContain('FROM energy_counter_monthly a');
+  expect(sql).toContain('f.observed_at>=$3::timestamptz AND f.observed_at<$4::timestamptz');
+  expect(sql).toContain('dirty.machine_id IN (SELECT machine_id FROM selected)');
+  expect(sql).toContain("date_trunc('month',dirty.through_at AT TIME ZONE 'Asia/Kolkata')");
+  expect(sql).toContain("+ INTERVAL '1 month') AT TIME ZONE 'Asia/Kolkata'");
+  expect(params.slice(0, 4)).toEqual([4, 25, new Date(start).toISOString(), new Date(end).toISOString()]);
+});
+
 test('machine detail reads the measured latest counter and keeps adjacent shift boundaries exclusive', async () => {
   answers.push([/energy:v2:latest-counter/, [{ total_energy: '3104' }]], [/energy:v2:counters/, [fact({ measured_seconds: 14400, kwh: 2 })]]);
   const result = await store.machineEnergy({ companyId: 4, machineId: 25, start: ist('08:00:00'), end: ist('20:00:00'), asOf: ist('12:00:00') });

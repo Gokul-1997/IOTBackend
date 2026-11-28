@@ -101,20 +101,18 @@ async function json(name, companyId, params, ttl, compute) {
   const key = `dash:${name}:${companyId}:${version ?? 'x'}:${fingerprint({ ...params, authorization_plant: cacheScope() })}`;
 
   if (inflight.has(key)) return inflight.get(key);
-  if (version !== null) {
-    try {
-      const hit = await within(redis.get(key), READ_TIMEOUT_MS);
-      if (hit) return hit;
-    } catch { /* worked out below */ }
-  }
-
-  if (inflight.has(key)) return inflight.get(key);
   const work = (async () => {
+    if (version !== null) {
+      try {
+        const hit = await within(redis.get(key), READ_TIMEOUT_MS);
+        if (hit) return hit;
+      } catch { /* worked out below */ }
+    }
     const started = Date.now();
     const text = JSON.stringify(await compute());
     const took = Date.now() - started;
     if (took >= SLOW_MS) console.warn(`[dashboard] ${name} took ${(took / 1000).toFixed(1)} s to work out (company ${companyId}, ${JSON.stringify(params)})`);
-    if (version !== null && text.length <= MAX_BYTES) {
+    if (version !== null && typeof text === 'string' && Buffer.byteLength(text) <= MAX_BYTES) {
       redis.set(key, text, 'EX', ttl).catch(() => {});
     }
     return text;

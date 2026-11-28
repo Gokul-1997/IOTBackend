@@ -3,8 +3,8 @@
  * time per company and a few more across all companies, so one company's
  * month-end exports cannot take every database connection and slow the live
  * screens of everyone else. The API holds DB_POOL_MAX (20) connections; with
- * at most 3 heavy requests per company and 8 in all, at least 12 stay free
- * for the dashboards whatever any one company does.
+ * admission defaults of 3 heavy requests per company and 8 across all
+ * companies limit pressure on the pool. A request may run multiple queries.
  *
  * Over the limit a request waits its turn — the person sees a slower
  * download, not an error. Waiting is first come, first served, except that a
@@ -14,6 +14,8 @@
  * Counted in this process: run one API instance, or lower the numbers per
  * instance (HEAVY_PER_COMPANY, HEAVY_OVERALL).
  */
+
+const { AsyncResource } = require('node:async_hooks');
 
 function createHeavyLimiter({
   perCompany = Number(process.env.HEAVY_PER_COMPANY || 3),
@@ -61,7 +63,8 @@ function createHeavyLimiter({
     if (queue.length >= maxQueue) {
       return res.status(429).json({ message: 'Many large reports are being prepared right now. Try again in a minute.', code: 'REPORTS_BUSY' });
     }
-    const entry = { key, start };
+    // Release can run in a different request's plant or read-only context.
+    const entry = { key, start: AsyncResource.bind(start) };
     entry.timer = setTimeout(() => {
       const i = queue.indexOf(entry);
       if (i >= 0) queue.splice(i, 1);

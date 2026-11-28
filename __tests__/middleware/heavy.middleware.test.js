@@ -4,6 +4,7 @@
  * database connection from the others.
  */
 const { EventEmitter } = require('events');
+const scope = require('../../src/lib/read-scope');
 const { createHeavyLimiter } = require('../../src/middleware/heavy.middleware');
 
 function reqRes(company_id, user_id = 1) {
@@ -49,6 +50,19 @@ test('the overall limit holds across companies; the line is first come, first se
   expect([c4.started, c5.started]).toEqual([false, false]);
   first[1].finish();
   expect([c4.started, c5.started]).toEqual([true, false]);
+});
+
+test('a queued report keeps its own plant scope when another request releases it', () => {
+  const limiter = createHeavyLimiter({ perCompany: 1, overall: 1 });
+  const first = reqRes(4);
+  const second = reqRes(4, 2);
+  const seen = jest.fn(() => scope.current());
+  scope.run({ company_id: 4, plant_id: 17 }, () => limiter(first.req, first.res, jest.fn()));
+  scope.run({ company_id: 4, plant_id: 23 }, () => limiter(second.req, second.res, seen));
+  expect(seen).not.toHaveBeenCalled();
+  scope.run({ company_id: 4, plant_id: 17 }, () => first.res.emit('finish'));
+  expect(seen.mock.results[0].value).toEqual({ companyId: 4, plantId: 23 });
+  second.res.emit('finish');
 });
 
 test('a finished or abandoned request frees its place once, however it ends', () => {
